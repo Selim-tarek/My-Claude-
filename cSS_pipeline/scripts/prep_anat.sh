@@ -26,7 +26,9 @@ if [ -z "$S" ] || [ -z "$T1" ]; then
   echo "usage: prep_anat.sh SUBJECT_ID --t1 T1.nii [--flair FLAIR.nii] [--recon]"; exit 1
 fi
 B=${CSS_BASE:-$HOME/css_project}; W=$B/work
-export SUBJECTS_DIR=${SUBJECTS_DIR:-$B/subjects}
+# always the project folder (FreeSurfer's setup script points SUBJECTS_DIR at its own install dir);
+# set CSS_SUBJECTS_DIR to use a different folder
+export SUBJECTS_DIR=${CSS_SUBJECTS_DIR:-$B/subjects}
 SWI=$B/data/${S}_swi.nii
 [ -f $SWI ] || { echo "ERROR: $SWI not found - run run_css.sh $S <swi> first"; exit 1; }
 mkdir -p $W $SUBJECTS_DIR

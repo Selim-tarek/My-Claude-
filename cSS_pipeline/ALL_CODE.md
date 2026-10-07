@@ -107,7 +107,9 @@ if [ -z "$S" ] || [ -z "$T1" ]; then
   echo "usage: prep_anat.sh SUBJECT_ID --t1 T1.nii [--flair FLAIR.nii] [--recon]"; exit 1
 fi
 B=${CSS_BASE:-$HOME/css_project}; W=$B/work
-export SUBJECTS_DIR=${SUBJECTS_DIR:-$B/subjects}
+# always the project folder (FreeSurfer's setup script points SUBJECTS_DIR at its own install dir);
+# set CSS_SUBJECTS_DIR to use a different folder
+export SUBJECTS_DIR=${CSS_SUBJECTS_DIR:-$B/subjects}
 SWI=$B/data/${S}_swi.nii
 [ -f $SWI ] || { echo "ERROR: $SWI not found - run run_css.sh $S <swi> first"; exit 1; }
 mkdir -p $W $SUBJECTS_DIR
@@ -1653,7 +1655,7 @@ for t in mri_convert mri_synthstrip mri_synthseg mri_coreg mri_vol2vol bbregiste
 printf '#!/bin/bash\necho "python $(basename $1) ${*:2}" >> $STUBLOG\n' > $T/bin/python; chmod +x $T/bin/python
 command -v zsh >/dev/null || { printf '#!/bin/bash\nexec bash "$@"\n' > $T/bin/zsh; chmod +x $T/bin/zsh; echo "(zsh not installed: using bash as a stand-in)"; }
 echo swi > $T/swi.nii; echo t1 > $T/t1.nii; echo fl > $T/fl.nii
-export PATH=$T/bin:$PATH STUBLOG=$T/log CSS_BASE=$T/base NOVIEW=1 SUBJECTS_DIR=$T/base/subjects
+export PATH=$T/bin:$PATH STUBLOG=$T/log CSS_BASE=$T/base NOVIEW=1 SUBJECTS_DIR=/somewhere/else  # must be ignored
 SH="zsh"
 fail() { echo "FAIL: $1"; cat $T/log; exit 1; }
 seen() { grep -q "$1" $T/log || fail "expected call: $1"; }
