@@ -14,70 +14,80 @@ Miniforge conda env `css` (python 3.11, nibabel, numpy, scipy, scikit-image, pan
 All scripts read the data root from `$CSS_BASE` (default `~/css_project`).
 
 ## Data layout ($CSS_BASE)
-raw/<ID>/SWI, raw/<ID>/T1   dcm2niix output (series-numbered NIfTI + JSON)
-data/<ID>_swi.nii           skull-stripped SWI used by everything downstream
-synthseg/<ID>_seg.nii.gz    SynthSeg --parc --robust on the SWI (1 mm grid)
-work/<ID>_seg_swispace.nii.gz  labels resampled to SWI grid, masked to SWI coverage
+raw/<ID>/SWI, raw/<ID>/T1, raw/<ID>/FLAIR   dcm2niix output (series-numbered NIfTI + JSON)
+data/<ID>_swi.nii           skull-stripped SWI used by everything downstream (never the minIP)
+data/<ID>_t1.nii.gz, data/<ID>_flair.nii.gz   imported T1 / FLAIR (prep_anat.sh)
+synthseg/<ID>_seg.nii.gz    SynthSeg --parc --robust on the SWI (fallback when no T1)
+work/<ID>_t1seg_swispace.nii.gz   T1 labels (SynthSeg or recon-all aparc+aseg) on the SWI grid
+work/<ID>_a2009s_swispace.nii.gz  Destrieux labels on the SWI grid (recon-all only) -> sulcal scoring
+work/<ID>_flair_swispace.nii.gz   FLAIR on the SWI grid
+work/<ID>_swi2t1.lta, <ID>_flair2swi.lta   registrations
+work/<ID>_seg_swispace.nii.gz  labels used by detect (T1-derived if present, else SWI SynthSeg)
 work/<ID>_dark.nii.gz       dark-voxel map used for region growing at scoring
+work/<ID>_ich.nii.gz        optional reader-drawn lobar ICH; work/<ID>_ich_used.nii.gz = mask used
 review/<ID>_candidates.{csv,nii.gz}  ranked candidates (cand_id = rank)
-review/<ID>_calls.csv       reader decisions from review_css.py
+review/<ID>_calls.csv       reader decisions + candidate fingerprint (vox_i/j/k, volume)
 review/css_scores.csv       one row per subject
 subjects/<ID>/              FreeSurfer recon-all (SUBJECTS_DIR)
+logs/<ID>_run.log           run_all.sh output
 **Never commit patient data. IDs are study codes (P006…), never names/MRNs.**
 
 ## Pipeline
-run_css.sh ID swi.nii → SynthStrip (CSF kept) → SynthSeg → align_seg.py → detect_css.py → freeview
-review_css.py ID → reader calls → mark_css.py → score_css.py
+run_css.sh ID swi.nii [--t1 T1] [--flair FLAIR] [--recon] → SynthStrip (CSF kept) →
+  prep_anat.sh (T1 SynthSeg or recon-all + bbregister, FLAIR coreg) or SynthSeg on SWI →
+  align_seg.py → detect_css.py → freeview
+review_css.py ID (all candidates) → reader calls → mark_css.py → score_css.py
 Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_report.py on real calls.
 
-## detect_css.py (v3.2) — key logic
-- zone = (cortex dilated 2 in-plane | 2 mm outer edge) minus 3 mm 3-D rim (skull-strip edge artifact)
-- darkness z = (I − local cortex mean, Gaussian σ 10 mm) / global robust SD (MAD), after 99.5 pct clip
-  (v3.2: LOCAL reference — global reference flagged normal iron-rich motor cortex bilaterally)
-- per-slice Sato ridge (σ 1–3 vox, black ridges); strong: z<−2.5 & ridge>85th pct; weak: z<−2.0 & >80th
-- hysteresis: weak components kept only if they contain a strong voxel; labelled per hemisphere
-- filters: ≥25 mm³ (regionprops with spacing already returns mm³ — earlier versions double-scaled),
-  ≥2 slices, elongation ≥2.5
-- score = darkness × (0.25+surface_contact) × log1p(vol); ×0.5 artifact zone / midline <5 mm /
-  long structure >40 mm in z; ×0.6 vein_like (cortex_frac<0.35)
-- recorded only: cortex_dist_mm, branch_per10mm, surface_gradient
-- CSV column names are consumed by export_review.py and the Excel workbook — keep them stable.
+## detect_css.py (v4) — key logic (full description: PIPELINE.md §7)
+- pial surface: signed distance to labelled tissue (− in tissue, + in CSF), normals from its gradient
+- zone = pial band (−3.5..+4 mm) minus WM, deep nuclei and a 3 mm skull-strip rim
+- darkness z = (I − local cortex mean, σ 10 mm, 2nd pass excludes cortex z<−2) / cortical MAD
+- per-slice Sato ridge; strong z<−2.5 & ridge>85th pct; weak z<−2.0 & >80th; hysteresis per hemisphere
+- filters: ≥25 mm³, ≥2 slices, elongation ≥2.0 (tram-track ≈2.4)
+- definition features: pial_dist_mm, bank_frac, tube_ratio (3-D Hessian), surface_alignment,
+  tram_frac, vein_tree_mm, mirror_dark_frac, ich_dist_mm/near_ich_suggest, infratentorial,
+  flair_csf_z/flair_bright
+- score = score_v4 (untrained definition rule) unless CSS_RANK=v3; score_v3 always recorded
+- CSV columns up to long_structure are consumed by export_review.py and the workbook — keep stable;
+  new columns are appended after them.
+
+## score_css.py (v4)
+- Destrieux available: foci → sulci (≤4 mm, ≥15 % of voxels); sulci adjacent if touching or
+  bordering a common gyrus; per hemisphere 0 / 1 (≤3 adjacent sulci) / 2; STRIVE-2 by sulci
+- otherwise Euclidean approximation (3 mm foci, 10 mm clusters)
+- infratentorial and reader near-ICH excluded from 0–4 but reported; n_unreviewed reported
 
 ## Validation status (honest)
-- Synthetic (UCSF CMB_labeler test scans P001–P005: 3T GE, skull-stripped 2 mm slabs, radiation-induced
-  microbleeds, presumed cSS-negative): strong lesions ~92–100 %, medium ~83 %, faint ~46–63 % found.
-  Synthetic lesions are drawn on the cortical boundary, so some features are partly circular there.
-- Real case P006 (Mayo, 1.2 mm SWI, expert score R2+L1=3): cSS present in top 20 (first at rank 3);
-  pipeline+reader score 4 (R2 ✓, L2 vs 1). Left discrepancy = two accepted foci (inferior parietal,
-  supramarginal) 36 mm apart → Euclidean 10 mm adjacency rule calls them non-adjacent.
-- feature_report on P006 (17 calls: 7 cSS, 5 vein, 4 normal, 1 artifact): ranking score AUC 0.53;
-  darkness 0.37; cortex_frac 0.43; surface_gradient 0.24 (opposite to hypothesis); n_slices 0.73.
-  → current features do NOT separate cSS from veins on real data. n=1: do not re-tune weights yet.
-- Reader was not blinded to the expert score for P006.
+- v3 results (below) are unchanged history. v4 has NOT yet been run on real patients.
+- Phantoms: v4 phantom (tram-track/convexity/single-bank cSS vs tubular sulcal and cortical
+  surface veins, ICH, Destrieux labels): 6/6 found, every definition feature separates cSS from
+  veins, ICH Dice 0.86, sulcal score 3/4 as constructed. v3 phantom: 8/8 synthetic lesions; its
+  "veins" are flat planes in sulcal banks (cSS-shaped), so its ranking AUC is not meaningful for v4.
+- Synthetic (UCSF CMB_labeler test scans P001–P005, v3): strong ~92–100 %, medium ~83 %, faint ~46–63 %.
+- Real case P006 (Mayo, 1.2 mm SWI, expert R2+L1=3), v3: pipeline+reader 4 (L2 vs 1 from the
+  Euclidean adjacency rule). feature_report (v3, 17 calls): score AUC 0.53, darkness 0.37 (veins
+  darker) → v4 damps darkness (√). Reader was not blinded for P006.
 
 ## Known issues / decisions
-- SynthSeg-on-SWI cortex is too coarse for vein-vs-cSS geometry → move anatomy to T1/FreeSurfer.
-- Scoring adjacency is Euclidean (3 mm merge, 10 mm adjacency) — approximation of "adjacent sulci".
-- Near-ICH cSS is excluded from 0–4 (reader flag `--ich`) but count/volume are reported.
-- Medial cSS is down-ranked by the midline penalty (known trade-off).
-- QSM/SEPIA not used (site decision). Phase images exist but are not used.
+- SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
+- v4 ranking weights are hand-set from the definition, not trained; review all candidates.
+- Medial cSS is mildly down-ranked by the midline factor (0.7).
+- QSM/SEPIA not used (site decision). Phase not used (cannot separate hemosiderin from deoxy-Hb).
+- minIP series must not be used as input; the reviewer computes its own minIP slab for reading.
 - Workbook (tools/build_workbook.py) builds the Excel validation workbook; recalculated with LibreOffice.
 
-## Next steps (v4 — needs recon-all)
-1. Register SWI→T1: `bbregister --s ID --mov data/ID_swi.nii --reg work/ID_swi2t1.lta --t2 --init-coreg`;
-   QC overlay in freeview.
-2. Bring candidates to T1 (`mri_vol2vol --nearest`), compute per candidate:
-   signed distance to pial surface (veins in CSF above pial; cSS on it), mirror check
-   (contralateral homologous darkness via surface registration or midsagittal flip), vein-network
-   connectivity to the superior sagittal sinus, thickness variation along skeleton.
-3. Sulcal scoring: assign foci to Destrieux (aparc.a2009s) sulcal labels; two sulci adjacent if they
-   border the same gyrus on the pial mesh; replace Euclidean grouping in score_css.py.
-4. Re-run P006 (target: left = 1, total 3) and feature_report; then learned classifier
-   (e.g. logistic regression on features + reader calls) after ~15 reviewed cases.
+## Next steps
+1. Re-run P006 with --t1 --recon (back up review/P006_* first), blinded re-review; target L1 R2 = 3.
+2. feature_report after each case; keep features with consistent AUC ≥0.75 / ≤0.25.
+3. ~15 cases: logistic regression on the definition features, leave-one-patient-out CV.
+4. Second blinded reader (κ), cSS-negative controls for false-positive burden.
 
 ## How to test
-`bash tests/run_tests.sh` — phantom brain (radial sulci, fissure, veins), runs every script end to end,
-fails if synthetic sensitivity < 4/8. No FreeSurfer or patient data needed.
+`bash tests/run_tests.sh` — v3 phantom (radial sulci, fissure, veins) end to end, fails if synthetic
+sensitivity < 4/8; v4 phantom (check_v4.py: sensitivity, score_v4 AUC ≥0.8, ICH Dice, sulcal 3/4).
+`bash tests/test_shell.sh` — run_css.sh / prep_anat.sh / run_all.sh flow with stubbed FreeSurfer.
+No FreeSurfer or patient data needed.
 
 ## Conventions
 - Python 3.11, numpy/scipy/nibabel only (+matplotlib for the reviewer); no network calls.

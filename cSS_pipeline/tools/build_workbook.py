@@ -43,8 +43,8 @@ ws["A2"] = "Use this workbook to log every real case, record your review, and me
 ws["A2"].font = f_note
 rows = [
  ("HOW TO USE", None),
- ("1. Prepare the scan", "Need ONE SWI series per patient (magnitude / SWI image or minIP - NOT the phase map). DICOM: convert with dcm2niix (see Commands). Use a code like P006 - never a name or MRN."),
- ("2. Run the pipeline", "Terminal:  run_css.sh P006 /path/to/swi.nii   (segments, detects, ranks candidates, opens freeview)."),
+ ("1. Prepare the scan", "Need the SWI series (processed SWI or magnitude - NOT the minIP and NOT the phase map), plus the 3-D T1 and FLAIR if available (see PIPELINE.md). DICOM: convert with dcm2niix (see Commands). Use a code like P006 - never a name or MRN."),
+ ("2. Run the pipeline", "Terminal:  run_css.sh P006 /path/to/swi.nii --t1 /path/to/t1.nii --flair /path/to/flair.nii [--recon]   (anatomy, detects, ranks candidates, opens freeview)."),
  ("3. Export candidates", "Terminal:  python ~/css_project/scripts/export_review.py P006 40 | pbcopy   then paste into 'Candidate Review' at column A of the next empty row."),
  ("4. Review in freeview", "Jump to each candidate (vox_i vox_j vox_k). In 'Candidate Review' choose a Reader call: cSS / Vein / Artifact / Near ICH / Unsure. Use 'Near ICH' for siderosis connected to a lobar haemorrhage - it is reported but NOT scored (standard convention). IDs build automatically."),
  ("5. Score", "Copy the command from 'Case Log' column V into Terminal. Type the printed score (0-4) and foci into Case Log columns I and J. Mark column W if the scan shows a lobar ICH."),
@@ -259,16 +259,16 @@ hdr(cm, 3, ["Step", "What it does", "Command (replace P006 and the paths)"], [8,
 cmds = [
  ("0", "Open Terminal. Prompt must start with (css).", "conda activate css"),
  ("1a", "DICOM -> NIfTI (any MRI). Lists all series.", "mkdir -p ~/css_project/nifti/P006 && dcm2niix -z n -f \"%s_%d\" -o ~/css_project/nifti/P006 /path/to/dicom_folder && ls ~/css_project/nifti/P006"),
- ("1b", "Choose the SWI MAGNITUDE / SWI / minIP .nii. Skip files ending _ph (phase), T1, FLAIR, DWI.", "ls ~/css_project/nifti/P006"),
+ ("1b", "Choose the SWI (processed SWI or magnitude) .nii - NOT the minIP, NOT phase (_ph). Also note the 3-D T1 and FLAIR files.", "ls ~/css_project/nifti/P006"),
  ("1c", "Check size/orientation (needs full axial brain slab, ideally <=2 mm slices).", "mri_info ~/css_project/nifti/P006/YOURFILE.nii | head -12"),
- ("2", "RUN: import, SynthSeg, align, detect, rank, open freeview.", "run_css.sh P006 ~/css_project/nifti/P006/YOURFILE.nii"),
+ ("2", "RUN: import, T1/FLAIR anatomy, align, detect, rank, open freeview (add --recon for sulcal scoring).", "run_css.sh P006 ~/css_project/nifti/P006/SWI.nii --t1 ~/css_project/nifti/P006/T1.nii --flair ~/css_project/nifti/P006/FLAIR.nii"),
  ("3", "Export top-40 candidates to the clipboard, then paste into 'Candidate Review' (column A, next empty row).", "python ~/css_project/scripts/export_review.py P006 40 | pbcopy"),
  ("4", "Open the scan again later (candidates in colour).", "freeview -v ~/css_project/data/P006_swi.nii ~/css_project/review/P006_candidates.nii.gz:colormap=lut:opacity=0.6 &"),
  ("5", "Score after review (copy the ready-made line from Case Log column V). --ich lists siderosis connected to a lobar ICH (reported, not scored).", "python ~/css_project/scripts/mark_css.py P006 2,5,9 --ich 7      # or:  ... P006 none"),
  ("6", "Open the all-patients score table.", "open ~/css_project/review/css_scores.csv"),
  ("7", "Back up scripts + results (change the destination).", "cp -R ~/css_project/scripts ~/css_project/review ~/Documents/css_backup/"),
  ("opt", "Higher sensitivity mode for suspected FAINT cSS (more candidates).", "python ~/css_project/scripts/detect_css.py P006 -2.0 85 3"),
- ("opt", "Batch: run several patients (edit the list).", "for s in P006 P007 P008; do run_css.sh $s ~/css_project/nifti/$s/swi.nii; done"),
+ ("opt", "Batch: run several patients (edit the list).", "run_all.sh P006 P007 P008    (each needs data/<ID>_swi.nii; logs in ~/css_project/logs)"),
 ]
 for i, (a, b, c) in enumerate(cmds, 4):
     cm.cell(row=i, column=1, value=a).font = f_bold

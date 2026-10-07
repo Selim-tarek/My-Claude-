@@ -276,7 +276,9 @@ for p in regionprops(lab, spacing=vox):
     if elong < MIN_ELONG: continue
     seg_nb = seg[pad][ndi.binary_dilation(mm, iterations=2)]
     nb = seg_nb[seg_nb >= 1000]
-    infra = bool(np.isin(seg_nb, INFRA).mean() > 0.3)
+    # infratentorial only when clearly cerebellar/brainstem with little cerebral cortex nearby, so
+    # occipital / inferior temporal cSS next to the tentorium is not dropped from the 0-4 score
+    infra = bool(np.isin(seg_nb, INFRA).mean() > 0.5 and nb.size < 0.2 * seg_nb.size)
     if nb.size == 0 and not infra: continue
     # hemisphere = majority of the candidate's own voxels in the hemisphere map (v4 fix: v3 counted
     # own L/R labels, but cSS lies in sulcal CSF where both counts are 0, so medial candidates
