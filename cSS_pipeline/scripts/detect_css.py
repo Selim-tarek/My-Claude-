@@ -13,7 +13,7 @@ Each criterion is measured per candidate:
   curvilinear sheet, not a tube   tube_ratio (3-D Hessian)       low (plate)    high (tube)
   follows the gyral contour       surface_alignment              high (~1)      lower
   tram-track (both banks)         tram_frac                      >0             ~0
-  not part of the venous tree     vein_tree_mm                   short          long network
+  not part of the venous tree     vein_tree_mm (recorded only)   short          long network
   asymmetric                      mirror_dark_frac               low            high (normal veins)
   remote from ICH                 ich_dist_mm, near_ich_suggest  far            <=5 mm
   supratentorial                  infratentorial                 0              1 (classical SS)
@@ -319,7 +319,9 @@ for p in regionprops(lab, spacing=vox):
         if ring.sum() >= 5: fz = float(np.median((FL[pad][ring] - f_mu) / f_sd))
     artz      = any(a in region for a in ARTIFACT_ZONES)
     midz      = bool(np.median(dmid[pad][mm]) < 5.0)
-    vein_like = bool((pdist > 0.3 and (np.isnan(tub) or tub > 0.4)) or vtree > 60.0)  # off-surface tube / long tree
+    # off-surface tube. vein_tree_mm is recorded only: on real SWI (P006) the dark tubular network
+    # along the cortex merges into one brain-wide component (255 mm for most candidates)
+    vein_like = bool(pdist > 0.3 and (np.isnan(tub) or tub > 0.4))
     longs     = bool(n_sl * vox[2] > 40.0)    # > 40 mm top-to-bottom (sinus / large veins)
     # v3 score (kept for comparison)
     s3_ = depth * (0.25 + contact) * np.log1p(vol)
@@ -331,7 +333,7 @@ for p in regionprops(lab, spacing=vox):
     # sqrt: darkness is damped - on real data (P006) veins were DARKER than cSS (AUC 0.37)
     s4 = np.sqrt(max(depth, 0.0)) * (0.25 + on_surf) * (0.25 + sheet) * (0.5 + (aln if np.isfinite(aln) else 0.5)) \
          * (1.0 + (tram if np.isfinite(tram) else 0.0))
-    for flag, f in ((artz, 0.5), (midz, 0.7), (vtree > 60.0, 0.6), (mdark > 0.6, 0.8),
+    for flag, f in ((artz, 0.5), (midz, 0.7), (mdark > 0.6, 0.8),
                     (longs, 0.5), (infra, 0.3)):
         if flag: s4 *= f
     c0 = pts.mean(0)

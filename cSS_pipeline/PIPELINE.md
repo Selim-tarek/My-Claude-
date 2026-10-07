@@ -19,7 +19,7 @@ scale, Radiopaedia):
 | **Curvilinear**, following gyral contours | `tube_ratio`: 3-D Hessian shape, 0 = flat sheet, 1 = tube | < 0.4 (sheet) | > 0.5 (tube) |
 | Follows the gyrus | `surface_alignment`: the sheet lies parallel to the cortex | ≈ 1 | lower |
 | **Tram-track**: both banks of a sulcus | `tram_frac`: walks across the sulcus and tests the opposite bank, with brighter CSF between them | > 0 | ≈ 0 (one central line) |
-| Not part of the venous tree | `vein_tree_mm`: extent of the connected dark-tube network | short | long, branching |
+| Not part of the venous tree | `vein_tree_mm`: extent of the connected dark-tube network (**recorded only**: on real SWI the network merges brain-wide) | short | long, branching |
 | Asymmetric | `mirror_dark_frac`: darkness at the mirror point in the other hemisphere | low | high (normal veins are paired) |
 | **Remote from lobar ICH** | `ich_dist_mm`, `near_ich_suggest` (≤ 5 mm) | far | near → reader presses **i** |
 | **Supratentorial** | `infratentorial` | 0 | 1 → classical superficial siderosis, reported separately |
@@ -280,8 +280,9 @@ Enter the result in the workbook (Case Log). **Review before you look at the exp
    - FLAIR: median robust z of CSF within 3 mm.
 6. **Ranking score (v4, untrained).**
    - √darkness × (0.25 + on-surface) × (0.25 + sheetness) × (0.5 + alignment) × (1 + tram).
-   - Multiplied by 0.5 for an artifact zone or a long structure, 0.7 for midline, 0.6 for a
-     venous tree > 60 mm, 0.8 for mirror > 0.6, and 0.3 for infratentorial.
+   - Multiplied by 0.5 for an artifact zone or a long structure, 0.7 for midline, 0.8 for
+     mirror > 0.6, and 0.3 for infratentorial. (`vein_tree_mm` is recorded only: on P006 the
+     dark-tube network merged brain-wide, 255 mm for most candidates.)
    - Darkness is square-rooted because veins were darker than cSS on P006.
 7. **Scoring.**
    - Each accepted focus is assigned to Destrieux sulcal labels within 4 mm (≥ 15 % of voxels).

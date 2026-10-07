@@ -46,7 +46,7 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
 - per-slice Sato ridge; strong z<−2.5 & ridge>85th pct; weak z<−2.0 & >80th; hysteresis per hemisphere
 - filters: ≥25 mm³, ≥2 slices, elongation ≥2.0 (tram-track ≈2.4)
 - definition features: pial_dist_mm, bank_frac, tube_ratio (3-D Hessian), surface_alignment,
-  tram_frac, vein_tree_mm, mirror_dark_frac, ich_dist_mm/near_ich_suggest, infratentorial,
+  tram_frac, vein_tree_mm (recorded only: merges brain-wide on real SWI), mirror_dark_frac, ich_dist_mm/near_ich_suggest, infratentorial,
   flair_csf_z/flair_bright
 - score = score_v4 (untrained definition rule) unless CSS_RANK=v3; score_v3 always recorded
 - CSV columns up to long_structure are consumed by export_review.py and the workbook — keep stable;
@@ -59,7 +59,9 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
 - infratentorial and reader near-ICH excluded from 0–4 but reported; n_unreviewed reported
 
 ## Validation status (honest)
-- v3 results (below) are unchanged history. v4 has NOT yet been run on real patients.
+- v4 first real run: P006 with T1 SynthSeg (no recon-all yet): 71 candidates; top ranks in R inferior
+  parietal and L supramarginal (the areas of the v3-accepted cSS); not yet reviewed. vein_tree_mm
+  was 255 mm for most candidates (network merges brain-wide) -> made recorded-only.
 - Phantoms: v4 phantom (tram-track/convexity/single-bank cSS vs tubular sulcal and cortical
   surface veins, ICH, Destrieux labels): 6/6 found, every definition feature separates cSS from
   veins, ICH Dice 0.86, sulcal score 3/4 as constructed. v3 phantom: 8/8 synthetic lesions; its
