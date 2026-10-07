@@ -24,7 +24,9 @@ def auc(x, y):
     if not len(x) or not len(y): return float("nan")
     return float((x[:, None] > y[None, :]).mean() + 0.5 * (x[:, None] == y[None, :]).mean())
 feats = ["darkness_z", "volume_mm3", "n_slices", "elongation", "surface_contact", "cortex_frac",
-         "cortex_dist_mm", "branch_per10mm", "surface_gradient", "score"]
+         "cortex_dist_mm", "branch_per10mm", "surface_gradient",
+         "pial_dist_mm", "bank_frac", "tube_ratio", "surface_alignment", "tram_frac", "vein_tree_mm",
+         "mirror_dark_frac", "flair_csf_z", "score_v3", "score_v4", "score"]
 print(f"{'feature':18s} {'cSS':>8s} {'Vein':>8s} {'Normal':>8s} {'Artifact':>9s}   AUC cSS vs rest")
 for f in feats:
     if f not in D: continue

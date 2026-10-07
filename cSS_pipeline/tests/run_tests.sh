@@ -1,6 +1,7 @@
 #!/bin/bash
 # Self-test with a synthetic phantom brain - no patient data, no FreeSurfer needed.
 # usage: bash tests/run_tests.sh      (from the package root, inside the 'css' conda env)
+# Shell flow of run_css.sh / prep_anat.sh with stubbed FreeSurfer: bash tests/test_shell.sh
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d); export CSS_BASE=$T FREESURFER_HOME=$T/fs CSS_REVIEW_TEST=1
@@ -36,4 +37,11 @@ PYEOF
 python $S/detect_css.py PH1S > /dev/null
 echo "== feature report";      python $S/feature_report.py | head -3
 echo "== stress test (small)"; python $S/stress_test.py --hosts PH1,PH2 --depths 0.6 --seeds 1 --tag test | grep -A2 SUMMARY
+echo "== v4 phantom: tram-track / convexity cSS vs tubular & surface veins, ICH, sulcal scoring"
+python $ROOT/tests/phantom_v4.py PH3 1; python $S/align_seg.py PH3 > /dev/null
+python $S/detect_css.py PH3 | head -1
+python $ROOT/tests/check_v4.py PH3 | tail -3
+python $S/score_css.py PH3 --truth > $T/score_v4.log
+grep -q "3/4" $T/score_v4.log && grep -q "sulcal (Destrieux)" $T/score_v4.log || { cat $T/score_v4.log; echo "FAIL: sulcal score on PH3 should be 3/4 (L1 + R2)"; exit 1; }
+grep -A3 "cSS multifocality" $T/score_v4.log
 echo; echo "ALL TESTS PASSED  (temp dir $T)"

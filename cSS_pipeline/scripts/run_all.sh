@@ -8,7 +8,7 @@ B=${CSS_BASE:-$HOME/css_project}
 mkdir -p $B/logs
 for s in "$@"; do
   echo "======== $s"
-  if NOVIEW=1 $B/scripts/run_css.sh $s > $B/logs/${s}_run.log 2>&1; then
+  if NOVIEW=1 zsh $B/scripts/run_css.sh $s > $B/logs/${s}_run.log 2>&1; then
     grep -m1 "raw components" $B/logs/${s}_run.log
   else
     echo "FAILED - see $B/logs/${s}_run.log"; tail -5 $B/logs/${s}_run.log

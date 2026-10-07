@@ -63,7 +63,9 @@ if feats:
     print("\nFeature check: does it separate synthetic cSS from the scans' real veins/artifacts?")
     print("(AUC 0.5 = useless; >0.7 or <0.3 = useful; <0.5 means lower values indicate cSS)")
     for f in ["darkness_z", "volume_mm3", "cortex_frac", "cortex_dist_mm", "branch_per10mm",
-              "surface_gradient", "surface_contact", "elongation", "score"]:
+              "surface_gradient", "surface_contact", "elongation", "pial_dist_mm", "bank_frac",
+              "tube_ratio", "surface_alignment", "tram_frac", "vein_tree_mm", "mirror_dark_frac",
+              "score_v3", "score_v4", "score"]:
         if f in F.columns:
             L, N = F[F.is_lesion == 1][f], F[F.is_lesion == 0][f]
             print(f"  {f:18s} cSS median {L.median():7.2f} | others median {N.median():7.2f} | AUC {auc(L, N):.2f}")

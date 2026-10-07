@@ -9,6 +9,11 @@ Keys (or click the buttons):
   i = near ICH         u = unsure    b = back one            [ / ] = move slice down/up
   q = finish and score
 Decisions are saved after every key press, so you can quit and resume later.
+Left column: whole slice (top) and an 8 mm minIP slab of the zoom window (bottom) computed from the
+SWI itself - veins become continuous branching tubes there, cSS stays a band along the cortex.
+(Do not feed the scanner minIP series into the pipeline; this panel is only for reading.)
+Title: the v4 definition features - on-surface distance, plate/tube shape, tram-track, vein tree,
+nearby ICH, FLAIR - as a reading aid; the call is always yours.
 At the end, accepted candidates are scored automatically (score_css.py)."""
 import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 import sys, os, subprocess, numpy as np, nibabel as nib, pandas as pd
@@ -45,14 +50,18 @@ KEYS = {"y": "cSS", "v": "Vein", "o": "Normal", "a": "Artifact", "i": "Near ICH"
 COL = {"cSS": "#2e7d32", "Vein": "#1565c0", "Normal": "#6d6d6d", "Artifact": "#ef6c00",
        "Near ICH": "#8e24aa", "Unsure": "#c9a400"}
 HW = int(round(30 / vox[0]))          # 60 mm zoom window
+SLAB = max(1, int(round(4 / vox[2]))) # minIP slab half-thickness (~8 mm total)
+def num(v):
+    try: return float(v)
+    except (TypeError, ValueError): return float("nan")
 
 class Reviewer:
     def __init__(self):
         self.pos = next((n for n, c in enumerate(ids) if c not in calls), 0)
         self.shift = 0
         self.fig = plt.figure(figsize=(14, 8.2))
-        gs = self.fig.add_gridspec(2, 4, left=0.02, right=0.98, top=0.88, bottom=0.14, wspace=0.05, hspace=0.12)
-        self.ov = self.fig.add_subplot(gs[:, 0])
+        gs = self.fig.add_gridspec(2, 4, left=0.02, right=0.98, top=0.85, bottom=0.14, wspace=0.05, hspace=0.12)
+        self.ov = self.fig.add_subplot(gs[0, 0]); self.mip = self.fig.add_subplot(gs[1, 0])
         self.ax = [[self.fig.add_subplot(gs[r, c + 1]) for c in range(3)] for r in range(2)]
         self.btns = []
         labels = [("cSS (y)", "y"), ("Vein (v)", "v"), ("Normal (o)", "o"), ("Artifact (a)", "a"),
@@ -84,6 +93,13 @@ class Reviewer:
         self.ov.add_patch(Rectangle((i0, j0), i1 - i0, j1 - j0, fill=False, ec="yellow", lw=1.5))
         self.ov.set_title("whole slice (yellow = zoom)", fontsize=9); self.ov.axis("off")
         self.ov.text(2, I.shape[1] - 6, "L", color="yellow", fontsize=11); self.ov.text(I.shape[0] - 12, I.shape[1] - 6, "R", color="yellow", fontsize=11)
+        # minIP slab (8 mm) of the zoom window, suspect outlined on the centre slice
+        k0, k1 = max(kc - SLAB, 0), min(kc + SLAB + 1, I.shape[2])
+        slab = np.where(I[i0:i1, j0:j1, k0:k1] > 0, I[i0:i1, j0:j1, k0:k1], hi).min(axis=2)
+        self.mip.clear(); self.mip.imshow(slab.T, cmap="gray", origin="lower", vmin=lo, vmax=hi)
+        if m[i0:i1, j0:j1, k0:k1].any():
+            self.mip.contour(m[i0:i1, j0:j1, k0:k1].any(axis=2).T.astype(float), levels=[0.5], colors="red", linewidths=0.8)
+        self.mip.set_title(f"minIP {int(round((k1 - k0) * vox[2]))} mm slab (veins = tubes)", fontsize=9); self.mip.axis("off")
         # zoomed: top row raw, bottom row with outline; slices kc-1, kc, kc+1
         for c, k in enumerate((kc - 1, kc, kc + 1)):
             for row in (0, 1):
@@ -94,12 +110,23 @@ class Reviewer:
                 a.set_xticks([]); a.set_yticks([])
                 if row == 0: a.set_title(f"slice {k}" + ("  (centre)" if k == kc else ""), fontsize=9)
         self.ax[0][0].set_ylabel("raw SWI", fontsize=9); self.ax[1][0].set_ylabel("suspect outlined", fontsize=9)
-        flags = [n for n, f in (("artifact zone", "artifact_zone"), ("midline", "midline_zone"), ("vein-like", "vein_like")) if int(r.get(f, 0) or 0)]
+        flags = [n for n, f in (("artifact zone", "artifact_zone"), ("midline", "midline_zone"), ("vein-like", "vein_like"),
+                                ("INFRATENTORIAL", "infratentorial"), ("FLAIR-bright CSF: acute cSAH?", "flair_bright")) if int(num(r.get(f, 0)) or 0)]
+        if int(num(r.get("near_ich_suggest", 0)) or 0):
+            flags.append(f"ICH {num(r.get('ich_dist_mm')):.0f} mm away - press i if contiguous")
+        feat = ""
+        if "pial_dist_mm" in r:
+            shape = "plate" if num(r.tube_ratio) < 0.4 else ("tube" if num(r.tube_ratio) > 0.5 else "mixed")
+            tram = num(r.tram_frac)
+            feat = (f"\npial {num(r.pial_dist_mm):+.1f} mm   shape {shape} ({num(r.tube_ratio):.2f})   "
+                    f"follows surface {num(r.surface_alignment):.2f}   "
+                    f"tram-track {'n/a' if np.isnan(tram) else f'{tram:.0%}'}   vein tree {num(r.vein_tree_mm):.0f} mm   "
+                    f"mirror dark {num(r.mirror_dark_frac):.0%}")
         done = sum(1 for c in ids if c in calls)
         prev = calls.get(cid)
         self.fig.suptitle(f"{subj}   candidate #{cid}  ({self.pos + 1}/{len(ids)}, {done} decided)   —   "
                           f"{r.hemi} {r.region}   {r.volume_mm3} mm³, {int(r.n_slices)} slices, darkness z {r.darkness_z}"
-                          + (f"   [{', '.join(flags)}]" if flags else "")
+                          + (f"   [{', '.join(flags)}]" if flags else "") + feat
                           + (f"\nyour previous call: {prev}" if prev else "\nIs the red outline cSS?"),
                           fontsize=11, color=COL.get(prev, "black"))
         self.fig.canvas.draw_idle()
