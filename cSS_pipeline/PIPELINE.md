@@ -276,7 +276,8 @@ Enter the result in the workbook (Case Log). **Review before you look at the exp
    - Venous network: dark (z < −2) tubular (tube_ratio > 0.5) voxels at pial distance > −1.5 mm;
      component bounding-box diagonal.
    - Mirror: plane fitted (SVD) to the interhemispheric boundary, then reflection.
-   - ICH: lobar tissue with z(WM) < −3, ≥ 500 mm³, inscribed radius ≥ 2.5 mm.
+   - ICH: lobar tissue with z(WM) < −3, ≥ 500 mm³, inscribed radius ≥ 2.5 mm, median > 3 mm
+     under the pial surface, not midline (< 5 mm), not at the skull-strip rim, not in artifact zones.
    - FLAIR: median robust z of CSF within 3 mm.
 6. **Ranking score (v4, untrained).**
    - √darkness × (0.25 + on-surface) × (0.25 + sheetness) × (0.5 + alignment) × (1 + tram).

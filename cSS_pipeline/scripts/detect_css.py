@@ -189,6 +189,8 @@ def mirror_dark(pts):
 
 # ---- 8. lobar ICH: reader-drawn mask, else dark compact blobs in lobar tissue
 ich_p = f"{base}/work/{subj}_ich.nii.gz"
+lut = load_lut()
+ART_CODES = [c for c, n in lut.items() if any(a in n for a in ARTIFACT_ZONES)]
 if os.path.exists(ich_p):
     ich = nib.load(ich_p).get_fdata() > 0; ich_src = "drawn"
 else:
@@ -202,6 +204,13 @@ else:
         m = il[sl] == n
         if m.sum() * np.prod(vox) < ICH_MIN_MM3: continue
         if ndi.distance_transform_edt(np.pad(m, 1), sampling=vox).max() < ICH_MIN_RADIUS_MM: continue
+        # a lobar haematoma lies in the tissue under the cortex. On P006 the auto-finder caught
+        # skull-base susceptibility artifact (orbitofrontal) and the sagittal sinus / vertex veins:
+        # reject blobs that are superficial, midline, at the skull-strip edge or in artifact zones
+        if np.median(pial_sd[sl][m]) > -3.0: continue
+        if np.median(dmid[sl][m]) < 5.0: continue
+        if rim[sl][m].mean() > 0.2: continue
+        if np.isin(seg[sl][m], ART_CODES).mean() > 0.3: continue
         ich[sl] |= m
     ich_src = "auto"
 ich_dist = ndi.distance_transform_edt(~ich, sampling=vox) if ich.any() else np.full(I.shape, np.inf)
@@ -221,7 +230,6 @@ if os.path.exists(fl_p):
 # ---- 10. features per candidate
 cortex_dist = ndi.distance_transform_edt(~cortex, sampling=vox)      # 0 inside cortex
 pial_depth = ndi.distance_transform_edt(cortex | np.isin(seg, [2, 41]), sampling=vox)
-lut = load_lut()
 step = 0.4; T_ = np.arange(step, TRAM_MAX_MM + step, step, dtype=np.float32)
 
 def branches_per_10mm(mm):

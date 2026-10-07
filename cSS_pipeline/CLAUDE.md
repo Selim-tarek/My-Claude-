@@ -62,6 +62,8 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
 - v4 first real run: P006 with T1 SynthSeg (no recon-all yet): 71 candidates; top ranks in R inferior
   parietal and L supramarginal (the areas of the v3-accepted cSS); not yet reviewed. vein_tree_mm
   was 255 mm for most candidates (network merges brain-wide) -> made recorded-only.
+  Auto-ICH flagged skull-base artifact + sagittal sinus (reader: no ICH, alignment good) -> ICH
+  blobs must now be >3 mm under the pial surface, off-midline, off the rim, outside artifact zones.
 - Phantoms: v4 phantom (tram-track/convexity/single-bank cSS vs tubular sulcal and cortical
   surface veins, ICH, Destrieux labels): 6/6 found, every definition feature separates cSS from
   veins, ICH Dice 0.86, sulcal score 3/4 as constructed. v3 phantom: 8/8 synthetic lesions; its
