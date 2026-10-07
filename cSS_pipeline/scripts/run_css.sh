@@ -27,7 +27,9 @@ if [ ! -f $B/data/${S}_swi.nii ]; then
   echo "ERROR: $B/data/${S}_swi.nii not found - give the scan path as 2nd argument"; exit 1
 fi
 echo "[1/4] SynthSeg segmentation"
-if [ ! -f $B/synthseg/${S}_seg.nii.gz ]; then
+# re-run when missing OR when the SWI was re-imported after the last segmentation (v4 fix:
+# v3 silently reused a stale segmentation for a different scan with the same ID)
+if [ ! -f $B/synthseg/${S}_seg.nii.gz ] || [ $B/data/${S}_swi.nii -nt $B/synthseg/${S}_seg.nii.gz ]; then
   mri_synthseg --i $B/data/${S}_swi.nii --o $B/synthseg/${S}_seg.nii.gz \
     --parc --robust --threads 8 > /dev/null
 else

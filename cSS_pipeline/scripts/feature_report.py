@@ -3,12 +3,18 @@
 reviewed subjects (review/*_calls.csv written by review_css.py).  usage: feature_report.py"""
 import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 import sys, os, glob, numpy as np, pandas as pd
-base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import base as _base, load_calls
+base = _base()
 rows = []
 for f in glob.glob(f"{base}/review/*_calls.csv"):
     s = os.path.basename(f).replace("_calls.csv", "")
-    c = pd.read_csv(f); d = pd.read_csv(f"{base}/review/{s}_candidates.csv")
-    m = d.merge(c, on="cand_id"); m["subject"] = s; rows.append(m)
+    d = pd.read_csv(f"{base}/review/{s}_candidates.csv")
+    calls, warn = load_calls(base, s, d)          # v4: matched by fingerprint, not by rank
+    if warn: print("WARNING:", warn)
+    if not calls: continue
+    m = d.merge(pd.DataFrame(list(calls.items()), columns=["cand_id", "call"]), on="cand_id")
+    m["subject"] = s; rows.append(m)
 if not rows: sys.exit("no reviewed cases yet (run review_css.py first)")
 D = pd.concat(rows, ignore_index=True)
 D = D[D.call.isin(["cSS", "Vein", "Normal", "Artifact"])]

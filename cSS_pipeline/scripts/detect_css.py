@@ -138,12 +138,12 @@ for p in regionprops(lab, spacing=vox):
     nb = seg[pad][ndi.binary_dilation(mm, iterations=2)]
     nb = nb[nb >= 1000]
     if nb.size == 0: continue
-    own = seg[pad][mm]                           # hemisphere from own voxels
-    n_l = int((np.isin(own, LH) | ((own >= 1000) & (own < 2000))).sum())
-    n_r = int((np.isin(own, RH) | (own >= 2000)).sum())
-    if n_l != n_r:
-        side = nb[nb < 2000] if n_l > n_r else nb[nb >= 2000]
-        if side.size: nb = side
+    # hemisphere = majority of the candidate's own voxels in the hemisphere map (v4 fix: v3 counted
+    # own L/R labels, but cSS lies in sulcal CSF where both counts are 0, so medial candidates
+    # could take the region - and the score - of the opposite hemisphere)
+    is_left = bool(hemiL[pad][mm].mean() >= 0.5)
+    side = nb[nb < 2000] if is_left else nb[nb >= 2000]
+    if side.size: nb = side
     code = int(np.bincount(nb).argmax())
     region = lut.get(code, str(code))
     contact   = float(near_surface[pad][mm].mean())
@@ -165,7 +165,7 @@ for p in regionprops(lab, spacing=vox):
     for flag, f in ((artz, 0.5), (midz, 0.5), (vein_like, 0.6), (longs, 0.5)):
         if flag: score *= f
     c0 = np.argwhere(mm).mean(0) + [s.start for s in pad]
-    rows.append(dict(hemi="L" if code < 2000 else "R", region=region, label=code,
+    rows.append(dict(hemi="L" if is_left else "R", region=region, label=code,
                      volume_mm3=round(vol, 1), n_slices=n_sl, elongation=round(elong, 1),
                      surface_contact=round(contact, 2), darkness_z=round(depth, 1),
                      artifact_zone=int(artz), midline_zone=int(midz), score=round(score, 2),

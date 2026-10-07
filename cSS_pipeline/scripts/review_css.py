@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Interactive cSS review: shows each suspected candidate, you agree or disagree.
-usage: review_css.py SUBJECT [--top 20] [--redo]
+usage: review_css.py SUBJECT [--top N] [--redo]
+  default: ALL candidates (v4). With --top N, candidates below N are recorded as NOT reviewed and
+  the score is reported with that caveat (v3 silently scored them as "not cSS").
 
 Keys (or click the buttons):
   y = cSS (agree)      v = vein      o = normal cortex      a = artifact
@@ -10,6 +12,8 @@ Decisions are saved after every key press, so you can quit and resume later.
 At the end, accepted candidates are scored automatically (score_css.py)."""
 import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 import sys, os, subprocess, numpy as np, nibabel as nib, pandas as pd
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import load_calls, save_calls
 import matplotlib
 if os.environ.get("CSS_REVIEW_TEST"): matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -17,7 +21,7 @@ from matplotlib.widgets import Button
 from matplotlib.patches import Rectangle
 
 subj = sys.argv[1]
-top = int(sys.argv[sys.argv.index("--top") + 1]) if "--top" in sys.argv else 20
+top = int(sys.argv[sys.argv.index("--top") + 1]) if "--top" in sys.argv else None
 redo = "--redo" in sys.argv
 base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project"))
 csv = f"{base}/review/{subj}_candidates.csv"
@@ -32,8 +36,11 @@ lo, hi = np.percentile(I[br], [1, 99]) if br.any() else (I.min(), I.max())
 df = pd.read_csv(csv)
 ids = df.cand_id.astype(int).tolist()[:top]
 calls = {}
-if os.path.exists(calls_csv) and not redo:
-    calls = dict(pd.read_csv(calls_csv).astype({"cand_id": int}).values.tolist())
+if not redo:
+    # v4 fix: calls are matched by candidate fingerprint (centroid + volume), not by rank, so a
+    # re-run of the detector can no longer attach an old call to a different lesion
+    calls, warn = load_calls(base, subj, df)
+    if warn: print("WARNING:", warn)
 KEYS = {"y": "cSS", "v": "Vein", "o": "Normal", "a": "Artifact", "i": "Near ICH", "u": "Unsure"}
 COL = {"cSS": "#2e7d32", "Vein": "#1565c0", "Normal": "#6d6d6d", "Artifact": "#ef6c00",
        "Near ICH": "#8e24aa", "Unsure": "#c9a400"}
@@ -107,7 +114,7 @@ class Reviewer:
         elif k == "q": self.finish()
 
     def save(self):
-        pd.DataFrame(sorted(calls.items()), columns=["cand_id", "call"]).to_csv(calls_csv, index=False)
+        save_calls(base, subj, df, calls)
 
     def finish(self):
         self.save(); plt.close(self.fig)
@@ -126,7 +133,12 @@ ich = sorted(c for c, v in calls.items() if v == "Near ICH")
 unsure = sorted(c for c, v in calls.items() if v == "Unsure")
 print(f"\n{subj}: reviewed {len(calls)} of top {len(ids)}  |  cSS {accepted}  |  near-ICH {ich}"
       + (f"  |  unsure {unsure} (counted as NOT cSS - re-check with: review_css.py {subj})" if unsure else ""))
-cmd = [sys.executable, f"{base}/scripts/mark_css.py", subj, ",".join(map(str, accepted)) or "none"]
+not_rev = len(df) - len(calls)
+if not_rev:
+    print(f"WARNING: {not_rev} of {len(df)} candidates NOT reviewed - the score is a lower bound "
+          f"(continue with: review_css.py {subj})")
+cmd = [sys.executable, f"{base}/scripts/mark_css.py", subj, ",".join(map(str, accepted)) or "none",
+       "--reviewed", ",".join(map(str, sorted(calls))) or "none"]
 if ich: cmd += ["--ich", ",".join(map(str, ich))]
 subprocess.run(cmd, check=False)
 print(f"decisions saved: {calls_csv}")

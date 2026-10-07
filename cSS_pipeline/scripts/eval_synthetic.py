@@ -9,11 +9,19 @@ subj = sys.argv[1]
 base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project"))
 truth = nib.load(f"{base}/work/{subj}_truth.nii.gz").get_fdata().astype(int)
 cand  = nib.load(f"{base}/review/{subj}_candidates.nii.gz").get_fdata().astype(int)
+MIN_COVER = 0.30   # v4: a lesion counts as found only if candidates cover >=30 % of it (1-voxel
+                   # tolerance for blooming); v3 accepted any touching candidate, e.g. a vein crossing it
 n = int(truth.max()); best, lesion_c = [], set()
 for i in range(1, n + 1):
-    ids = sorted(set(np.unique(cand[ndi.binary_dilation(truth == i, iterations=1)])) - {0})
-    if ids: best.append(ids[0]); lesion_c |= set(ids)
-    print(f"  lesion {i}: {'FOUND  (candidate #' + str(ids[0]) + ')' if ids else 'MISSED'}")
+    t = truth == i; nt = int(t.sum())
+    touch = sorted(set(np.unique(cand[ndi.binary_dilation(t, iterations=1)])) - {0})
+    cov = {c: (ndi.binary_dilation(cand == c, iterations=1) & t).sum() / nt for c in touch}
+    ids = [c for c in touch if cov[c] >= 0.05]
+    total = float((ndi.binary_dilation(np.isin(cand, ids), iterations=1) & t).sum() / nt) if ids else 0.0
+    found = total >= MIN_COVER
+    if found: best.append(ids[0]); lesion_c |= set(ids)
+    print(f"  lesion {i}: " + (f"FOUND  (candidate #{ids[0]}, coverage {total:.0%})" if found
+                               else f"MISSED (coverage {total:.0%})"))
 all_c = set(np.unique(cand)) - {0}
 non = sorted(all_c - lesion_c)
 worst = max(best) if best else 0

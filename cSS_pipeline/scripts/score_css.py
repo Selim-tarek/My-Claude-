@@ -76,6 +76,8 @@ result["candidate_volume_mm3"] = round(float(acc.volume_mm3.sum()) if len(acc) e
 result["grown_volume_mm3"] = round(grown_vol, 1)
 result["regions"] = sorted(acc.region.unique().tolist()) if len(acc) else []
 ich = df[df.near_ich == 1] if "near_ich" in df.columns and len(df) else df.iloc[0:0]
+result["n_candidates"] = int(len(df))
+result["n_unreviewed"] = int((df.reviewed == 0).sum()) if "reviewed" in df.columns and len(df) else 0
 result["near_ich_candidates"] = int(len(ich))
 result["near_ich_volume_mm3"] = round(float(ich.volume_mm3.sum()) if len(ich) else 0.0, 1)
 
@@ -92,6 +94,9 @@ print(f"  left : score {result['L_score']}  foci {result['L_foci']}  clusters {r
 print(f"  right: score {result['R_score']}  foci {result['R_foci']}  clusters {result['R_clusters']}")
 print(f"  volume: candidates {result['candidate_volume_mm3']} mm3, grown (full extent) {result['grown_volume_mm3']} mm3")
 print(f"  regions: {', '.join(result['regions'])}")
+if result["n_unreviewed"]:
+    print(f"  WARNING: {result['n_unreviewed']} of {result['n_candidates']} candidates were not reviewed "
+          f"- score is a LOWER BOUND")
 if result["near_ich_candidates"]:
     print(f"  near-ICH siderosis (NOT in score): {result['near_ich_candidates']} candidates, "
           f"{result['near_ich_volume_mm3']} mm3")
