@@ -49,4 +49,10 @@ cp $T/work/PH3_ich_truth.nii.gz $T/work/PH3_ich.nii.gz
 python $S/score_css.py PH3 --truth > $T/score_ich.log; rm $T/work/PH3_ich.nii.gz
 grep -q "2/4" $T/score_ich.log && grep -q "EXCLUDED" $T/score_ich.log || { cat $T/score_ich.log; echo "FAIL: ICH sulcal rule"; exit 1; }
 grep "ICH rule" $T/score_ich.log
+echo "== Boston v2.0 cSS count by gyri: all foci -> >=2; left only (2 adjacent gyri) -> 1"
+grep -q "Boston v2.0 cSS count: >=2" $T/score_v4.log || { cat $T/score_v4.log; echo "FAIL: Boston v2.0 >=2"; exit 1; }
+python -c "import pandas as pd,sys; p=sys.argv[1]+'/review/PH3_candidates.csv'; d=pd.read_csv(p); d.loc[d.hemi=='R','accept']=0; d.to_csv(p,index=False)" $T
+python $S/score_css.py PH3 > $T/score_b2.log
+grep -q "Boston v2.0 cSS count: 1 focus" $T/score_b2.log || { cat $T/score_b2.log; echo "FAIL: Boston v2.0 single focus"; exit 1; }
+grep "Boston" $T/score_v4.log $T/score_b2.log
 echo; echo "ALL TESTS PASSED  (temp dir $T)"

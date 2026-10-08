@@ -23,6 +23,29 @@ T1 (and optionally FLAIR) anatomy. Research software, not for clinical use.
   - fewer than 2 sulci in between → excluded, if you drew the ICH mask; only a warning with the
     automatic mask;
   - exactly 2 sulci in between → kept, but flagged for you to check the two extra conditions.
+- **Minimum standards** (Charidimou, *AJNR* 2016;37:E43). Of the minimum criteria, these are used
+  here:
+  - **blooming** on T2*/SWI;
+  - **differentiation from microbleeds**: microbleeds are small (generally 2–5 mm), well-defined,
+    round/oval, and at least half surrounded by brain parenchyma. v4.4 flags candidates ≤10 mm with
+    ≥50 % parenchyma around them as `cmb_like`. Beware "microbleed pearls", rows of tiny
+    microbleeds along the surface;
+  - **T1 or FLAIR for anatomical confirmation** of the gyral location;
+  - **no infratentorial siderosis**;
+  - **exclude mimics**: vessel flow voids, thrombosed vessels, petechial haemorrhagic
+    transformation of infarcts, calcium deposits;
+  - FLAIR/PD-bright subarachnoid space → call it **acute cSAH**;
+  - **record location and number of sulci**, and **record other lesions within 1 cm**
+    (microbleeds, DWI lesions).
+- **Boston criteria v2.0** (Charidimou et al., *Lancet Neurol* 2022;21:714) count cSS **by gyri**
+  for the CAA diagnosis:
+  - a single focus, even if it extends to a second adjacent gyrus, = 1 haemorrhagic lesion;
+  - multifocal cSS (gyri separated by uninvolved areas, or ≥3 adjacent gyri) = ≥2 lesions.
+  - Probable CAA = ≥2 strictly lobar haemorrhagic lesions (ICH, microbleeds, cSAH/cSS), or 1 lobar
+    haemorrhagic lesion plus a white-matter feature (>20 CSO perivascular spaces in one hemisphere,
+    or multispot WMH), with a compatible presentation, age ≥50 and no other cause.
+  - v4.4 reports `boston2_css_lesions` (0 / 1 / 2 = ≥2). This is only the cSS part, not a diagnosis.
+  - Interrater κ for multifocal cSS was 0.94.
 - **SWI vs T2\*-GRE:** SWI gives higher multifocality scores than GRE, so the sequence is now saved
   with every score (`sequence` column) and the two must not be pooled.
 - **Quantification** (van Harten et al., *NeuroImage: Clinical* 2023;38:103447, Leiden):

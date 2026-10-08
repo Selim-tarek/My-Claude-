@@ -20,6 +20,8 @@ Each criterion is measured per candidate:
   chronic, not acute cSAH         flair_csf_z, flair_bright      FLAIR not bright (hint only:
                                                                  chronic cSS can show mild FLAIR signal)
   mimic: cortical vein thrombosis flair_ctx_z, flair_ctx_bright  FLAIR-bright cortex nearby -> check
+  not a microbleed (AJNR 2016)    parenchyma_frac, extent_mm,    surface/CSF     <=10 mm and >=half
+                                  cmb_like                                       in parenchyma
                                   (only if work/ID_flair_swispace.nii.gz exists)
 
 Candidate generation (unchanged idea from v3, tightened):
@@ -323,6 +325,12 @@ for p in regionprops(lab, spacing=vox):
     comps = np.unique(vl[pad][ndi.binary_dilation(mm, structure=s3)]); comps = comps[comps > 0]
     vtree = float(vext[comps].max()) if len(comps) else 0.0
     mdark = mirror_dark(pts)
+    # microbleed vs cSS (Charidimou, AJNR 2016;37:E43): microbleeds are small (generally 2-5 mm),
+    # round/oval and at least half surrounded by brain parenchyma - cSS lies on the surface / in CSF
+    shell1 = ndi.binary_dilation(mm, structure=s3) & ~mm
+    pfrac = float(tissue[pad][shell1].mean()) if shell1.any() else np.nan
+    ext_mm = float(np.sqrt(sum(((s_.stop - s_.start - 6) * v) ** 2 for s_, v in zip(pad, vox))))
+    cmb_like = bool(np.isfinite(pfrac) and pfrac >= 0.5 and ext_mm <= 10.0)
     idist = float(ich_dist[pad][mm].min())
     fz = fcz = np.nan
     if FL is not None:
@@ -364,6 +372,7 @@ for p in regionprops(lab, spacing=vox):
                      tube_ratio=round(tub, 2), surface_alignment=round(aln, 2),
                      tram_frac=round(tram, 2), vein_tree_mm=round(vtree, 1),
                      mirror_dark_frac=round(mdark, 2), ich_dist_mm=round(min(idist, 999.0), 1),
+                     parenchyma_frac=round(pfrac, 2), extent_mm=round(ext_mm, 1), cmb_like=int(cmb_like),
                      near_ich_suggest=int(idist <= 5.0), infratentorial=int(infra),
                      flair_csf_z=round(fz, 2), flair_bright=int(np.isfinite(fz) and fz > 3.0),
                      flair_ctx_z=round(fcz, 2), flair_ctx_bright=int(np.isfinite(fcz) and fcz > 3.0),
@@ -376,6 +385,7 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "vein_like", "long_structure",
         "pial_dist_mm", "bank_frac", "tube_ratio", "surface_alignment", "tram_frac", "vein_tree_mm",
         "mirror_dark_frac", "ich_dist_mm", "near_ich_suggest", "infratentorial", "flair_csf_z",
+        "parenchyma_frac", "extent_mm", "cmb_like",
         "flair_bright", "flair_ctx_z", "flair_ctx_bright", "score_v3", "score_v4", "accept"]
 keep = np.zeros(I.shape, np.int16)
 if rows:

@@ -62,6 +62,9 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   <2 excluded with a reader-drawn ICH mask (warned with the auto mask), ==2 flagged
 - sequence (SWI / T2*-GRE from raw/<ID>/SWI/*.json ImageType) and % sulci affected per hemisphere
   (van Harten 2023) are recorded
+- Boston v2.0 cSS count by gyri (Lancet Neurol 2022): gyri adjacent if touching or sharing a sulcus;
+  1 component of <=2 gyri = 1 lesion, else >=2 (boston2_css_lesions)
+- detect: cmb_like = extent <=10 mm and >=50 % of the outer shell in parenchyma (AJNR 2016 rule)
 
 ## Validation status (honest)
 - v4 first real run: P006 with T1 SynthSeg (no recon-all yet): 71 candidates; top ranks in R inferior

@@ -324,6 +324,8 @@ Each criterion is measured per candidate:
   chronic, not acute cSAH         flair_csf_z, flair_bright      FLAIR not bright (hint only:
                                                                  chronic cSS can show mild FLAIR signal)
   mimic: cortical vein thrombosis flair_ctx_z, flair_ctx_bright  FLAIR-bright cortex nearby -> check
+  not a microbleed (AJNR 2016)    parenchyma_frac, extent_mm,    surface/CSF     <=10 mm and >=half
+                                  cmb_like                                       in parenchyma
                                   (only if work/ID_flair_swispace.nii.gz exists)
 
 Candidate generation (unchanged idea from v3, tightened):
@@ -627,6 +629,12 @@ for p in regionprops(lab, spacing=vox):
     comps = np.unique(vl[pad][ndi.binary_dilation(mm, structure=s3)]); comps = comps[comps > 0]
     vtree = float(vext[comps].max()) if len(comps) else 0.0
     mdark = mirror_dark(pts)
+    # microbleed vs cSS (Charidimou, AJNR 2016;37:E43): microbleeds are small (generally 2-5 mm),
+    # round/oval and at least half surrounded by brain parenchyma - cSS lies on the surface / in CSF
+    shell1 = ndi.binary_dilation(mm, structure=s3) & ~mm
+    pfrac = float(tissue[pad][shell1].mean()) if shell1.any() else np.nan
+    ext_mm = float(np.sqrt(sum(((s_.stop - s_.start - 6) * v) ** 2 for s_, v in zip(pad, vox))))
+    cmb_like = bool(np.isfinite(pfrac) and pfrac >= 0.5 and ext_mm <= 10.0)
     idist = float(ich_dist[pad][mm].min())
     fz = fcz = np.nan
     if FL is not None:
@@ -668,6 +676,7 @@ for p in regionprops(lab, spacing=vox):
                      tube_ratio=round(tub, 2), surface_alignment=round(aln, 2),
                      tram_frac=round(tram, 2), vein_tree_mm=round(vtree, 1),
                      mirror_dark_frac=round(mdark, 2), ich_dist_mm=round(min(idist, 999.0), 1),
+                     parenchyma_frac=round(pfrac, 2), extent_mm=round(ext_mm, 1), cmb_like=int(cmb_like),
                      near_ich_suggest=int(idist <= 5.0), infratentorial=int(infra),
                      flair_csf_z=round(fz, 2), flair_bright=int(np.isfinite(fz) and fz > 3.0),
                      flair_ctx_z=round(fcz, 2), flair_ctx_bright=int(np.isfinite(fcz) and fcz > 3.0),
@@ -680,6 +689,7 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "vein_like", "long_structure",
         "pial_dist_mm", "bank_frac", "tube_ratio", "surface_alignment", "tram_frac", "vein_tree_mm",
         "mirror_dark_frac", "ich_dist_mm", "near_ich_suggest", "infratentorial", "flair_csf_z",
+        "parenchyma_frac", "extent_mm", "cmb_like",
         "flair_bright", "flair_ctx_z", "flair_ctx_bright", "score_v3", "score_v4", "accept"]
 keep = np.zeros(I.shape, np.int16)
 if rows:
@@ -826,7 +836,8 @@ class Reviewer:
         self.ax[0][0].set_ylabel("raw SWI", fontsize=9); self.ax[1][0].set_ylabel("suspect outlined", fontsize=9)
         flags = [n for n, f in (("artifact zone", "artifact_zone"), ("midline", "midline_zone"), ("vein-like", "vein_like"),
                                 ("INFRATENTORIAL", "infratentorial"), ("FLAIR-bright CSF: acute cSAH?", "flair_bright"),
-                                ("FLAIR-bright cortex: cortical vein thrombosis?", "flair_ctx_bright")) if flag(r.get(f, 0))]
+                                ("FLAIR-bright cortex: cortical vein thrombosis?", "flair_ctx_bright"),
+                                ("microbleed-like: small, >=half in parenchyma", "cmb_like")) if flag(r.get(f, 0))]
         if flag(r.get("near_ich_suggest", 0)):
             flags.append(f"ICH {num(r.get('ich_dist_mm')):.0f} mm away - press i if contiguous")
         feat = ""
@@ -961,7 +972,10 @@ connected with any lobar ICH" is not scored; cSS must be separated from any loba
 unaffected sulci, or by >=2 (at multiple axial levels) if the haematoma has no superficial path along
 the convexity. With Destrieux labels + an ICH mask, unaffected sulci between each accepted focus and
 the ICH are counted on the sulcal adjacency graph: <2 -> excluded (reader-drawn ICH mask) or warned
-(automatic mask); exactly 2 -> kept but flagged for the reader to check the 2-sulci conditions."""
+(automatic mask); exactly 2 -> kept but flagged for the reader to check the 2-sulci conditions.
+v4.4 Boston criteria v2.0 (Charidimou et al., Lancet Neurol 2022;21:714) count cSS by GYRI: a single
+focus (even extending to a second adjacent gyrus) = 1 haemorrhagic lesion; multifocal cSS (gyri
+separated by uninvolved areas, or >=3 adjacent gyri) = >=2 lesions. Reported as boston2_css_lesions."""
 import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
 import sys, os, json, numpy as np, nibabel as nib, pandas as pd
 from scipy import ndimage as ndi
@@ -1154,6 +1168,29 @@ if A2 is not None:
     result["n_sulci_total"] = total_sulci
     result["sulci"] = sulci_names
 result["infratentorial_accepted"] = int(len(acc_infra))
+
+def gyri_of(mask, hemi):
+    """Destrieux gyral labels covered by a focus (nearest gyral cortex within SULC_MM, >=15 %)"""
+    sl = crop(mask, SULC_MM + 6); a = A2[sl]; lo, hi = hemi_rng(hemi)
+    gm = (a >= lo) & (a < hi) & ~np.isin(a, SULC) & (a % 100 != 0)
+    if not gm.any(): return []
+    d, ind = ndi.distance_transform_edt(~gm, sampling=vox, return_indices=True)
+    m = mask[sl]; near = m & (d <= SULC_MM)
+    if not near.any(): near = m
+    codes = a[tuple(i[near] for i in ind)]
+    cnt = np.bincount(codes - lo, minlength=100)
+    return [int(c + lo) for c in np.nonzero(cnt >= max(3, 0.15 * len(codes)))[0]]
+
+if A2 is not None:
+    # Boston v2.0: two gyri belong to one focus if they touch or border the same sulcus
+    gyr_adj = lambda g, t: t in touching(g) or any(is_sulc(x) for x in touching(g) & touching(t))
+    n_comp = big = 0
+    for h in ("L", "R"):
+        G = sorted(set(g for c in acc[acc.hemi == h].cand_id.astype(int) for g in gyri_of(lab == c, h))) if len(acc) else []
+        if not G: continue
+        k = components(G, gyr_adj); n_comp += k
+        if k == 1 and len(G) >= 3: big = 1
+    result["boston2_css_lesions"] = 0 if n_comp == 0 else (1 if n_comp == 1 and not big else 2)
 if A2 is not None and ICH is not None:
     result["ich_mask"] = ich_src
     result["ich_sulcal_too_close"] = ",".join(map(str, sorted(ich_excl)))
@@ -1200,6 +1237,10 @@ if result["n_unreviewed"]:
 if result["infratentorial_accepted"]:
     print(f"  infratentorial siderosis (NOT in cSS score - consider classical superficial siderosis): "
           f"{result['infratentorial_accepted']} candidates")
+if "boston2_css_lesions" in result:
+    b2 = result["boston2_css_lesions"]
+    print(f"  Boston v2.0 cSS count: " + ("0" if b2 == 0 else "1 focus (1 haemorrhagic lesion)" if b2 == 1
+          else ">=2 (multifocal cSS = >=2 strictly lobar haemorrhagic lesions)"))
 if ich_excl:
     print(f"  ICH rule (<3 unaffected sulci to the lobar ICH, Charidimou 2017): candidates {sorted(ich_excl)} "
           + ("EXCLUDED from the score" if ich_src == "drawn" else
@@ -1728,6 +1769,12 @@ cp $T/work/PH3_ich_truth.nii.gz $T/work/PH3_ich.nii.gz
 python $S/score_css.py PH3 --truth > $T/score_ich.log; rm $T/work/PH3_ich.nii.gz
 grep -q "2/4" $T/score_ich.log && grep -q "EXCLUDED" $T/score_ich.log || { cat $T/score_ich.log; echo "FAIL: ICH sulcal rule"; exit 1; }
 grep "ICH rule" $T/score_ich.log
+echo "== Boston v2.0 cSS count by gyri: all foci -> >=2; left only (2 adjacent gyri) -> 1"
+grep -q "Boston v2.0 cSS count: >=2" $T/score_v4.log || { cat $T/score_v4.log; echo "FAIL: Boston v2.0 >=2"; exit 1; }
+python -c "import pandas as pd,sys; p=sys.argv[1]+'/review/PH3_candidates.csv'; d=pd.read_csv(p); d.loc[d.hemi=='R','accept']=0; d.to_csv(p,index=False)" $T
+python $S/score_css.py PH3 > $T/score_b2.log
+grep -q "Boston v2.0 cSS count: 1 focus" $T/score_b2.log || { cat $T/score_b2.log; echo "FAIL: Boston v2.0 single focus"; exit 1; }
+grep "Boston" $T/score_v4.log $T/score_b2.log
 echo; echo "ALL TESTS PASSED  (temp dir $T)"
 ```
 

@@ -16,7 +16,10 @@ connected with any lobar ICH" is not scored; cSS must be separated from any loba
 unaffected sulci, or by >=2 (at multiple axial levels) if the haematoma has no superficial path along
 the convexity. With Destrieux labels + an ICH mask, unaffected sulci between each accepted focus and
 the ICH are counted on the sulcal adjacency graph: <2 -> excluded (reader-drawn ICH mask) or warned
-(automatic mask); exactly 2 -> kept but flagged for the reader to check the 2-sulci conditions."""
+(automatic mask); exactly 2 -> kept but flagged for the reader to check the 2-sulci conditions.
+v4.4 Boston criteria v2.0 (Charidimou et al., Lancet Neurol 2022;21:714) count cSS by GYRI: a single
+focus (even extending to a second adjacent gyrus) = 1 haemorrhagic lesion; multifocal cSS (gyri
+separated by uninvolved areas, or >=3 adjacent gyri) = >=2 lesions. Reported as boston2_css_lesions."""
 import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
 import sys, os, json, numpy as np, nibabel as nib, pandas as pd
 from scipy import ndimage as ndi
@@ -209,6 +212,29 @@ if A2 is not None:
     result["n_sulci_total"] = total_sulci
     result["sulci"] = sulci_names
 result["infratentorial_accepted"] = int(len(acc_infra))
+
+def gyri_of(mask, hemi):
+    """Destrieux gyral labels covered by a focus (nearest gyral cortex within SULC_MM, >=15 %)"""
+    sl = crop(mask, SULC_MM + 6); a = A2[sl]; lo, hi = hemi_rng(hemi)
+    gm = (a >= lo) & (a < hi) & ~np.isin(a, SULC) & (a % 100 != 0)
+    if not gm.any(): return []
+    d, ind = ndi.distance_transform_edt(~gm, sampling=vox, return_indices=True)
+    m = mask[sl]; near = m & (d <= SULC_MM)
+    if not near.any(): near = m
+    codes = a[tuple(i[near] for i in ind)]
+    cnt = np.bincount(codes - lo, minlength=100)
+    return [int(c + lo) for c in np.nonzero(cnt >= max(3, 0.15 * len(codes)))[0]]
+
+if A2 is not None:
+    # Boston v2.0: two gyri belong to one focus if they touch or border the same sulcus
+    gyr_adj = lambda g, t: t in touching(g) or any(is_sulc(x) for x in touching(g) & touching(t))
+    n_comp = big = 0
+    for h in ("L", "R"):
+        G = sorted(set(g for c in acc[acc.hemi == h].cand_id.astype(int) for g in gyri_of(lab == c, h))) if len(acc) else []
+        if not G: continue
+        k = components(G, gyr_adj); n_comp += k
+        if k == 1 and len(G) >= 3: big = 1
+    result["boston2_css_lesions"] = 0 if n_comp == 0 else (1 if n_comp == 1 and not big else 2)
 if A2 is not None and ICH is not None:
     result["ich_mask"] = ich_src
     result["ich_sulcal_too_close"] = ",".join(map(str, sorted(ich_excl)))
@@ -255,6 +281,10 @@ if result["n_unreviewed"]:
 if result["infratentorial_accepted"]:
     print(f"  infratentorial siderosis (NOT in cSS score - consider classical superficial siderosis): "
           f"{result['infratentorial_accepted']} candidates")
+if "boston2_css_lesions" in result:
+    b2 = result["boston2_css_lesions"]
+    print(f"  Boston v2.0 cSS count: " + ("0" if b2 == 0 else "1 focus (1 haemorrhagic lesion)" if b2 == 1
+          else ">=2 (multifocal cSS = >=2 strictly lobar haemorrhagic lesions)"))
 if ich_excl:
     print(f"  ICH rule (<3 unaffected sulci to the lobar ICH, Charidimou 2017): candidates {sorted(ich_excl)} "
           + ("EXCLUDED from the score" if ich_src == "drawn" else
