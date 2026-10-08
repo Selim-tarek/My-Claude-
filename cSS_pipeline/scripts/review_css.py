@@ -12,6 +12,8 @@ Decisions are saved after every key press, so you can quit and resume later.
 Left column: whole slice (top) and an 8 mm minIP slab of the zoom window (bottom) computed from the
 SWI itself - veins become continuous branching tubes there, cSS stays a band along the cortex.
 (Do not feed the scanner minIP series into the pipeline; this panel is only for reading.)
+Right column (only with run_css.sh --phase): filtered SWI phase - calcium has the opposite sign to
+veins and blood products (AJNR 2016 mimic list).
 Title: the v4 definition features - on-surface distance, plate/tube shape, tram-track, vein tree,
 nearby ICH, FLAIR - as a reading aid; the call is always yours.
 At the end, accepted candidates are scored automatically (score_css.py)."""
@@ -50,6 +52,28 @@ KEYS = {"y": "cSS", "v": "Vein", "o": "Normal", "a": "Artifact", "i": "Near ICH"
 COL = {"cSS": "#2e7d32", "Vein": "#1565c0", "Normal": "#6d6d6d", "Artifact": "#ef6c00",
        "Near ICH": "#8e24aa", "Unsure": "#c9a400"}
 HW = int(round(30 / vox[0]))          # 60 mm zoom window
+# optional SWI phase (run_css.sh --phase): high-pass filtered phase separates paramagnetic blood
+# products (same sign as veins) from diamagnetic CALCIUM (opposite sign) - an AJNR 2016 cSS mimic.
+# Sign conventions differ by vendor (Vaccarino et al. 2025), so compare with a vein on the same image.
+PH = None
+_php = f"{base}/data/{subj}_phase.nii.gz"
+if os.path.exists(_php):
+    from nibabel.processing import resample_from_to
+    _ph = nib.load(_php)
+    if _ph.shape[:3] != swi.shape[:3] or not np.allclose(_ph.affine, swi.affine, atol=1e-3):
+        _ph = resample_from_to(_ph, swi, order=0)
+    else:
+        _ph = nib.as_closest_canonical(_ph)
+    PH = _ph.get_fdata().astype(np.float32)
+    _lo, _hi = float(PH.min()), float(PH.max())
+    if _hi - _lo > 2 * np.pi + 0.5:                 # scanner units (e.g. -4096..4095) -> radians
+        PH = (PH - _lo) / (_hi - _lo) * 2 * np.pi - np.pi
+from scipy import ndimage as _ndi
+def hp_phase(sl2d):
+    """homodyne high-pass of one phase slice: angle(z * conj(lowpass z)), wrap-safe"""
+    z = np.exp(1j * sl2d); sg = 4.0 / vox[0]
+    lp = _ndi.gaussian_filter(z.real, sg) + 1j * _ndi.gaussian_filter(z.imag, sg)
+    return np.angle(z * np.conj(lp))
 SLAB = max(1, int(round(4 / vox[2]))) # minIP slab half-thickness (~8 mm total)
 def num(v):
     try: return float(v)
@@ -60,8 +84,10 @@ class Reviewer:
     def __init__(self):
         self.pos = next((n for n, c in enumerate(ids) if c not in calls), 0)
         self.shift = 0
-        self.fig = plt.figure(figsize=(14, 8.2))
-        gs = self.fig.add_gridspec(2, 4, left=0.02, right=0.98, top=0.85, bottom=0.14, wspace=0.05, hspace=0.12)
+        ncol = 5 if PH is not None else 4
+        self.fig = plt.figure(figsize=(14 + 3.5 * (ncol - 4), 8.2))
+        gs = self.fig.add_gridspec(2, ncol, left=0.02, right=0.98, top=0.85, bottom=0.14, wspace=0.05, hspace=0.12)
+        self.ph = [self.fig.add_subplot(gs[r, 4]) for r in range(2)] if PH is not None else None
         self.ov = self.fig.add_subplot(gs[0, 0]); self.mip = self.fig.add_subplot(gs[1, 0])
         self.ax = [[self.fig.add_subplot(gs[r, c + 1]) for c in range(3)] for r in range(2)]
         self.btns = []
@@ -111,6 +137,16 @@ class Reviewer:
                 a.set_xticks([]); a.set_yticks([])
                 if row == 0: a.set_title(f"slice {k}" + ("  (centre)" if k == kc else ""), fontsize=9)
         self.ax[0][0].set_ylabel("raw SWI", fontsize=9); self.ax[1][0].set_ylabel("suspect outlined", fontsize=9)
+        if self.ph is not None:
+            hp = hp_phase(PH[:, :, kc])[i0:i1, j0:j1]; br2 = I[i0:i1, j0:j1, kc] > 0
+            v = float(np.percentile(np.abs(hp[br2]), 98)) if br2.any() else 1.0
+            for row in (0, 1):
+                a = self.ph[row]; a.clear()
+                a.imshow(np.where(br2, hp, 0).T, cmap="gray", origin="lower", vmin=-v, vmax=v)
+                if row == 1 and m[i0:i1, j0:j1, kc].any():
+                    a.contour(m[i0:i1, j0:j1, kc].T.astype(float), levels=[0.5], colors="red", linewidths=1.2)
+                a.set_xticks([]); a.set_yticks([])
+            self.ph[0].set_title("filtered PHASE (centre slice)\ncalcium = opposite sign to veins", fontsize=9)
         flags = [n for n, f in (("artifact zone", "artifact_zone"), ("midline", "midline_zone"), ("vein-like", "vein_like"),
                                 ("INFRATENTORIAL", "infratentorial"), ("FLAIR-bright CSF: acute cSAH?", "flair_bright"),
                                 ("FLAIR-bright cortex: cortical vein thrombosis?", "flair_ctx_bright"),

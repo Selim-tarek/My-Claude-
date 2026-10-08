@@ -1,20 +1,24 @@
 #!/bin/zsh
 # One patient, start to finish (up to review).
 # usage: run_css.sh SUBJECT_ID [path/to/swi.nii(.gz)] [--nostrip] [--t1 T1.nii] [--flair FLAIR.nii] [--recon]
+#                   [--phase PHASE.nii]
 #   - with a SWI path: imports the scan; skull-strips it with SynthStrip unless --nostrip
 #     (use --nostrip only for scans that are already skull-stripped)
 #   - SWI = the processed SWI (or magnitude) series, NOT the minIP and NOT the phase map
 #   - --t1 / --flair / --recon: v4 anatomy from T1 (and FLAIR), see prep_anat.sh
 #     (T1 labels are re-used on later runs; SynthSeg on the SWI is then skipped)
+#   - --phase: the SWI PHASE series of the same acquisition (for reading only: the reviewer shows the
+#     filtered phase, where calcium has the opposite sign to veins/blood products)
 #   - set NOVIEW=1 to skip opening freeview (batch use)
 set -e
 S=$1; shift 2>/dev/null || true
-SRC=""; STRIP=1; ANAT=()
+SRC=""; STRIP=1; ANAT=(); PHASE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --nostrip) STRIP=0; shift;;
     --t1|--flair) ANAT+=("$1" "$2"); shift 2;;
     --recon) ANAT+=("$1"); shift;;
+    --phase) PHASE=$2; shift 2;;
     -*) echo "run_css.sh: unknown option $1"; exit 1;;
     *) SRC=$1; shift;;
   esac
@@ -37,6 +41,10 @@ if [ -n "$SRC" ]; then
 fi
 if [ ! -f $B/data/${S}_swi.nii ]; then
   echo "ERROR: $B/data/${S}_swi.nii not found - give the scan path as 2nd argument"; exit 1
+fi
+if [ -n "$PHASE" ]; then
+  echo "[0a] importing SWI phase (for the reviewer)"
+  mri_convert "$PHASE" $B/data/${S}_phase.nii.gz > /dev/null
 fi
 if [ ${#ANAT[@]} -gt 0 ]; then
   echo "[0b] T1/FLAIR anatomy -> SWI grid"

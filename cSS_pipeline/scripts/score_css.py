@@ -240,16 +240,24 @@ if A2 is not None and ICH is not None:
     result["ich_sulcal_too_close"] = ",".join(map(str, sorted(ich_excl)))
     result["ich_sulcal_check"] = ",".join(map(str, sorted(ich_check)))
 # sequence (SWI vs T2*-GRE scores are not interchangeable: SWI rates higher)
-seq = "unknown"
+# acquisition: blooming (apparent cSS size) depends on TE, field strength and the SWI processing
+# (Barbosa et al., Radiol Bras 2015; van Harten et al. 2023) - record them with every score
+seq = "unknown"; acq = {}
 import glob as _glob
 for jp in sorted(_glob.glob(f"{base}/raw/{subj}/SWI/*.json")):
     try:
-        it = " ".join(json.load(open(jp)).get("ImageType", [])).upper()
+        js = json.load(open(jp)); it = " ".join(js.get("ImageType", [])).upper()
+        if "PHASE" in it or " P " in f" {it} ": continue
         seq = "SWI" if "SWI" in it else ("T2*-GRE" if it else seq)
+        te = js.get("EchoTime"); fs = js.get("MagneticFieldStrength")
+        acq = dict(TE_ms=round(te * 1000, 1) if isinstance(te, (int, float)) else "",
+                   field_T=fs if fs is not None else "", manufacturer=js.get("Manufacturer", ""))
         break
     except Exception:
         pass
 result["sequence"] = seq
+result.update(acq)
+result["voxel_mm"] = "x".join(f"{v:.2f}" for v in vox)
 result["candidate_volume_mm3"] = round(float(acc.volume_mm3.sum()) if len(acc) else 0.0, 1)
 result["grown_volume_mm3"] = round(grown_vol, 1)
 result["regions"] = sorted(acc.region.unique().tolist()) if len(acc) else []
@@ -267,7 +275,8 @@ if os.path.exists(summ):
     row = pd.concat([old, row], ignore_index=True)
 row.to_csv(summ, index=False)
 
-print(f"\n{subj}  cSS multifocality score: {total}/4   ({result['category']})   [{method}; {seq}]")
+print(f"\n{subj}  cSS multifocality score: {total}/4   ({result['category']})   [{method}; {seq}"
+      + (f" {acq['field_T']}T TE {acq['TE_ms']} ms" if acq.get("TE_ms") != "" and acq else "") + "]")
 for h, nm in (("L", "left "), ("R", "right")):
     print(f"  {nm}: score {result[f'{h}_score']}  foci {result[f'{h}_foci']}  clusters {result[f'{h}_clusters']}"
           + (f"  sulci {result[f'{h}_sulci']} ({result[f'{h}_sulci_pct']}% of sulci)" if A2 is not None else ""))

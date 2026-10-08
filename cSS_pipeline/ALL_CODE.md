@@ -8,20 +8,24 @@ Generated from the files below; the files are authoritative.
 #!/bin/zsh
 # One patient, start to finish (up to review).
 # usage: run_css.sh SUBJECT_ID [path/to/swi.nii(.gz)] [--nostrip] [--t1 T1.nii] [--flair FLAIR.nii] [--recon]
+#                   [--phase PHASE.nii]
 #   - with a SWI path: imports the scan; skull-strips it with SynthStrip unless --nostrip
 #     (use --nostrip only for scans that are already skull-stripped)
 #   - SWI = the processed SWI (or magnitude) series, NOT the minIP and NOT the phase map
 #   - --t1 / --flair / --recon: v4 anatomy from T1 (and FLAIR), see prep_anat.sh
 #     (T1 labels are re-used on later runs; SynthSeg on the SWI is then skipped)
+#   - --phase: the SWI PHASE series of the same acquisition (for reading only: the reviewer shows the
+#     filtered phase, where calcium has the opposite sign to veins/blood products)
 #   - set NOVIEW=1 to skip opening freeview (batch use)
 set -e
 S=$1; shift 2>/dev/null || true
-SRC=""; STRIP=1; ANAT=()
+SRC=""; STRIP=1; ANAT=(); PHASE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --nostrip) STRIP=0; shift;;
     --t1|--flair) ANAT+=("$1" "$2"); shift 2;;
     --recon) ANAT+=("$1"); shift;;
+    --phase) PHASE=$2; shift 2;;
     -*) echo "run_css.sh: unknown option $1"; exit 1;;
     *) SRC=$1; shift;;
   esac
@@ -44,6 +48,10 @@ if [ -n "$SRC" ]; then
 fi
 if [ ! -f $B/data/${S}_swi.nii ]; then
   echo "ERROR: $B/data/${S}_swi.nii not found - give the scan path as 2nd argument"; exit 1
+fi
+if [ -n "$PHASE" ]; then
+  echo "[0a] importing SWI phase (for the reviewer)"
+  mri_convert "$PHASE" $B/data/${S}_phase.nii.gz > /dev/null
 fi
 if [ ${#ANAT[@]} -gt 0 ]; then
   echo "[0b] T1/FLAIR anatomy -> SWI grid"
@@ -735,6 +743,8 @@ Decisions are saved after every key press, so you can quit and resume later.
 Left column: whole slice (top) and an 8 mm minIP slab of the zoom window (bottom) computed from the
 SWI itself - veins become continuous branching tubes there, cSS stays a band along the cortex.
 (Do not feed the scanner minIP series into the pipeline; this panel is only for reading.)
+Right column (only with run_css.sh --phase): filtered SWI phase - calcium has the opposite sign to
+veins and blood products (AJNR 2016 mimic list).
 Title: the v4 definition features - on-surface distance, plate/tube shape, tram-track, vein tree,
 nearby ICH, FLAIR - as a reading aid; the call is always yours.
 At the end, accepted candidates are scored automatically (score_css.py)."""
@@ -773,6 +783,28 @@ KEYS = {"y": "cSS", "v": "Vein", "o": "Normal", "a": "Artifact", "i": "Near ICH"
 COL = {"cSS": "#2e7d32", "Vein": "#1565c0", "Normal": "#6d6d6d", "Artifact": "#ef6c00",
        "Near ICH": "#8e24aa", "Unsure": "#c9a400"}
 HW = int(round(30 / vox[0]))          # 60 mm zoom window
+# optional SWI phase (run_css.sh --phase): high-pass filtered phase separates paramagnetic blood
+# products (same sign as veins) from diamagnetic CALCIUM (opposite sign) - an AJNR 2016 cSS mimic.
+# Sign conventions differ by vendor (Vaccarino et al. 2025), so compare with a vein on the same image.
+PH = None
+_php = f"{base}/data/{subj}_phase.nii.gz"
+if os.path.exists(_php):
+    from nibabel.processing import resample_from_to
+    _ph = nib.load(_php)
+    if _ph.shape[:3] != swi.shape[:3] or not np.allclose(_ph.affine, swi.affine, atol=1e-3):
+        _ph = resample_from_to(_ph, swi, order=0)
+    else:
+        _ph = nib.as_closest_canonical(_ph)
+    PH = _ph.get_fdata().astype(np.float32)
+    _lo, _hi = float(PH.min()), float(PH.max())
+    if _hi - _lo > 2 * np.pi + 0.5:                 # scanner units (e.g. -4096..4095) -> radians
+        PH = (PH - _lo) / (_hi - _lo) * 2 * np.pi - np.pi
+from scipy import ndimage as _ndi
+def hp_phase(sl2d):
+    """homodyne high-pass of one phase slice: angle(z * conj(lowpass z)), wrap-safe"""
+    z = np.exp(1j * sl2d); sg = 4.0 / vox[0]
+    lp = _ndi.gaussian_filter(z.real, sg) + 1j * _ndi.gaussian_filter(z.imag, sg)
+    return np.angle(z * np.conj(lp))
 SLAB = max(1, int(round(4 / vox[2]))) # minIP slab half-thickness (~8 mm total)
 def num(v):
     try: return float(v)
@@ -783,8 +815,10 @@ class Reviewer:
     def __init__(self):
         self.pos = next((n for n, c in enumerate(ids) if c not in calls), 0)
         self.shift = 0
-        self.fig = plt.figure(figsize=(14, 8.2))
-        gs = self.fig.add_gridspec(2, 4, left=0.02, right=0.98, top=0.85, bottom=0.14, wspace=0.05, hspace=0.12)
+        ncol = 5 if PH is not None else 4
+        self.fig = plt.figure(figsize=(14 + 3.5 * (ncol - 4), 8.2))
+        gs = self.fig.add_gridspec(2, ncol, left=0.02, right=0.98, top=0.85, bottom=0.14, wspace=0.05, hspace=0.12)
+        self.ph = [self.fig.add_subplot(gs[r, 4]) for r in range(2)] if PH is not None else None
         self.ov = self.fig.add_subplot(gs[0, 0]); self.mip = self.fig.add_subplot(gs[1, 0])
         self.ax = [[self.fig.add_subplot(gs[r, c + 1]) for c in range(3)] for r in range(2)]
         self.btns = []
@@ -834,6 +868,16 @@ class Reviewer:
                 a.set_xticks([]); a.set_yticks([])
                 if row == 0: a.set_title(f"slice {k}" + ("  (centre)" if k == kc else ""), fontsize=9)
         self.ax[0][0].set_ylabel("raw SWI", fontsize=9); self.ax[1][0].set_ylabel("suspect outlined", fontsize=9)
+        if self.ph is not None:
+            hp = hp_phase(PH[:, :, kc])[i0:i1, j0:j1]; br2 = I[i0:i1, j0:j1, kc] > 0
+            v = float(np.percentile(np.abs(hp[br2]), 98)) if br2.any() else 1.0
+            for row in (0, 1):
+                a = self.ph[row]; a.clear()
+                a.imshow(np.where(br2, hp, 0).T, cmap="gray", origin="lower", vmin=-v, vmax=v)
+                if row == 1 and m[i0:i1, j0:j1, kc].any():
+                    a.contour(m[i0:i1, j0:j1, kc].T.astype(float), levels=[0.5], colors="red", linewidths=1.2)
+                a.set_xticks([]); a.set_yticks([])
+            self.ph[0].set_title("filtered PHASE (centre slice)\ncalcium = opposite sign to veins", fontsize=9)
         flags = [n for n, f in (("artifact zone", "artifact_zone"), ("midline", "midline_zone"), ("vein-like", "vein_like"),
                                 ("INFRATENTORIAL", "infratentorial"), ("FLAIR-bright CSF: acute cSAH?", "flair_bright"),
                                 ("FLAIR-bright cortex: cortical vein thrombosis?", "flair_ctx_bright"),
@@ -1196,16 +1240,24 @@ if A2 is not None and ICH is not None:
     result["ich_sulcal_too_close"] = ",".join(map(str, sorted(ich_excl)))
     result["ich_sulcal_check"] = ",".join(map(str, sorted(ich_check)))
 # sequence (SWI vs T2*-GRE scores are not interchangeable: SWI rates higher)
-seq = "unknown"
+# acquisition: blooming (apparent cSS size) depends on TE, field strength and the SWI processing
+# (Barbosa et al., Radiol Bras 2015; van Harten et al. 2023) - record them with every score
+seq = "unknown"; acq = {}
 import glob as _glob
 for jp in sorted(_glob.glob(f"{base}/raw/{subj}/SWI/*.json")):
     try:
-        it = " ".join(json.load(open(jp)).get("ImageType", [])).upper()
+        js = json.load(open(jp)); it = " ".join(js.get("ImageType", [])).upper()
+        if "PHASE" in it or " P " in f" {it} ": continue
         seq = "SWI" if "SWI" in it else ("T2*-GRE" if it else seq)
+        te = js.get("EchoTime"); fs = js.get("MagneticFieldStrength")
+        acq = dict(TE_ms=round(te * 1000, 1) if isinstance(te, (int, float)) else "",
+                   field_T=fs if fs is not None else "", manufacturer=js.get("Manufacturer", ""))
         break
     except Exception:
         pass
 result["sequence"] = seq
+result.update(acq)
+result["voxel_mm"] = "x".join(f"{v:.2f}" for v in vox)
 result["candidate_volume_mm3"] = round(float(acc.volume_mm3.sum()) if len(acc) else 0.0, 1)
 result["grown_volume_mm3"] = round(grown_vol, 1)
 result["regions"] = sorted(acc.region.unique().tolist()) if len(acc) else []
@@ -1223,7 +1275,8 @@ if os.path.exists(summ):
     row = pd.concat([old, row], ignore_index=True)
 row.to_csv(summ, index=False)
 
-print(f"\n{subj}  cSS multifocality score: {total}/4   ({result['category']})   [{method}; {seq}]")
+print(f"\n{subj}  cSS multifocality score: {total}/4   ({result['category']})   [{method}; {seq}"
+      + (f" {acq['field_T']}T TE {acq['TE_ms']} ms" if acq.get("TE_ms") != "" and acq else "") + "]")
 for h, nm in (("L", "left "), ("R", "right")):
     print(f"  {nm}: score {result[f'{h}_score']}  foci {result[f'{h}_foci']}  clusters {result[f'{h}_clusters']}"
           + (f"  sulci {result[f'{h}_sulci']} ({result[f'{h}_sulci_pct']}% of sulci)" if A2 is not None else ""))
@@ -1764,6 +1817,16 @@ python $ROOT/tests/check_v4.py PH3 | tail -3
 python $S/score_css.py PH3 --truth > $T/score_v4.log
 grep -q "3/4" $T/score_v4.log && grep -q "sulcal (Destrieux)" $T/score_v4.log || { cat $T/score_v4.log; echo "FAIL: sulcal score on PH3 should be 3/4 (L1 + R2)"; exit 1; }
 grep -A3 "cSS multifocality" $T/score_v4.log
+echo "== reviewer with a phase image (calcium vs blood-product panel)"
+python - "$T" <<'PYEOF'
+import sys, numpy as np, nibabel as nib
+b = sys.argv[1]; r = nib.load(b + "/data/PH3_swi.nii")
+ph = np.random.default_rng(0).integers(-4096, 4096, r.shape).astype(np.int16)   # scanner-unit phase
+nib.save(nib.Nifti1Image(ph, r.affine), b + "/data/PH3_phase.nii.gz")
+PYEOF
+CSS_REVIEW_TEST=1 python $S/review_css.py PH3 --top 2 --redo > /dev/null && [ -s $T/review/PH3_review_preview.png ] && echo "   phase panel rendered"
+rm $T/data/PH3_phase.nii.gz
+python $S/score_css.py PH3 --truth > $T/score_v4.log
 echo "== ICH rule in sulci (Charidimou 2017): reader-drawn ICH -> left foci next to it excluded"
 cp $T/work/PH3_ich_truth.nii.gz $T/work/PH3_ich.nii.gz
 python $S/score_css.py PH3 --truth > $T/score_ich.log; rm $T/work/PH3_ich.nii.gz
@@ -1831,6 +1894,9 @@ seen "recon-all -s P3"; seen "bbregister --s P3 --mov $T/base/data/P3_swi.nii --
 seen "aparc.a2009s+aseg.mgz --lta $T/base/work/P3_swi2t1.lta --inv --interp nearest --o $T/base/work/P3_a2009s_swispace"
 echo "== 6. recon-all already done -> re-used without --recon"
 : > $T/log; $SH $T/base/scripts/prep_anat.sh P3 --t1 $T/t1.nii > /dev/null; notseen "recon-all"; seen bbregister
+echo "== 6b. --phase is imported for the reviewer"
+echo ph > $T/ph.nii; : > $T/log; $SH $T/base/scripts/run_css.sh P4 $T/swi.nii --phase $T/ph.nii > /dev/null
+seen "mri_convert $T/ph.nii $T/base/data/P4_phase.nii.gz"
 echo "== 7. batch run_all.sh reaches detection for every subject"
 : > $T/log; $SH $T/base/scripts/run_all.sh P1 P2 > /dev/null || true   # stub python prints no summary
 [ $(grep -c "detect_css.py" $T/log) -eq 2 ] || fail "run_all.sh did not run detection for both subjects"

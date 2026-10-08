@@ -65,6 +65,8 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
 - Boston v2.0 cSS count by gyri (Lancet Neurol 2022): gyri adjacent if touching or sharing a sulcus;
   1 component of <=2 gyri = 1 lesion, else >=2 (boston2_css_lesions)
 - detect: cmb_like = extent <=10 mm and >=50 % of the outer shell in parenchyma (AJNR 2016 rule)
+- optional SWI phase (run_css.sh --phase -> data/<ID>_phase.nii.gz): reviewer shows homodyne
+  high-pass phase (calcium = opposite sign to veins); score records TE, field, vendor, voxel size
 
 ## Validation status (honest)
 - v4 first real run: P006 with T1 SynthSeg (no recon-all yet): 71 candidates; top ranks in R inferior
@@ -85,7 +87,8 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.
 - Medial cSS is mildly down-ranked by the midline factor (0.7).
-- QSM/SEPIA not used (site decision). Phase not used (cannot separate hemosiderin from deoxy-Hb).
+- QSM/SEPIA not used (site decision). Phase only as a reading aid (calcium mimic); it cannot separate
+  hemosiderin from deoxy-Hb.
 - minIP series must not be used as input; the reviewer computes its own minIP slab for reading.
 - Workbook (tools/build_workbook.py) builds the Excel validation workbook; recalculated with LibreOffice.
 

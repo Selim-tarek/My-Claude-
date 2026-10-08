@@ -48,6 +48,9 @@ seen "recon-all -s P3"; seen "bbregister --s P3 --mov $T/base/data/P3_swi.nii --
 seen "aparc.a2009s+aseg.mgz --lta $T/base/work/P3_swi2t1.lta --inv --interp nearest --o $T/base/work/P3_a2009s_swispace"
 echo "== 6. recon-all already done -> re-used without --recon"
 : > $T/log; $SH $T/base/scripts/prep_anat.sh P3 --t1 $T/t1.nii > /dev/null; notseen "recon-all"; seen bbregister
+echo "== 6b. --phase is imported for the reviewer"
+echo ph > $T/ph.nii; : > $T/log; $SH $T/base/scripts/run_css.sh P4 $T/swi.nii --phase $T/ph.nii > /dev/null
+seen "mri_convert $T/ph.nii $T/base/data/P4_phase.nii.gz"
 echo "== 7. batch run_all.sh reaches detection for every subject"
 : > $T/log; $SH $T/base/scripts/run_all.sh P1 P2 > /dev/null || true   # stub python prints no summary
 [ $(grep -c "detect_css.py" $T/log) -eq 2 ] || fail "run_all.sh did not run detection for both subjects"

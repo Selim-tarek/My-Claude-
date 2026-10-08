@@ -44,6 +44,16 @@ python $ROOT/tests/check_v4.py PH3 | tail -3
 python $S/score_css.py PH3 --truth > $T/score_v4.log
 grep -q "3/4" $T/score_v4.log && grep -q "sulcal (Destrieux)" $T/score_v4.log || { cat $T/score_v4.log; echo "FAIL: sulcal score on PH3 should be 3/4 (L1 + R2)"; exit 1; }
 grep -A3 "cSS multifocality" $T/score_v4.log
+echo "== reviewer with a phase image (calcium vs blood-product panel)"
+python - "$T" <<'PYEOF'
+import sys, numpy as np, nibabel as nib
+b = sys.argv[1]; r = nib.load(b + "/data/PH3_swi.nii")
+ph = np.random.default_rng(0).integers(-4096, 4096, r.shape).astype(np.int16)   # scanner-unit phase
+nib.save(nib.Nifti1Image(ph, r.affine), b + "/data/PH3_phase.nii.gz")
+PYEOF
+CSS_REVIEW_TEST=1 python $S/review_css.py PH3 --top 2 --redo > /dev/null && [ -s $T/review/PH3_review_preview.png ] && echo "   phase panel rendered"
+rm $T/data/PH3_phase.nii.gz
+python $S/score_css.py PH3 --truth > $T/score_v4.log
 echo "== ICH rule in sulci (Charidimou 2017): reader-drawn ICH -> left foci next to it excluded"
 cp $T/work/PH3_ich_truth.nii.gz $T/work/PH3_ich.nii.gz
 python $S/score_css.py PH3 --truth > $T/score_ich.log; rm $T/work/PH3_ich.nii.gz

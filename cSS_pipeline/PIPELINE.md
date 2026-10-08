@@ -37,6 +37,20 @@ T1 (and optionally FLAIR) anatomy. Research software, not for clinical use.
   - FLAIR/PD-bright subarachnoid space → call it **acute cSAH**;
   - **record location and number of sulci**, and **record other lesions within 1 cm**
     (microbleeds, DWI lesions).
+- **SWI physics** (Vaccarino et al., *Bioengineering* 2025;12:473; Barbosa et al., *Radiol Bras*
+  2015;48:93):
+  - Magnitude alone cannot tell paramagnetic material (haemosiderin, deoxy-Hb in veins) from
+    diamagnetic material (**calcium**). The **phase** can.
+  - The phase sign convention depends on the vendor: Siemens/Canon are "left-handed", GE/Philips
+    "right-handed". So always compare with a vein on the same image: calcium has the **opposite
+    sign** to veins and blood products.
+  - Echo time and the SWI phase-mask choice change the image, and calcium can look dark like
+    haemosiderin.
+  - v4.5:
+    - `run_css.sh ... --phase <phase.nii>` adds a **filtered-phase column** to the reviewer;
+    - the score file records **TE, field strength, vendor and voxel size**, because blooming
+      (apparent cSS size) depends on them;
+    - minIP is a venography tool, which is why it is a reading aid here and never the input.
 - **Boston criteria v2.0** (Charidimou et al., *Lancet Neurol* 2022;21:714) count cSS **by gyri**
   for the CAA diagnosis:
   - a single focus, even if it extends to a second adjacent gyrus, = 1 haemorrhagic lesion;
@@ -133,7 +147,7 @@ is only needed for sulcal scoring.
 | **3-D T1** (MPRAGE / SPGR / BRAVO, ~1 mm) | **YES**, strongly recommended | Accurate pial surface, sulci, hemisphere |
 | **FLAIR** (3-D or 2-D) | Yes, if available | Separates chronic cSS from acute convexity SAH |
 | **SWI minIP** | **NO, not as input** | Slab projection: it merges veins and cSS from neighbouring slices and destroys the 3-D shape analysis. The reviewer computes its own minIP panel from the SWI. |
-| SWI phase / filtered phase | No | Hemosiderin and deoxy-Hb are both paramagnetic, so phase sign does not separate cSS from veins |
+| SWI phase / filtered phase | Optional, reading aid only (`--phase`) | Both haemosiderin and deoxy-Hb are paramagnetic, so phase does not separate cSS from veins, but it **does** flag calcium (opposite sign), an official cSS mimic |
 
 Convert DICOM, one folder per series:
 
