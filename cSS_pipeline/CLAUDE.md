@@ -104,6 +104,13 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   score_css sulcus assignment: >=15 % of the focus OR >=20 mm3 (merged foci keep both sulci).
   check_known.py reports whether known lesions survive a detector change.
 
+- v4.9 normal anatomy: exclude candidates with >=30 % within 5 mm of cerebellum/brainstem (tentorial
+  interface), >=30 % within 5 mm of brainstem/ventral DC/hippocampus/amygdala (basal cisterns), or in
+  the lowest 20 % of the cerebrum height (artifact labels: lowest 40 %). Columns infra_frac,
+  basal_frac, rel_height. PH4 test phantom (cerebellum + dark surface line): line excluded, 6/6 kept.
+  Trade-off: true cSS on the inferior temporal/occipital surface over the tentorium is excluded too
+  (listed in ID_excluded.csv).
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.

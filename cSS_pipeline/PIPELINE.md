@@ -299,6 +299,10 @@ led to these steps. **Excluded candidates are never deleted.** They are listed w
 | Skull-base artifact | Artifact-zone labels (orbitofrontal, temporal pole, …) in the lowest 30 % of the brain → excluded |
 | Faint normal dark cortex | Less than **0.75 SD** darker than its 1–2 mm surroundings ("well-defined" in the definition) → excluded |
 
+| Cerebellum / tentorium lines (v4.9) | ≥ 30 % of the candidate within 5 mm of cerebellum or brainstem → excluded (cSS is supratentorial by definition; infratentorial siderosis is a different disease) |
+| Basal cisterns (v4.9) | ≥ 30 % within 5 mm of brainstem, ventral diencephalon, hippocampus or amygdala → excluded (circle of Willis, posterior cerebral artery, basal vein of Rosenthal) |
+| Skull base (v4.9) | Lowest 20 % of the **cerebrum's** height (any label), or artifact-zone labels in the lowest 40 % → excluded |
+
 - Safety checks: on both phantoms every cSS lesion is still kept (6/6 and 8/8), while half the
   phantom veins are removed.
 - On a real scan, check that your **known** lesions survive:

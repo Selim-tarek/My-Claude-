@@ -328,6 +328,8 @@ Each criterion is measured per candidate:
   not part of the venous tree     vein_tree_mm (recorded only)   short          long network
   asymmetric                      mirror_dark_frac               low            high (normal veins)
   remote from ICH                 ich_dist_mm, near_ich_suggest  far            <=5 mm
+  supratentorial, not basal       infra_frac, basal_frac,        ~0             cerebellum/tentorium,
+                                  rel_height                                    basal cisterns, skull base
   supratentorial                  infratentorial                 0              1 (classical SS)
   chronic, not acute cSAH         flair_csf_z, flair_bright      FLAIR not bright (hint only:
                                                                  chronic cSS can show mild FLAIR signal)
@@ -382,6 +384,8 @@ RH = [41, 42, 43, 44, 46, 47, 49, 50, 51, 52, 53, 54, 58, 60]
 WM = [2, 41, 77, 251, 252, 253, 254, 255]
 DEEP = [4, 5, 10, 11, 12, 13, 14, 15, 16, 17, 18, 26, 28, 31, 43, 44, 49, 50, 51, 52, 53, 54, 58, 60, 63]
 INFRA = [7, 8, 46, 47, 16, 15]
+BASAL = [16, 28, 60, 17, 18, 53, 54]   # brainstem, ventral DC, hippocampus, amygdala: basal cisterns
+INFRA_MM, BASAL_MM = 5.0, 5.0          # "near" = within this distance of those structures
 CSF = [24]
 
 base = _base()
@@ -571,6 +575,11 @@ if os.path.exists(fl_p):
 
 # ---- 10. features per candidate
 cortex_dist = ndi.distance_transform_edt(~cortex, sampling=vox)      # 0 inside cortex
+# v4.9 normal anatomy: cerebellum/brainstem (tentorial interface) and basal cisterns
+d_infra = ndi.distance_transform_edt(~np.isin(seg, INFRA), sampling=vox) if np.isin(seg, INFRA).any() \
+    else np.full(I.shape, np.inf, np.float32)
+d_basal = ndi.distance_transform_edt(~np.isin(seg, BASAL), sampling=vox) if np.isin(seg, BASAL).any() \
+    else np.full(I.shape, np.inf, np.float32)
 pial_depth = ndi.distance_transform_edt(cortex | np.isin(seg, [2, 41]), sampling=vox)
 step = 0.4; T_ = np.arange(step, TRAM_MAX_MM + step, step, dtype=np.float32)
 
@@ -728,6 +737,8 @@ for p in regionprops(lab, spacing=vox):
                      flair_ctx_z=round(fcz, 2), flair_ctx_bright=int(np.isfinite(fcz) and fcz > 3.0),
                      css_evidence=round(css_ev, 2), vein_evidence=round(vein_ev, 2),
                      edge_contrast=round(edge, 2), _wz=float((swi.affine @ np.r_[c0, 1])[2]),
+                     infra_frac=round(float((d_infra[pad][mm] <= INFRA_MM).mean()), 2),
+                     basal_frac=round(float((d_basal[pad][mm] <= BASAL_MM).mean()), 2),
                      score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
@@ -739,19 +750,30 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "mirror_dark_frac", "ich_dist_mm", "near_ich_suggest", "infratentorial", "flair_csf_z",
         "parenchyma_frac", "extent_mm", "cmb_like",
         "flair_bright", "flair_ctx_z", "flair_ctx_bright", "css_evidence", "vein_evidence",
-        "edge_contrast", "score_v3", "score_v4", "accept"]
+        "edge_contrast", "infra_frac", "basal_frac", "rel_height", "score_v3", "score_v4", "accept"]
 
 # ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason
-_bz = (swi.affine @ np.c_[np.argwhere(brain[::4, ::4, ::4]) * 4, np.ones(int(brain[::4, ::4, ::4].sum()))].T)[2]
+# height is measured within the CEREBRUM (cortex + cerebral WM), so 0 = floor of the temporal/frontal
+# lobes (skull base), 1 = vertex; the cerebellum below does not stretch the scale
+_cer = (cortex | np.isin(seg, [2, 41]))[::4, ::4, ::4]
+_src = _cer if _cer.any() else brain[::4, ::4, ::4]
+_bz = (swi.affine @ np.c_[np.argwhere(_src) * 4, np.ones(int(_src.sum()))].T)[2]
 z_lo, z_hi = float(_bz.min()), float(_bz.max())
+for r in rows: r["rel_height"] = round((r["_wz"] - z_lo) / max(z_hi - z_lo, 1e-6), 2)
 def exclusion(r):
     if KEEP_ALL: return ""
+    if r["infratentorial"] or r["infra_frac"] >= 0.3:
+        return "infratentorial / tentorial interface (cerebellum, brainstem) - not cSS by definition"
+    if r["basal_frac"] >= 0.3:
+        return "basal cisterns (circle of Willis / basal veins next to brainstem, mesial temporal lobe)"
+    if r["rel_height"] < 0.2:
+        return "skull base (lowest 20 % of the cerebrum)"
     if r["extent_mm"] < MIN_EXTENT_MM: return f"speck (<{MIN_EXTENT_MM:g} mm)"
     if r["cmb_like"]: return "microbleed-like (small, >=half in parenchyma)"
     tub_, tram_ = r["tube_ratio"], r["tram_frac"]
     if r["pial_dist_mm"] > 0.5 and np.isfinite(tub_) and tub_ > 0.45 and not (np.isfinite(tram_) and tram_ >= 0.2):
         return "vein: tubular, in the middle of the sulcal CSF"
-    if r["artifact_zone"] and (r["_wz"] - z_lo) < 0.3 * (z_hi - z_lo):
+    if r["artifact_zone"] and r["rel_height"] < 0.4:
         return "skull-base susceptibility artifact zone"
     if np.isfinite(r["edge_contrast"]) and r["edge_contrast"] < MIN_EDGE_SD:
         return "faint / ill-defined (normal dark cortex)"
@@ -2030,6 +2052,30 @@ print(f"{name}: phantom v4  cSS lesions {int(truth.max())}  veins {int(veins.max
       f"ICH {int(ich.sum() * np.prod(vox))} mm3")
 ```
 
+## tests/phantom_infra.py
+
+```python
+"""Derive PH4 from the v4 phantom PH3: the lowest part becomes cerebellum (labels 8/47) and a dark
+curvilinear line is drawn along its surface (a normal tentorial / cerebellar-folia line).
+usage: phantom_infra.py   (needs PH3 in $CSS_BASE)"""
+import os, numpy as np, nibabel as nib
+B = os.environ["CSS_BASE"]
+img = nib.load(f"{B}/data/PH3_swi.nii"); I = img.get_fdata().astype(np.float32)
+seg = nib.load(f"{B}/synthseg/PH3_seg.nii.gz").get_fdata().astype(np.int32)
+vox = img.header.get_zooms()[:3]; sh = I.shape
+x, y, z = np.meshgrid(*[(np.arange(n) - n / 2) * v for n, v in zip(sh, vox)], indexing="ij")
+low = z < -30
+tis = (seg > 0) & (seg != 24)
+seg[low & tis] = np.where(x < 0, 8, 47)[low & tis]
+r = np.sqrt((x / 52) ** 2 + (y / 58) ** 2 + (z / 44) ** 2); depth = (1 - r) * 52
+line = low & (z > -38) & (depth > 0) & (depth < 1.2) & (np.abs(np.arctan2(y, x) - np.radians(-100)) < np.radians(12))
+I[line] *= 0.35
+nib.save(nib.Nifti1Image(I, img.affine), f"{B}/data/PH4_swi.nii")
+nib.save(nib.Nifti1Image(seg, img.affine), f"{B}/synthseg/PH4_seg.nii.gz")
+nib.save(nib.Nifti1Image(line.astype(np.uint8), img.affine), f"{B}/work/PH4_infra_line.nii.gz")
+print(f"PH4: cerebellum below z=-30 mm, dark cerebellar surface line {int(line.sum())} voxels")
+```
+
 ## tests/check_v4.py
 
 ```python
@@ -2166,6 +2212,14 @@ assert (e.call == "cSS").sum() == want, (e.call.value_counts(), want)   # every 
 print("   expert calls mapped back to the right candidates")
 PYEOF
 python $S/feature_report.py | head -2
+echo "== normal anatomy: a dark line on the cerebellum must be excluded, cSS lesions kept"
+python $ROOT/tests/phantom_infra.py; python $S/align_seg.py PH4 > /dev/null
+python $S/detect_css.py PH4 | head -1
+python $S/check_known.py PH4 --old $T/work/PH3_truth.nii.gz --ids 1,2,3,4,5,6 | tail -1 | grep -q "6 of 6" \
+  || { python $S/check_known.py PH4 --old $T/work/PH3_truth.nii.gz --ids 1,2,3,4,5,6; echo "FAIL: cSS lost on PH4"; exit 1; }
+python $S/check_known.py PH4 --old $T/work/PH4_infra_line.nii.gz --ids 1 | head -1
+python $S/check_known.py PH4 --old $T/work/PH4_infra_line.nii.gz --ids 1 | head -1 | grep -q "kept" \
+  && { echo "FAIL: cerebellar line still shown as a candidate"; exit 1; }
 echo; echo "ALL TESTS PASSED  (temp dir $T)"
 ```
 

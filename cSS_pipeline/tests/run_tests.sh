@@ -86,4 +86,12 @@ assert (e.call == "cSS").sum() == want, (e.call.value_counts(), want)   # every 
 print("   expert calls mapped back to the right candidates")
 PYEOF
 python $S/feature_report.py | head -2
+echo "== normal anatomy: a dark line on the cerebellum must be excluded, cSS lesions kept"
+python $ROOT/tests/phantom_infra.py; python $S/align_seg.py PH4 > /dev/null
+python $S/detect_css.py PH4 | head -1
+python $S/check_known.py PH4 --old $T/work/PH3_truth.nii.gz --ids 1,2,3,4,5,6 | tail -1 | grep -q "6 of 6" \
+  || { python $S/check_known.py PH4 --old $T/work/PH3_truth.nii.gz --ids 1,2,3,4,5,6; echo "FAIL: cSS lost on PH4"; exit 1; }
+python $S/check_known.py PH4 --old $T/work/PH4_infra_line.nii.gz --ids 1 | head -1
+python $S/check_known.py PH4 --old $T/work/PH4_infra_line.nii.gz --ids 1 | head -1 | grep -q "kept" \
+  && { echo "FAIL: cerebellar line still shown as a candidate"; exit 1; }
 echo; echo "ALL TESTS PASSED  (temp dir $T)"
