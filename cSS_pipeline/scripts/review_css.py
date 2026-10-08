@@ -112,7 +112,8 @@ class Reviewer:
                 if row == 0: a.set_title(f"slice {k}" + ("  (centre)" if k == kc else ""), fontsize=9)
         self.ax[0][0].set_ylabel("raw SWI", fontsize=9); self.ax[1][0].set_ylabel("suspect outlined", fontsize=9)
         flags = [n for n, f in (("artifact zone", "artifact_zone"), ("midline", "midline_zone"), ("vein-like", "vein_like"),
-                                ("INFRATENTORIAL", "infratentorial"), ("FLAIR-bright CSF: acute cSAH?", "flair_bright")) if flag(r.get(f, 0))]
+                                ("INFRATENTORIAL", "infratentorial"), ("FLAIR-bright CSF: acute cSAH?", "flair_bright"),
+                                ("FLAIR-bright cortex: cortical vein thrombosis?", "flair_ctx_bright")) if flag(r.get(f, 0))]
         if flag(r.get("near_ich_suggest", 0)):
             flags.append(f"ICH {num(r.get('ich_dist_mm')):.0f} mm away - press i if contiguous")
         feat = ""

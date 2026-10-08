@@ -5,6 +5,36 @@ T1 (and optionally FLAIR) anatomy. Research software, not for clinical use.
 
 ---
 
+## Published definitions this pipeline follows
+
+- **cSS** (Charidimou et al., *Neurology* 2017;89:2128, after the consensus criteria): "well-defined,
+  homogeneous hypointense curvilinear signal loss (black) on T2*-GRE or SWI **outlining the outer
+  surface of cerebral cortex, within the adjacent subarachnoid space, or both**". It is limited to the
+  convexity sulci and spares the brainstem, cerebellum and spinal cord (Charidimou et al., *Brain* 2015).
+- **Multifocality scale** (same 2017 paper), per hemisphere: 0 none; 1 = one sulcus or up to 3
+  immediately adjacent sulci; 2 = 2 or more non-adjacent sulci or more than 3 adjacent sulci. Total
+  0–4. More than 3 adjacent sulci count as multifocal because that much involvement implies more
+  than one bleeding source. Interrater weighted κ 0.87; rated blinded.
+- **ICH rule** (same paper): cSS "contiguous or potentially anatomically connected with any lobar
+  ICH" is not scored. Every cSS area must be separated from any lobar ICH by **at least 3 unaffected
+  sulci**, or **at least 2 unaffected sulci (at multiple axial levels) if the haematoma has no
+  superficial communication path along the convexity in 3-D**. v4.3 counts these sulci automatically
+  (`score_css.py`, needs `--recon`):
+  - fewer than 2 sulci in between → excluded, if you drew the ICH mask; only a warning with the
+    automatic mask;
+  - exactly 2 sulci in between → kept, but flagged for you to check the two extra conditions.
+- **SWI vs T2\*-GRE:** SWI gives higher multifocality scores than GRE, so the sequence is now saved
+  with every score (`sequence` column) and the two must not be pooled.
+- **Quantification** (van Harten et al., *NeuroImage: Clinical* 2023;38:103447, Leiden):
+  - Method: 2-D Frangi vesselness (σ = 1 voxel), rater-placed seeds, 3-D 6-neighbour region
+    growing, and false positives **removed by a human rater**.
+  - They report that the filter catches all cSS "but also several other hypointense tubular
+    structures such as some veins". The vein problem is the known open problem, and a human
+    review step is the published standard.
+  - Volume reproducibility: ICC 0.995. Voxel overlap between sessions: Dice 0.75.
+  - They propose **% of sulci affected** as less sequence-dependent than volume. v4.3 reports it
+    per hemisphere (`L_sulci_pct`, `R_sulci_pct`).
+
 ## 0. What changed in v4, and why
 
 v3 asked: *"is this dark, line-shaped and near cortex?"* Veins answer "yes" too. That is why, on
@@ -24,6 +54,7 @@ scale, Radiopaedia):
 | **Remote from lobar ICH** | `ich_dist_mm`, `near_ich_suggest` (≤ 5 mm) | far | near → reader presses **i** |
 | **Supratentorial** | `infratentorial` | 0 | 1 → classical superficial siderosis, reported separately |
 | Chronic: **no FLAIR hyperintensity** | `flair_csf_z`, `flair_bright` (only with FLAIR) | not bright | bright → acute convexity SAH |
+| Mimic: **cortical vein thrombosis** | `flair_ctx_z`, `flair_ctx_bright`: FLAIR signal of the cortex next to it | not bright | bright cortex → check for thrombosis |
 | Counted **by sulci** (focal 1–3, disseminated > 3) | `score_css.py` with Destrieux labels | | |
 
 Also changed in v4:

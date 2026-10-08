@@ -321,7 +321,9 @@ Each criterion is measured per candidate:
   asymmetric                      mirror_dark_frac               low            high (normal veins)
   remote from ICH                 ich_dist_mm, near_ich_suggest  far            <=5 mm
   supratentorial                  infratentorial                 0              1 (classical SS)
-  chronic, not acute cSAH         flair_csf_z, flair_bright      FLAIR not bright
+  chronic, not acute cSAH         flair_csf_z, flair_bright      FLAIR not bright (hint only:
+                                                                 chronic cSS can show mild FLAIR signal)
+  mimic: cortical vein thrombosis flair_ctx_z, flair_ctx_bright  FLAIR-bright cortex nearby -> check
                                   (only if work/ID_flair_swispace.nii.gz exists)
 
 Candidate generation (unchanged idea from v3, tightened):
@@ -526,8 +528,10 @@ if os.path.exists(fl_p):
     FL = nib.load(fl_p).get_fdata().astype(np.float32)
     csf_ref = FL[np.isin(seg, CSF) & brain & (FL > 0)]
     tis_ref = FL[tissue & brain & (FL > 0)]
-    if csf_ref.size and tis_ref.size:
+    ctx_ref = FL[cortex & brain & (FL > 0)]
+    if csf_ref.size and tis_ref.size and ctx_ref.size:
         f_mu = float(np.median(csf_ref)); f_sd = float(1.4826 * np.median(np.abs(tis_ref - np.median(tis_ref))) + 1e-6)
+        fc_mu = float(np.median(ctx_ref))
     else:
         FL = None
 
@@ -624,11 +628,13 @@ for p in regionprops(lab, spacing=vox):
     vtree = float(vext[comps].max()) if len(comps) else 0.0
     mdark = mirror_dark(pts)
     idist = float(ich_dist[pad][mm].min())
-    fz = np.nan
+    fz = fcz = np.nan
     if FL is not None:
-        ring = ndi.binary_dilation(mm, structure=s3, iterations=max(1, int(round(3 / vox[0])))) & \
-               (pial_sd[pad] > 0.5) & (FL[pad] > 0)
+        near3 = ndi.binary_dilation(mm, structure=s3, iterations=max(1, int(round(3 / vox[0])))) & (FL[pad] > 0)
+        ring = near3 & (pial_sd[pad] > 0.5)                       # sulcal CSF: acute convexity SAH
         if ring.sum() >= 5: fz = float(np.median((FL[pad][ring] - f_mu) / f_sd))
+        ctxn = near3 & cortex[pad]                                # cortex: oedema of cortical vein thrombosis
+        if ctxn.sum() >= 5: fcz = float(np.median((FL[pad][ctxn] - fc_mu) / f_sd))
     artz      = any(a in region for a in ARTIFACT_ZONES)
     midz      = bool(np.median(dmid[pad][mm]) < 5.0)
     # off-surface tube. vein_tree_mm is recorded only: on real SWI (P006) the dark tubular network
@@ -664,6 +670,7 @@ for p in regionprops(lab, spacing=vox):
                      mirror_dark_frac=round(mdark, 2), ich_dist_mm=round(min(idist, 999.0), 1),
                      near_ich_suggest=int(idist <= 5.0), infratentorial=int(infra),
                      flair_csf_z=round(fz, 2), flair_bright=int(np.isfinite(fz) and fz > 3.0),
+                     flair_ctx_z=round(fcz, 2), flair_ctx_bright=int(np.isfinite(fcz) and fcz > 3.0),
                      score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
@@ -673,7 +680,7 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "vein_like", "long_structure",
         "pial_dist_mm", "bank_frac", "tube_ratio", "surface_alignment", "tram_frac", "vein_tree_mm",
         "mirror_dark_frac", "ich_dist_mm", "near_ich_suggest", "infratentorial", "flair_csf_z",
-        "flair_bright", "score_v3", "score_v4", "accept"]
+        "flair_bright", "flair_ctx_z", "flair_ctx_bright", "score_v3", "score_v4", "accept"]
 keep = np.zeros(I.shape, np.int16)
 if rows:
     df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
@@ -818,7 +825,8 @@ class Reviewer:
                 if row == 0: a.set_title(f"slice {k}" + ("  (centre)" if k == kc else ""), fontsize=9)
         self.ax[0][0].set_ylabel("raw SWI", fontsize=9); self.ax[1][0].set_ylabel("suspect outlined", fontsize=9)
         flags = [n for n, f in (("artifact zone", "artifact_zone"), ("midline", "midline_zone"), ("vein-like", "vein_like"),
-                                ("INFRATENTORIAL", "infratentorial"), ("FLAIR-bright CSF: acute cSAH?", "flair_bright")) if flag(r.get(f, 0))]
+                                ("INFRATENTORIAL", "infratentorial"), ("FLAIR-bright CSF: acute cSAH?", "flair_bright"),
+                                ("FLAIR-bright cortex: cortical vein thrombosis?", "flair_ctx_bright")) if flag(r.get(f, 0))]
         if flag(r.get("near_ich_suggest", 0)):
             flags.append(f"ICH {num(r.get('ich_dist_mm')):.0f} mm away - press i if contiguous")
         feat = ""
@@ -947,7 +955,13 @@ v4: SULCAL scoring when work/ID_a2009s_swispace.nii.gz exists (recon-all + prep_
   0 none; 1 = one sulcus or <=3 adjacent sulci; 2 = >=2 non-adjacent or >3 sulci.
   STRIVE-2 category: focal = 1-3 sulci, disseminated = >3 sulci.
   Without Destrieux labels the v3 Euclidean approximation is used (3 mm foci, 10 mm adjacency).
-Infratentorial candidates (classical superficial siderosis pattern) are reported, not scored."""
+Infratentorial candidates (classical superficial siderosis pattern) are reported, not scored.
+v4.3 ICH rule (Charidimou et al., Neurology 2017;89:2128): cSS "contiguous or potentially anatomically
+connected with any lobar ICH" is not scored; cSS must be separated from any lobar ICH by >=3
+unaffected sulci, or by >=2 (at multiple axial levels) if the haematoma has no superficial path along
+the convexity. With Destrieux labels + an ICH mask, unaffected sulci between each accepted focus and
+the ICH are counted on the sulcal adjacency graph: <2 -> excluded (reader-drawn ICH mask) or warned
+(automatic mask); exactly 2 -> kept but flagged for the reader to check the 2-sulci conditions."""
 import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
 import sys, os, json, numpy as np, nibabel as nib, pandas as pd
 from scipy import ndimage as ndi
@@ -1050,6 +1064,52 @@ infra = df[df.infratentorial == 1].cand_id.astype(int).tolist() if "infratentori
 acc_all = df[df.accept == 1] if len(df) else df
 acc = acc_all[~acc_all.cand_id.isin(infra)] if len(acc_all) else acc_all
 acc_infra = acc_all[acc_all.cand_id.isin(infra)] if len(acc_all) else acc_all
+# ---- ICH separation counted in sulci (Charidimou 2017)
+ICH, ich_src = None, ""
+for pth, src_ in ((f"{base}/work/{subj}_ich.nii.gz", "drawn"), (f"{base}/work/{subj}_ich_used.nii.gz", "auto")):
+    if os.path.exists(pth):
+        m_ = nib.load(pth).get_fdata() > 0
+        ICH, ich_src = (m_, src_) if m_.any() else (None, src_)
+        break
+hemi_rng = lambda h: (11100, 11200) if h == "L" else (12100, 12200)
+
+def ich_sulci():
+    """Destrieux sulci next to the ICH (within 5 mm; else the nearest one)"""
+    sl = crop(ICH, 12); a = A2[sl]; sm = np.isin(a, SULC)
+    if not sm.any(): return set()
+    d, ind = ndi.distance_transform_edt(~sm, sampling=vox, return_indices=True)
+    m = ICH[sl]; near = m & (d <= 5.0)
+    if not near.any(): near = m & (d <= d[m].min() + 1e-6)
+    return set(int(c) for c in np.unique(a[tuple(i[near] for i in ind)]))
+
+def sulcal_hops(start, h):
+    """breadth-first distance (in sulcal steps) on the adjacency graph of one hemisphere"""
+    lo, hi = hemi_rng(h); nodes = [int(c) for c in SULC if lo <= c < hi]
+    dist = {c: 0 for c in start if lo <= c < hi}; front = list(dist)
+    while front:
+        nxt = []
+        for s_ in front:
+            for t in nodes:
+                if t not in dist and adjacent(s_, t): dist[t] = dist[s_] + 1; nxt.append(t)
+        front = nxt
+    return dist
+
+cand_sulci, ich_excl, ich_check, ich_between = {}, [], [], {}
+if A2 is not None and len(acc):
+    for _, r in acc.iterrows():
+        cand_sulci[int(r.cand_id)] = sulci_of(lab == int(r.cand_id), r.hemi)
+    if ICH is not None:
+        IS = ich_sulci(); hops = {h: sulcal_hops(IS, h) for h in ("L", "R")}
+        for _, r in acc.iterrows():
+            c = int(r.cand_id); dd = [hops[r.hemi][x] for x in cand_sulci[c] if x in hops[r.hemi]]
+            if not dd: continue                       # not connected to the ICH's sulci (e.g. other hemisphere)
+            between = min(dd) - 1                     # unaffected sulci in between (-1 = same sulcus)
+            ich_between[c] = between
+            if between < 2: ich_excl.append(c)
+            elif between == 2: ich_check.append(c)
+        if ich_src == "drawn" and ich_excl:
+            acc = acc[~acc.cand_id.isin(ich_excl)]
+
 method = "sulcal (Destrieux)" if A2 is not None else "euclidean (approximation)"
 result = {"subject": subj, "scoring_method": method}; total = total_foci = total_sulci = 0
 sulci_names = []
@@ -1060,10 +1120,14 @@ for h in ["L", "R"]:
     foci = groups(ids, D, MERGE_MM); clusters = groups(ids, D, ADJ_MM)
     fpc = [sum(1 for f in foci if f[0] in c) for c in clusters]
     if A2 is not None:
-        S = sorted(set(c for i in ids for c in sulci_of(masks[i], h)))
+        S = sorted(set(c for i in ids for c in cand_sulci.get(i) or sulci_of(masks[i], h)))
         ncomp = components(S, adjacent) if S else 0
         score = 0 if not ids else (1 if len(S) <= 3 and ncomp <= 1 else 2)
         result[f"{h}_sulci"] = len(S); total_sulci += len(S)
+        # internally calibrated extent (van Harten et al. 2023 suggest % of sulci affected as less
+        # sequence-dependent than volume): affected / all Destrieux sulci of the hemisphere
+        n_all = int(sum(1 for c in SULC if hemi_rng(h)[0] <= c < hemi_rng(h)[1]))
+        result[f"{h}_sulci_pct"] = round(100.0 * len(S) / max(n_all, 1), 1)
         sulci_names += [lut.get(c, str(c)) for c in S]
     else:
         score = 0 if not ids else (1 if len(clusters) == 1 and fpc[0] <= 3 else 2)
@@ -1090,6 +1154,21 @@ if A2 is not None:
     result["n_sulci_total"] = total_sulci
     result["sulci"] = sulci_names
 result["infratentorial_accepted"] = int(len(acc_infra))
+if A2 is not None and ICH is not None:
+    result["ich_mask"] = ich_src
+    result["ich_sulcal_too_close"] = ",".join(map(str, sorted(ich_excl)))
+    result["ich_sulcal_check"] = ",".join(map(str, sorted(ich_check)))
+# sequence (SWI vs T2*-GRE scores are not interchangeable: SWI rates higher)
+seq = "unknown"
+import glob as _glob
+for jp in sorted(_glob.glob(f"{base}/raw/{subj}/SWI/*.json")):
+    try:
+        it = " ".join(json.load(open(jp)).get("ImageType", [])).upper()
+        seq = "SWI" if "SWI" in it else ("T2*-GRE" if it else seq)
+        break
+    except Exception:
+        pass
+result["sequence"] = seq
 result["candidate_volume_mm3"] = round(float(acc.volume_mm3.sum()) if len(acc) else 0.0, 1)
 result["grown_volume_mm3"] = round(grown_vol, 1)
 result["regions"] = sorted(acc.region.unique().tolist()) if len(acc) else []
@@ -1107,10 +1186,10 @@ if os.path.exists(summ):
     row = pd.concat([old, row], ignore_index=True)
 row.to_csv(summ, index=False)
 
-print(f"\n{subj}  cSS multifocality score: {total}/4   ({result['category']})   [{method}]")
+print(f"\n{subj}  cSS multifocality score: {total}/4   ({result['category']})   [{method}; {seq}]")
 for h, nm in (("L", "left "), ("R", "right")):
     print(f"  {nm}: score {result[f'{h}_score']}  foci {result[f'{h}_foci']}  clusters {result[f'{h}_clusters']}"
-          + (f"  sulci {result[f'{h}_sulci']}" if A2 is not None else ""))
+          + (f"  sulci {result[f'{h}_sulci']} ({result[f'{h}_sulci_pct']}% of sulci)" if A2 is not None else ""))
 if A2 is not None and sulci_names:
     print(f"  sulci: {', '.join(sulci_names)}")
 print(f"  volume: candidates {result['candidate_volume_mm3']} mm3, grown (full extent) {result['grown_volume_mm3']} mm3")
@@ -1121,6 +1200,14 @@ if result["n_unreviewed"]:
 if result["infratentorial_accepted"]:
     print(f"  infratentorial siderosis (NOT in cSS score - consider classical superficial siderosis): "
           f"{result['infratentorial_accepted']} candidates")
+if ich_excl:
+    print(f"  ICH rule (<3 unaffected sulci to the lobar ICH, Charidimou 2017): candidates {sorted(ich_excl)} "
+          + ("EXCLUDED from the score" if ich_src == "drawn" else
+             "would be excluded - automatic ICH mask: confirm the ICH (draw work/" + subj + "_ich.nii.gz) "
+             "or call them 'i' in the review"))
+if ich_check:
+    print(f"  ICH rule: candidates {sorted(ich_check)} are exactly 2 sulci from the ICH - kept; exclude ('i') if "
+          f"they are not 2 sulci away at multiple axial levels or the haematoma reaches the surface")
 if result["near_ich_candidates"]:
     print(f"  near-ICH siderosis (NOT in score): {result['near_ich_candidates']} candidates, "
           f"{result['near_ich_volume_mm3']} mm3")
@@ -1636,6 +1723,11 @@ python $ROOT/tests/check_v4.py PH3 | tail -3
 python $S/score_css.py PH3 --truth > $T/score_v4.log
 grep -q "3/4" $T/score_v4.log && grep -q "sulcal (Destrieux)" $T/score_v4.log || { cat $T/score_v4.log; echo "FAIL: sulcal score on PH3 should be 3/4 (L1 + R2)"; exit 1; }
 grep -A3 "cSS multifocality" $T/score_v4.log
+echo "== ICH rule in sulci (Charidimou 2017): reader-drawn ICH -> left foci next to it excluded"
+cp $T/work/PH3_ich_truth.nii.gz $T/work/PH3_ich.nii.gz
+python $S/score_css.py PH3 --truth > $T/score_ich.log; rm $T/work/PH3_ich.nii.gz
+grep -q "2/4" $T/score_ich.log && grep -q "EXCLUDED" $T/score_ich.log || { cat $T/score_ich.log; echo "FAIL: ICH sulcal rule"; exit 1; }
+grep "ICH rule" $T/score_ich.log
 echo; echo "ALL TESTS PASSED  (temp dir $T)"
 ```
 

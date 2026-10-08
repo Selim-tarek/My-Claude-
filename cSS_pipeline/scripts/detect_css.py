@@ -17,7 +17,9 @@ Each criterion is measured per candidate:
   asymmetric                      mirror_dark_frac               low            high (normal veins)
   remote from ICH                 ich_dist_mm, near_ich_suggest  far            <=5 mm
   supratentorial                  infratentorial                 0              1 (classical SS)
-  chronic, not acute cSAH         flair_csf_z, flair_bright      FLAIR not bright
+  chronic, not acute cSAH         flair_csf_z, flair_bright      FLAIR not bright (hint only:
+                                                                 chronic cSS can show mild FLAIR signal)
+  mimic: cortical vein thrombosis flair_ctx_z, flair_ctx_bright  FLAIR-bright cortex nearby -> check
                                   (only if work/ID_flair_swispace.nii.gz exists)
 
 Candidate generation (unchanged idea from v3, tightened):
@@ -222,8 +224,10 @@ if os.path.exists(fl_p):
     FL = nib.load(fl_p).get_fdata().astype(np.float32)
     csf_ref = FL[np.isin(seg, CSF) & brain & (FL > 0)]
     tis_ref = FL[tissue & brain & (FL > 0)]
-    if csf_ref.size and tis_ref.size:
+    ctx_ref = FL[cortex & brain & (FL > 0)]
+    if csf_ref.size and tis_ref.size and ctx_ref.size:
         f_mu = float(np.median(csf_ref)); f_sd = float(1.4826 * np.median(np.abs(tis_ref - np.median(tis_ref))) + 1e-6)
+        fc_mu = float(np.median(ctx_ref))
     else:
         FL = None
 
@@ -320,11 +324,13 @@ for p in regionprops(lab, spacing=vox):
     vtree = float(vext[comps].max()) if len(comps) else 0.0
     mdark = mirror_dark(pts)
     idist = float(ich_dist[pad][mm].min())
-    fz = np.nan
+    fz = fcz = np.nan
     if FL is not None:
-        ring = ndi.binary_dilation(mm, structure=s3, iterations=max(1, int(round(3 / vox[0])))) & \
-               (pial_sd[pad] > 0.5) & (FL[pad] > 0)
+        near3 = ndi.binary_dilation(mm, structure=s3, iterations=max(1, int(round(3 / vox[0])))) & (FL[pad] > 0)
+        ring = near3 & (pial_sd[pad] > 0.5)                       # sulcal CSF: acute convexity SAH
         if ring.sum() >= 5: fz = float(np.median((FL[pad][ring] - f_mu) / f_sd))
+        ctxn = near3 & cortex[pad]                                # cortex: oedema of cortical vein thrombosis
+        if ctxn.sum() >= 5: fcz = float(np.median((FL[pad][ctxn] - fc_mu) / f_sd))
     artz      = any(a in region for a in ARTIFACT_ZONES)
     midz      = bool(np.median(dmid[pad][mm]) < 5.0)
     # off-surface tube. vein_tree_mm is recorded only: on real SWI (P006) the dark tubular network
@@ -360,6 +366,7 @@ for p in regionprops(lab, spacing=vox):
                      mirror_dark_frac=round(mdark, 2), ich_dist_mm=round(min(idist, 999.0), 1),
                      near_ich_suggest=int(idist <= 5.0), infratentorial=int(infra),
                      flair_csf_z=round(fz, 2), flair_bright=int(np.isfinite(fz) and fz > 3.0),
+                     flair_ctx_z=round(fcz, 2), flair_ctx_bright=int(np.isfinite(fcz) and fcz > 3.0),
                      score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
@@ -369,7 +376,7 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "vein_like", "long_structure",
         "pial_dist_mm", "bank_frac", "tube_ratio", "surface_alignment", "tram_frac", "vein_tree_mm",
         "mirror_dark_frac", "ich_dist_mm", "near_ich_suggest", "infratentorial", "flair_csf_z",
-        "flair_bright", "score_v3", "score_v4", "accept"]
+        "flair_bright", "flair_ctx_z", "flair_ctx_bright", "score_v3", "score_v4", "accept"]
 keep = np.zeros(I.shape, np.int16)
 if rows:
     df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)

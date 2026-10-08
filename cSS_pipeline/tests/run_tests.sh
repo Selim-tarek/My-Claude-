@@ -44,4 +44,9 @@ python $ROOT/tests/check_v4.py PH3 | tail -3
 python $S/score_css.py PH3 --truth > $T/score_v4.log
 grep -q "3/4" $T/score_v4.log && grep -q "sulcal (Destrieux)" $T/score_v4.log || { cat $T/score_v4.log; echo "FAIL: sulcal score on PH3 should be 3/4 (L1 + R2)"; exit 1; }
 grep -A3 "cSS multifocality" $T/score_v4.log
+echo "== ICH rule in sulci (Charidimou 2017): reader-drawn ICH -> left foci next to it excluded"
+cp $T/work/PH3_ich_truth.nii.gz $T/work/PH3_ich.nii.gz
+python $S/score_css.py PH3 --truth > $T/score_ich.log; rm $T/work/PH3_ich.nii.gz
+grep -q "2/4" $T/score_ich.log && grep -q "EXCLUDED" $T/score_ich.log || { cat $T/score_ich.log; echo "FAIL: ICH sulcal rule"; exit 1; }
+grep "ICH rule" $T/score_ich.log
 echo; echo "ALL TESTS PASSED  (temp dir $T)"

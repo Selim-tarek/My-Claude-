@@ -57,6 +57,11 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   bordering a common gyrus; per hemisphere 0 / 1 (≤3 adjacent sulci) / 2; STRIVE-2 by sulci
 - otherwise Euclidean approximation (3 mm foci, 10 mm clusters)
 - infratentorial and reader near-ICH excluded from 0–4 but reported; n_unreviewed reported
+- ICH rule (Charidimou 2017, verified from the PDF): ≥3 unaffected sulci between cSS and lobar ICH
+  (≥2 at multiple axial levels if no superficial path) — counted on the Destrieux adjacency graph;
+  <2 excluded with a reader-drawn ICH mask (warned with the auto mask), ==2 flagged
+- sequence (SWI / T2*-GRE from raw/<ID>/SWI/*.json ImageType) and % sulci affected per hemisphere
+  (van Harten 2023) are recorded
 
 ## Validation status (honest)
 - v4 first real run: P006 with T1 SynthSeg (no recon-all yet): 71 candidates; top ranks in R inferior
