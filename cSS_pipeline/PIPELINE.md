@@ -353,6 +353,24 @@ Make it quick for them:
 5. `feature_report.py` now uses the expert calls automatically when they exist. Use
    `--source reader` to use yours instead.
 
+## 5c. Synthetic lesions (v4.10)
+
+`make_synthetic.py` inserts artificial cSS into a cSS-negative scan, so we know exactly where the
+lesions are. The v3 generator makes them **realistic**: the P006 stress test showed that the old
+lesions were too big and blob-like, so size and branching separated them "for the wrong reason".
+
+- **Thin curvilinear lines** traced along the cortex–CSF boundary: 1 voxel wide, sometimes 2
+  (blooming), **5–30 mm** long, on 2–5 slices.
+- **Tram-track** in 40 % of lesions: the opposite bank of the same sulcus gets a matching line.
+- **Vein decoys** (default 4 per synthetic scan in the stress test): dark tubes 0.5–0.9 mm in
+  radius and 15–40 mm long, running through the sulcal CSF. The stress test reports each feature's
+  AUC **vs these decoy veins** as well.
+- `--legacy` reproduces the old generator for comparison.
+
+```
+python ~/css_project/scripts/stress_test.py --hosts P006 --depths 0.6,0.45,0.3 --seeds 1,2 --tag p006_v3
+```
+
 ## 6. Validation plan (what makes this publishable)
 
 1. **Re-run P006 with v4.** First back up the v3 review: `mkdir -p ~/css_project/review/v3 && cp ~/css_project/review/P006_* ~/css_project/review/v3/`.

@@ -37,6 +37,7 @@ PYEOF
 python $S/detect_css.py PH1S > /dev/null
 echo "== feature report";      python $S/feature_report.py | head -3
 echo "== stress test (small)"; python $S/stress_test.py --hosts PH1,PH2 --depths 0.6 --seeds 1 --tag test | grep -A2 SUMMARY
+python $S/stress_test.py --hosts PH1 --depths 0.6 --seeds 1 --tag test_legacy --legacy | grep -A1 SUMMARY
 echo "== v4 phantom: tram-track / convexity cSS vs tubular & surface veins, ICH, sulcal scoring"
 python $ROOT/tests/phantom_v4.py PH3 1; python $S/align_seg.py PH3 > /dev/null
 python $S/detect_css.py PH3 | head -1

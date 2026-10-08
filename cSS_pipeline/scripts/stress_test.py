@@ -13,6 +13,8 @@ ap.add_argument("--detector", default="detect_css.py"); ap.add_argument("--tag",
 ap.add_argument("--hosts", default="P001,P002,P003,P004,P005")
 ap.add_argument("--depths", default="0.6,0.45,0.3"); ap.add_argument("--seeds", default="1")
 ap.add_argument("--z", default="-2.5")
+ap.add_argument("--veins", default="4", help="synthetic vein decoys per synthetic scan (v3 generator)")
+ap.add_argument("--legacy", action="store_true", help="v2 synthetic lesions (flood-filled, thicker)")
 a = ap.parse_args()
 base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project")); S = f"{base}/scripts"
 py = sys.executable
@@ -33,7 +35,7 @@ for h in a.hosts.split(","):
     print(f"{h}: anatomy {'T1' if use_t1 else 'SWI-only'}", flush=True)
     for d in a.depths.split(","):
         for s in a.seeds.split(","):
-            run(f"{S}/make_synthetic.py", h, "8", d, s)
+            run(f"{S}/make_synthetic.py", h, "8", d, s, *(["--legacy"] if a.legacy else ["--veins", a.veins]))
             if use_t1:   # copied AFTER the synthetic SWI is written, so it counts as up to date
                 shutil.copy(t1, f"{base}/work/{h}S_t1seg_swispace.nii.gz")
             run(f"{S}/align_seg.py", h + "S")
@@ -48,7 +50,10 @@ for h in a.hosts.split(","):
                 tr = nib.load(f"{base}/work/{h}S_truth.nii.gz").get_fdata() > 0
                 cm = nib.load(f"{base}/review/{h}S_candidates.nii.gz").get_fdata().astype(int)
                 les = set(np.unique(cm[ndi.binary_dilation(tr, iterations=1)])) - {0}
+                vp = f"{base}/work/{h}S_veins.nii.gz"
+                vv = set(np.unique(cm[nib.load(vp).get_fdata() > 0])) - {0} if os.path.exists(vp) else set()
                 cdf["is_lesion"] = cdf.cand_id.isin(les).astype(int); cdf["host"] = h; cdf["depth"] = float(d)
+                cdf["is_decoy_vein"] = (cdf.cand_id.isin(vv) & ~cdf.cand_id.isin(les)).astype(int)
                 feats.append(cdf)
             print(f"{h} depth {d} seed {s}: found {int(row['found'])}/{int(row['total'])}, "
                   f"worst #{int(row['worst'])}, non-lesions above {int(row['above'])}, AUC {row['auc']:.2f}", flush=True)
@@ -77,4 +82,6 @@ if feats:
               "score_v3", "score_v4", "score"]:
         if f in F.columns:
             L, N = F[F.is_lesion == 1][f], F[F.is_lesion == 0][f]
-            print(f"  {f:18s} cSS median {L.median():7.2f} | others median {N.median():7.2f} | AUC {auc(L, N):.2f}")
+            V = F[F.get("is_decoy_vein", 0) == 1][f] if "is_decoy_vein" in F else N.iloc[0:0]
+            print(f"  {f:18s} cSS median {L.median():7.2f} | others median {N.median():7.2f} | AUC {auc(L, N):.2f}"
+                  + (f" | vs decoy veins {auc(L, V):.2f} (n={len(V)})" if len(V) else ""))

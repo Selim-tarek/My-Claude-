@@ -129,6 +129,13 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
 - v4.9.3: stress_test.py uses the host's T1 labels when present (copies work/H_t1seg_swispace to
   HS after the synthetic SWI is written). Next: stress test on P006 = do features work WITH T1?
 
+- P006 stress (T1, v2 synthetic): strong 94 %, medium 94 %, faint 50 %; ranking AUC .87/.78/.61;
+  features bank_frac .85, branch .78, surface_gradient .73, contact .72, volume .74, elongation .38
+  -> partly artifacts of the v2 generator (big, blob-like lesions).
+- v4.10 make_synthetic v3: thin traced lines (1-2 vox, 5-30 mm log-uniform, 2-5 slices), tram-track
+  40 %, vein decoys (--veins, in sulcal CSF) -> work/HS_veins.nii.gz; stress_test --veins 4 default,
+  --legacy; feature table adds AUC vs decoy veins.
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.
