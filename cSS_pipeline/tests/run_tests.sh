@@ -94,4 +94,23 @@ python $S/check_known.py PH4 --old $T/work/PH3_truth.nii.gz --ids 1,2,3,4,5,6 | 
 python $S/check_known.py PH4 --old $T/work/PH4_infra_line.nii.gz --ids 1 | head -1
 python $S/check_known.py PH4 --old $T/work/PH4_infra_line.nii.gz --ids 1 | head -1 | grep -q "kept" \
   && { echo "FAIL: cerebellar line still shown as a candidate"; exit 1; }
+echo "== partial-coverage slab (bottom cut off) with T1 anatomy: skull-base rules must switch off"
+python - "$T" <<'PYEOF'
+import sys, numpy as np, nibabel as nib
+b = sys.argv[1]; img = nib.load(b + "/data/PH3_swi.nii"); I = img.get_fdata().astype(np.float32)
+seg = nib.load(b + "/work/PH3_seg_swispace.nii.gz").get_fdata().astype(np.int32)
+I[:, :, :30] = 0; seg[:, :, :30] = 0                      # slab starts in the middle of the brain
+nib.save(nib.Nifti1Image(I, img.affine), b + "/data/PH5_swi.nii")
+nib.save(nib.Nifti1Image(seg, img.affine), b + "/synthseg/PH5_seg.nii.gz")
+nib.save(nib.Nifti1Image(seg, img.affine), b + "/work/PH5_t1seg_swispace.nii.gz")   # pretend T1 labels
+PYEOF
+python $S/align_seg.py PH5 > /dev/null
+python $S/detect_css.py PH5 | head -2 | tee $T/ph5.log
+grep -q "anatomy T1" $T/ph5.log && grep -q "cut off at the bottom" $T/ph5.log || { echo "FAIL: coverage / anatomy detection"; exit 1; }
+grep -q "skull base" $T/ph5.log && { echo "FAIL: skull-base rule active on a cut-off slab"; exit 1; }
+echo "== T1 anatomy on the cerebellum phantom: position rules active, cSS kept"
+cp $T/synthseg/PH4_seg.nii.gz $T/work/PH4_t1seg_swispace.nii.gz; python $S/align_seg.py PH4 > /dev/null
+python $S/detect_css.py PH4 | head -2
+python $S/check_known.py PH4 --old $T/work/PH3_truth.nii.gz --ids 1,2,3,4,5,6 | tail -1 | grep -q "6 of 6" || { echo "FAIL: cSS lost (T1 mode)"; exit 1; }
+python $S/check_known.py PH4 --old $T/work/PH4_infra_line.nii.gz --ids 1 | head -1 | grep -q "kept" && { echo "FAIL: cerebellar line kept (T1 mode)"; exit 1; }
 echo; echo "ALL TESTS PASSED  (temp dir $T)"

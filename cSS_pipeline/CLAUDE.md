@@ -115,6 +115,14 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   one swallowed known focus #13 and was excluded as tentorial). PH1S synthetic now 7/8: one low
   synthetic lesion falls in the skull-base band (lowest 20 % of the cerebrum) - known trade-off.
 
+- P010 (cSS-negative SWI-only partial slab, ~0.47 mm in-plane): 67 FP after 33 excluded; stress test
+  sensitivity strong 56 % / medium 25 % / faint 19 %, ranking AUC ~0.5, features ~0.5 (SynthSeg-on-SWI
+  anatomy too coarse). check_known on P010S: lesions excluded as basal cisterns / skull base /
+  microbleed-like. v4.9.2: skull-base + basal rules need T1 anatomy AND a scan that includes the
+  skull base (coverage check); SWI-only infratentorial needs >=50 %; cmb_like flag only; merge gap
+  2x slice (3-4 mm); elongation filter only for single-piece candidates (merged V-shapes were lost).
+  Phantoms back to 8/8, 16/16, 6/6. Conclusion: T1 should be part of the study protocol.
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.

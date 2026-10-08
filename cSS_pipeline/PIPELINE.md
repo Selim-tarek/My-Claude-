@@ -303,6 +303,16 @@ led to these steps. **Excluded candidates are never deleted.** They are listed w
 | Basal cisterns (v4.9) | ≥ 30 % within 5 mm of brainstem, ventral diencephalon, hippocampus or amygdala → excluded (circle of Willis, posterior cerebral artery, basal vein of Rosenthal) |
 | Skull base (v4.9) | Lowest 20 % of the **cerebrum's** height (any label), or artifact-zone labels in the lowest 40 % → excluded |
 
+**v4.9.2: when the position rules apply.** They backfired on P010 (a partial slab, no T1): synthetic
+lesions were excluded as "skull base" or "basal cisterns".
+- **Skull-base and basal-cistern rules** run only with **T1 anatomy** and when the scan actually
+  **includes the skull base**. A slab cut off at the bottom has no skull base in it.
+- **Without a T1**, the cerebellum rule needs ≥ 50 % of the candidate near the cerebellum.
+- **Microbleed-like** is now a flag in the reviewer, not an exclusion.
+- The **merge gap** grows with slice thickness (2 × slice, 3–4 mm). The **elongation filter**
+  applies only to single-piece candidates.
+- The first output line states the anatomy source and the coverage.
+
 - Safety checks: on both phantoms every cSS lesion is still kept (6/6 and 8/8), while half the
   phantom veins are removed.
 - On a real scan, check that your **known** lesions survive:

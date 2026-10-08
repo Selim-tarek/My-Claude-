@@ -21,7 +21,7 @@ def run(*args):
     return r.stdout
 rows = []; feats = []
 for h in a.hosts.split(","):
-    clean = run(f"{S}/{a.detector}", h, a.z, "85", "3").split("\n")[0]
+    clean = run(f"{S}/{a.detector}", h, a.z, "85", "3")
     nclean = int(re.search(r"-> (\d+) candidates", clean).group(1))
     shutil.copy(f"{base}/synthseg/{h}_seg.nii.gz", f"{base}/synthseg/{h}S_seg.nii.gz")
     for d in a.depths.split(","):

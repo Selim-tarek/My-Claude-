@@ -186,7 +186,7 @@ mkdir -p $B/logs
 for s in "$@"; do
   echo "======== $s"
   if NOVIEW=1 zsh $B/scripts/run_css.sh $s > $B/logs/${s}_run.log 2>&1; then
-    grep -m1 "raw components" $B/logs/${s}_run.log
+    grep -m2 -E "raw components|anatomy " $B/logs/${s}_run.log
   else
     echo "FAILED - see $B/logs/${s}_run.log"; tail -5 $B/logs/${s}_run.log
   fi
@@ -367,7 +367,8 @@ MIN_MM3, MIN_SLICES, MIN_ELONG = 25.0, 2, 2.0   # v4: 2.0 (tram-track = two para
                                                 # round microbleeds stay ~1-1.5)
 PIAL_IN_MM, PIAL_OUT_MM = 3.5, 4.0     # pial band: cortex thickness + blooming / subarachnoid CSF
 # v4.8 false-positive reduction (reader feedback on P006: duplicates, specks, obvious veins, skull-base
-# artifact, faint normal cortex). Excluded candidates are NOT deleted: they are listed with the reason
+# artifact, faint normal cortex). v4.9.2: microbleed-like is a flag only; skull-base / basal rules need T1
+# anatomy and a scan that includes the skull base. Excluded candidates are NOT deleted: they are listed with the reason
 # in review/ID_excluded.csv (+ .nii.gz). CSS_KEEP_ALL=1 switches all exclusions off.
 MERGE_GAP_MM = 3.0      # fragments of one dark line closer than this are merged into one candidate
 MERGE_MAX_MM = 40.0     # ...but only while the merged object stays focus-sized: on P006 unlimited merging
@@ -395,6 +396,11 @@ swi = nib.load(f"{base}/data/{subj}_swi.nii")
 I   = swi.get_fdata().astype(np.float32)
 seg = nib.load(f"{base}/work/{subj}_seg_swispace.nii.gz").get_fdata().astype(np.int32)
 vox = tuple(float(v) for v in swi.header.get_zooms()[:3])
+# v4.9.2 anatomy confidence: millimetre position rules (skull base, basal cisterns) are only trusted
+# with T1-derived labels; SynthSeg on the SWI is too coarse (P010: real-looking lesions excluded)
+_t1p = f"{base}/work/{subj}_t1seg_swispace.nii.gz"
+T1_ANAT = os.path.exists(_t1p) and os.path.getmtime(_t1p) >= os.path.getmtime(f"{base}/data/{subj}_swi.nii")
+MERGE_GAP_MM = min(max(MERGE_GAP_MM, 2.0 * vox[2]), 4.0)   # thick slices: inter-slice gaps must not split a line
 s2d = np.ones((3, 3, 1), bool); s3 = np.ones((3, 3, 3), bool)
 mm2vox = lambda mm: tuple(mm / v for v in vox)
 
@@ -486,7 +492,12 @@ if MERGE_GAP_MM > 0 and lab.max() > 0:
     u = np.unique(merged[merged > 0]); remap = np.zeros(int(merged.max()) + 1, np.int32)
     remap[u] = np.arange(1, len(u) + 1)
     n_before_merge = int(len(np.unique(lab[lab > 0])))
+    _orig = lab
     lab = remap[merged]
+    _sel = _orig > 0
+    _pairs = np.unique(np.stack([lab[_sel], _orig[_sel]]), axis=1)
+    n_pieces = np.bincount(_pairs[0], minlength=int(lab.max()) + 1)    # original pieces per candidate
+    del _orig, _sel, _pairs
     del near_lab, merged
 
 os.makedirs(f"{base}/work", exist_ok=True)
@@ -641,7 +652,9 @@ for p in regionprops(lab, spacing=vox):
     n_sl = int(mm.any(axis=(0, 1)).sum())
     if n_sl < MIN_SLICES: continue
     elong = p.axis_major_length / max(p.axis_minor_length, 1e-3)
-    if elong < MIN_ELONG: continue
+    # elongation rejects round microbleeds, which are single pieces; a merged candidate (two banks,
+    # a bent line) can be compact overall and is not rejected for it (v4.9.2)
+    if elong < MIN_ELONG and ('n_pieces' not in dir() or n_pieces[p.label] <= 1): continue
     seg_nb = seg[pad][ndi.binary_dilation(mm, iterations=2)]
     nb = seg_nb[seg_nb >= 1000]
     # infratentorial only when clearly cerebellar/brainstem with little cerebral cortex nearby, so
@@ -769,20 +782,26 @@ _src = _cer if _cer.any() else brain[::4, ::4, ::4]
 _bz = (swi.affine @ np.c_[np.argwhere(_src) * 4, np.ones(int(_src.sum()))].T)[2]
 z_lo, z_hi = float(_bz.min()), float(_bz.max())
 for r in rows: r["rel_height"] = round((r["_wz"] - z_lo) / max(z_hi - z_lo, 1e-6), 2)
+# coverage: a slab that is cut off at the bottom has no skull base in it - "lowest 20 %" would then
+# remove ordinary cortex (P010: lateral occipital lesion on slice 6)
+_zax = int(np.argmax(np.abs(swi.affine[2, :3])))
+_area = brain.sum(axis=tuple(a for a in range(3) if a != _zax)).astype(float)
+_nz = np.nonzero(_area)[0]
+_bot = _nz[0] if swi.affine[2, _zax] > 0 else _nz[-1]
+FULL_BOTTOM = bool(len(_nz) and _area[_bot] < 0.2 * _area.max())
 def exclusion(r):
     if KEEP_ALL: return ""
-    if r["infratentorial"] or r["infra_frac"] >= 0.3:
+    if r["infratentorial"] or r["infra_frac"] >= (0.3 if T1_ANAT else 0.5):
         return "infratentorial / tentorial interface (cerebellum, brainstem) - not cSS by definition"
-    if r["basal_frac"] >= 0.3:
+    if T1_ANAT and r["basal_frac"] >= 0.3:
         return "basal cisterns (circle of Willis / basal veins next to brainstem, mesial temporal lobe)"
-    if r["rel_height"] < 0.2:
+    if T1_ANAT and FULL_BOTTOM and r["rel_height"] < 0.2:
         return "skull base (lowest 20 % of the cerebrum)"
     if r["extent_mm"] < MIN_EXTENT_MM: return f"speck (<{MIN_EXTENT_MM:g} mm)"
-    if r["cmb_like"]: return "microbleed-like (small, >=half in parenchyma)"
     tub_, tram_ = r["tube_ratio"], r["tram_frac"]
     if r["pial_dist_mm"] > 0.5 and np.isfinite(tub_) and tub_ > 0.45 and not (np.isfinite(tram_) and tram_ >= 0.2):
         return "vein: tubular, in the middle of the sulcal CSF"
-    if r["artifact_zone"] and r["rel_height"] < 0.4:
+    if FULL_BOTTOM and r["artifact_zone"] and r["rel_height"] < 0.4:
         return "skull-base susceptibility artifact zone"
     if np.isfinite(r["edge_contrast"]) and r["edge_contrast"] < MIN_EDGE_SD:
         return "faint / ill-defined (normal dark cortex)"
@@ -818,6 +837,9 @@ df.to_csv(f"{base}/review/{subj}_candidates.csv", index=False)
 nib.save(nib.Nifti1Image(keep, swi.affine), f"{base}/review/{subj}_candidates.nii.gz")
 nib.save(nib.Nifti1Image(ich.astype(np.uint8), swi.affine), f"{base}/work/{subj}_ich_used.nii.gz")
 cnt = lambda c: int(df[c].astype(int).sum()) if len(df) else 0
+print(f"{subj}: anatomy {'T1' if T1_ANAT else 'SWI-only (position rules relaxed)'}, "
+      f"coverage {'includes skull base' if FULL_BOTTOM else 'cut off at the bottom (skull-base rules off)'}, "
+      f"merge gap {MERGE_GAP_MM:.1f} mm")
 print(f"{subj}: {n_raw} raw components -> {len(df)} candidates "
       f"[{len(excluded)} excluded: " + (", ".join(f"{v} {k.split(' (')[0].split(':')[0]}" for k, v in
       pd.Series([r['_excl'] for r in excluded]).value_counts().items()) if excluded else "none")
@@ -1845,7 +1867,7 @@ def run(*args):
     return r.stdout
 rows = []; feats = []
 for h in a.hosts.split(","):
-    clean = run(f"{S}/{a.detector}", h, a.z, "85", "3").split("\n")[0]
+    clean = run(f"{S}/{a.detector}", h, a.z, "85", "3")
     nclean = int(re.search(r"-> (\d+) candidates", clean).group(1))
     shutil.copy(f"{base}/synthseg/{h}_seg.nii.gz", f"{base}/synthseg/{h}S_seg.nii.gz")
     for d in a.depths.split(","):
@@ -2230,6 +2252,25 @@ python $S/check_known.py PH4 --old $T/work/PH3_truth.nii.gz --ids 1,2,3,4,5,6 | 
 python $S/check_known.py PH4 --old $T/work/PH4_infra_line.nii.gz --ids 1 | head -1
 python $S/check_known.py PH4 --old $T/work/PH4_infra_line.nii.gz --ids 1 | head -1 | grep -q "kept" \
   && { echo "FAIL: cerebellar line still shown as a candidate"; exit 1; }
+echo "== partial-coverage slab (bottom cut off) with T1 anatomy: skull-base rules must switch off"
+python - "$T" <<'PYEOF'
+import sys, numpy as np, nibabel as nib
+b = sys.argv[1]; img = nib.load(b + "/data/PH3_swi.nii"); I = img.get_fdata().astype(np.float32)
+seg = nib.load(b + "/work/PH3_seg_swispace.nii.gz").get_fdata().astype(np.int32)
+I[:, :, :30] = 0; seg[:, :, :30] = 0                      # slab starts in the middle of the brain
+nib.save(nib.Nifti1Image(I, img.affine), b + "/data/PH5_swi.nii")
+nib.save(nib.Nifti1Image(seg, img.affine), b + "/synthseg/PH5_seg.nii.gz")
+nib.save(nib.Nifti1Image(seg, img.affine), b + "/work/PH5_t1seg_swispace.nii.gz")   # pretend T1 labels
+PYEOF
+python $S/align_seg.py PH5 > /dev/null
+python $S/detect_css.py PH5 | head -2 | tee $T/ph5.log
+grep -q "anatomy T1" $T/ph5.log && grep -q "cut off at the bottom" $T/ph5.log || { echo "FAIL: coverage / anatomy detection"; exit 1; }
+grep -q "skull base" $T/ph5.log && { echo "FAIL: skull-base rule active on a cut-off slab"; exit 1; }
+echo "== T1 anatomy on the cerebellum phantom: position rules active, cSS kept"
+cp $T/synthseg/PH4_seg.nii.gz $T/work/PH4_t1seg_swispace.nii.gz; python $S/align_seg.py PH4 > /dev/null
+python $S/detect_css.py PH4 | head -2
+python $S/check_known.py PH4 --old $T/work/PH3_truth.nii.gz --ids 1,2,3,4,5,6 | tail -1 | grep -q "6 of 6" || { echo "FAIL: cSS lost (T1 mode)"; exit 1; }
+python $S/check_known.py PH4 --old $T/work/PH4_infra_line.nii.gz --ids 1 | head -1 | grep -q "kept" && { echo "FAIL: cerebellar line kept (T1 mode)"; exit 1; }
 echo; echo "ALL TESTS PASSED  (temp dir $T)"
 ```
 
