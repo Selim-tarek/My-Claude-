@@ -370,6 +370,8 @@ PIAL_IN_MM, PIAL_OUT_MM = 3.5, 4.0     # pial band: cortex thickness + blooming 
 # artifact, faint normal cortex). Excluded candidates are NOT deleted: they are listed with the reason
 # in review/ID_excluded.csv (+ .nii.gz). CSS_KEEP_ALL=1 switches all exclusions off.
 MERGE_GAP_MM = 3.0      # fragments of one dark line closer than this are merged into one candidate
+MERGE_MAX_MM = 40.0     # ...but only while the merged object stays focus-sized: on P006 unlimited merging
+                        # chained veins along a whole hemisphere into 10-17 cm objects (v4.9.1)
 MIN_EXTENT_MM = 6.0     # specks: smaller than this overall are not curvilinear cSS
 MIN_EDGE_SD = 0.75      # "well-defined": candidate must be darker than its 1-2 mm surroundings by this
 KEEP_ALL = os.environ.get("CSS_KEEP_ALL", "") == "1"
@@ -474,6 +476,13 @@ if MERGE_GAP_MM > 0 and lab.max() > 0:
         sel = (lab > 0) & side
         merged[sel] = gl[sel] + nxt
         nxt += ng
+    # undo merges that would chain into an object longer than MERGE_MAX_MM: keep the pieces separate
+    gmax = int(merged.max()); big = np.zeros(gmax + 1, bool)
+    for g, sl in enumerate(ndi.find_objects(merged), 1):
+        if sl is not None and np.sqrt(sum(((s_.stop - s_.start) * v) ** 2 for s_, v in zip(sl, vox))) > MERGE_MAX_MM:
+            big[g] = True
+    n_chains = int(big.sum())
+    merged = np.where(big[merged], lab + gmax, merged)
     u = np.unique(merged[merged > 0]); remap = np.zeros(int(merged.max()) + 1, np.int32)
     remap[u] = np.arange(1, len(u) + 1)
     n_before_merge = int(len(np.unique(lab[lab > 0])))
@@ -812,7 +821,8 @@ cnt = lambda c: int(df[c].astype(int).sum()) if len(df) else 0
 print(f"{subj}: {n_raw} raw components -> {len(df)} candidates "
       f"[{len(excluded)} excluded: " + (", ".join(f"{v} {k.split(' (')[0].split(':')[0]}" for k, v in
       pd.Series([r['_excl'] for r in excluded]).value_counts().items()) if excluded else "none")
-      + (f"; {n_before_merge - int(lab.max())} pieces joined" if 'n_before_merge' in dir() else "") + "] "
+      + (f"; {n_before_merge - int(lab.max())} pieces joined, {n_chains} long chains kept apart"
+         if 'n_before_merge' in dir() else "") + "] "
       f"({cnt('artifact_zone')} artifact zone, {cnt('midline_zone')} midline, {cnt('vein_like')} vein-like, "
       f"{cnt('near_ich_suggest')} near ICH [{ich_src}], {cnt('infratentorial')} infratentorial)  rank={RANK}"
       + ("  FLAIR used" if FL is not None else "") + "\n")

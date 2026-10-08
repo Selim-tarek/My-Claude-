@@ -292,7 +292,7 @@ led to these steps. **Excluded candidates are never deleted.** They are listed w
 
 | Problem | Fix |
 |---|---|
-| One dark line reported 2–3 times | Pieces closer than **3 mm** are merged into one candidate (this also joins the two banks of a tram-track) |
+| One dark line reported 2–3 times | Pieces closer than **3 mm** are merged into one candidate (this also joins the two banks of a tram-track), **but only while the merged object stays ≤ 40 mm long**; longer chains (on P006: veins chained into 10–17 cm objects) keep their pieces separate |
 | Tiny specks | Candidates smaller than **6 mm** overall are excluded (curvilinear cSS is longer) |
 | Microbleeds | Small and ≥ half surrounded by brain tissue (AJNR 2016 rule) → excluded |
 | Obvious veins | **Tubular** (tube_ratio > 0.45), **out in the middle of the sulcal CSF** (> 0.5 mm outside the pial surface) and **no tram-track** → excluded |

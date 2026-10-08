@@ -111,6 +111,10 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   Trade-off: true cSS on the inferior temporal/occipital surface over the tentorium is excluded too
   (listed in ID_excluded.csv).
 
+- v4.9.1: merging capped at 40 mm (P006: unlimited 3 mm merging chained veins into 10-17 cm objects,
+  one swallowed known focus #13 and was excluded as tentorial). PH1S synthetic now 7/8: one low
+  synthetic lesion falls in the skull-base band (lowest 20 % of the cerebrum) - known trade-off.
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.
