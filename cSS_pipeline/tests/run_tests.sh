@@ -65,4 +65,24 @@ python -c "import pandas as pd,sys; p=sys.argv[1]+'/review/PH3_candidates.csv'; 
 python $S/score_css.py PH3 > $T/score_b2.log
 grep -q "Boston v2.0 cSS count: 1 focus" $T/score_b2.log || { cat $T/score_b2.log; echo "FAIL: Boston v2.0 single focus"; exit 1; }
 grep "Boston" $T/score_v4.log $T/score_b2.log
+echo "== expert sheet (blinded PDF) + import of the expert's letters"
+python $S/detect_css.py PH3 > /dev/null
+python $S/expert_sheet.py PH3 | head -1
+[ -s $T/review/PH3_expert_sheet.pdf ] || { echo "FAIL: no expert sheet"; exit 1; }
+python - "$T" <<'PYEOF'
+import sys, pandas as pd, nibabel as nib, numpy as np
+b = sys.argv[1]; key = pd.read_csv(b + "/review/PH3_expert_key.csv")
+truth = nib.load(b + "/work/PH3_truth.nii.gz").get_fdata() > 0
+cand = nib.load(b + "/review/PH3_candidates.nii.gz").get_fdata().astype(int)
+letters = " ".join(f"{n}{'C' if (truth[cand == c]).mean() > 0.2 else 'V'}" for n, c in zip(key.sheet_no, key.cand_id))
+open(b + "/letters.txt", "w").write(letters)
+PYEOF
+python $S/expert_import.py PH3 expertA --letters "$(cat $T/letters.txt)" --score | grep -E "expert|multifocality"
+python - "$T" <<'PYEOF'
+import sys, pandas as pd, nibabel as nib
+b = sys.argv[1]; e = pd.read_csv(b + "/review/PH3_expert_expertA.csv")
+assert (e.call == "cSS").sum() == 6, e.call.value_counts()     # all 6 phantom lesions = cSS, mapped back correctly
+print("   expert calls mapped back to the right candidates")
+PYEOF
+python $S/feature_report.py | head -2
 echo; echo "ALL TESTS PASSED  (temp dir $T)"

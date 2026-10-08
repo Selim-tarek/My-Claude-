@@ -157,10 +157,12 @@ class Reviewer:
         if "pial_dist_mm" in r:
             shape = "plate" if num(r.tube_ratio) < 0.4 else ("tube" if num(r.tube_ratio) > 0.5 else "mixed")
             tram = num(r.tram_frac)
+            ev = (f"   |   evidence: cSS {num(r.css_evidence):.2f}  vein {num(r.vein_evidence):.2f}"
+                  if "css_evidence" in r else "")
             feat = (f"\npial {num(r.pial_dist_mm):+.1f} mm   shape {shape} ({num(r.tube_ratio):.2f})   "
                     f"follows surface {num(r.surface_alignment):.2f}   "
                     f"tram-track {'n/a' if np.isnan(tram) else f'{tram:.0%}'}   vein tree {num(r.vein_tree_mm):.0f} mm   "
-                    f"mirror dark {num(r.mirror_dark_frac):.0%}")
+                    f"mirror dark {num(r.mirror_dark_frac):.0%}" + ev)
         done = sum(1 for c in ids if c in calls)
         prev = calls.get(cid)
         self.fig.suptitle(f"{subj}   candidate #{cid}  ({self.pos + 1}/{len(ids)}, {done} decided)   —   "

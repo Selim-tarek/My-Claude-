@@ -355,9 +355,19 @@ for p in regionprops(lab, spacing=vox):
     # sqrt: darkness is damped - on real data (P006) veins were DARKER than cSS (AUC 0.37)
     s4 = np.sqrt(max(depth, 0.0)) * (0.25 + on_surf) * (0.25 + sheet) * (0.5 + (aln if np.isfinite(aln) else 0.5)) \
          * (1.0 + (tram if np.isfinite(tram) else 0.0))
-    for flag, f in ((artz, 0.5), (midz, 0.7), (mdark > 0.6, 0.8),
+    # mirror_dark_frac is recorded only (venous anatomy can be asymmetric, cSS can be bilateral)
+    for flag, f in ((artz, 0.5), (midz, 0.7),
                     (longs, 0.5), (infra, 0.3)):
         if flag: s4 *= f
+    # two separate, rule-based evidence summaries for the reader (0-1, NOT probabilities -
+    # untrained; to be replaced by a model fitted on expert labels):
+    #  cSS  = on the surface, sheet-like, parallel to the cortex, tram-track, on a bank
+    #  vein = tube-like, out in the sulcal CSF, not parallel to the cortex
+    fin = lambda v: v if np.isfinite(v) else None
+    ce = [on_surf, 1 - tub if np.isfinite(tub) else None, fin(aln), fin(tram), bankf]
+    ve = [fin(tub), 1 / (1 + np.exp(-(pdist - 0.3) / 0.5)), 1 - aln if np.isfinite(aln) else None]
+    css_ev = float(np.mean([v for v in ce if v is not None]))
+    vein_ev = float(np.mean([v for v in ve if v is not None]))
     c0 = pts.mean(0)
     rows.append(dict(hemi="L" if is_left else "R", region=region, label=code,
                      volume_mm3=round(vol, 1), n_slices=n_sl, elongation=round(elong, 1),
@@ -376,6 +386,7 @@ for p in regionprops(lab, spacing=vox):
                      near_ich_suggest=int(idist <= 5.0), infratentorial=int(infra),
                      flair_csf_z=round(fz, 2), flair_bright=int(np.isfinite(fz) and fz > 3.0),
                      flair_ctx_z=round(fcz, 2), flair_ctx_bright=int(np.isfinite(fcz) and fcz > 3.0),
+                     css_evidence=round(css_ev, 2), vein_evidence=round(vein_ev, 2),
                      score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
@@ -386,7 +397,8 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "pial_dist_mm", "bank_frac", "tube_ratio", "surface_alignment", "tram_frac", "vein_tree_mm",
         "mirror_dark_frac", "ich_dist_mm", "near_ich_suggest", "infratentorial", "flair_csf_z",
         "parenchyma_frac", "extent_mm", "cmb_like",
-        "flair_bright", "flair_ctx_z", "flair_ctx_bright", "score_v3", "score_v4", "accept"]
+        "flair_bright", "flair_ctx_z", "flair_ctx_bright", "css_evidence", "vein_evidence",
+        "score_v3", "score_v4", "accept"]
 keep = np.zeros(I.shape, np.int16)
 if rows:
     df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)

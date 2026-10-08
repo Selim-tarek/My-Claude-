@@ -89,6 +89,14 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   Euclidean adjacency rule). feature_report (v3, 17 calls): score AUC 0.53, darkness 0.37 (veins
   darker) → v4 damps darkness (√). Reader was not blinded for P006.
 
+- P006 --explain (reader's 7 old foci): R: IPS-postcentral touch (7 mm); IPS-STS via angular gyrus
+  (16 mm); postcentral-STS via planum temporale (21 mm) -> one group, R=1. L: subcentral-STS via
+  supramarginal (27 mm) -> L=1. A distance cut cannot give L1 and R2 (27 mm adjacent vs 16 mm not);
+  the v3 R precentral focus (not detected in v4) would make R 4 sulci -> R2 = expert. Rule NOT
+  changed; waiting for expert labels (expert_sheet.py / expert_import.py).
+- v4.7: css_evidence / vein_evidence (rule-based 0-1 summaries, not probabilities); mirror recorded
+  only; score records TR, slice thickness, phase availability.
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.

@@ -667,9 +667,19 @@ for p in regionprops(lab, spacing=vox):
     # sqrt: darkness is damped - on real data (P006) veins were DARKER than cSS (AUC 0.37)
     s4 = np.sqrt(max(depth, 0.0)) * (0.25 + on_surf) * (0.25 + sheet) * (0.5 + (aln if np.isfinite(aln) else 0.5)) \
          * (1.0 + (tram if np.isfinite(tram) else 0.0))
-    for flag, f in ((artz, 0.5), (midz, 0.7), (mdark > 0.6, 0.8),
+    # mirror_dark_frac is recorded only (venous anatomy can be asymmetric, cSS can be bilateral)
+    for flag, f in ((artz, 0.5), (midz, 0.7),
                     (longs, 0.5), (infra, 0.3)):
         if flag: s4 *= f
+    # two separate, rule-based evidence summaries for the reader (0-1, NOT probabilities -
+    # untrained; to be replaced by a model fitted on expert labels):
+    #  cSS  = on the surface, sheet-like, parallel to the cortex, tram-track, on a bank
+    #  vein = tube-like, out in the sulcal CSF, not parallel to the cortex
+    fin = lambda v: v if np.isfinite(v) else None
+    ce = [on_surf, 1 - tub if np.isfinite(tub) else None, fin(aln), fin(tram), bankf]
+    ve = [fin(tub), 1 / (1 + np.exp(-(pdist - 0.3) / 0.5)), 1 - aln if np.isfinite(aln) else None]
+    css_ev = float(np.mean([v for v in ce if v is not None]))
+    vein_ev = float(np.mean([v for v in ve if v is not None]))
     c0 = pts.mean(0)
     rows.append(dict(hemi="L" if is_left else "R", region=region, label=code,
                      volume_mm3=round(vol, 1), n_slices=n_sl, elongation=round(elong, 1),
@@ -688,6 +698,7 @@ for p in regionprops(lab, spacing=vox):
                      near_ich_suggest=int(idist <= 5.0), infratentorial=int(infra),
                      flair_csf_z=round(fz, 2), flair_bright=int(np.isfinite(fz) and fz > 3.0),
                      flair_ctx_z=round(fcz, 2), flair_ctx_bright=int(np.isfinite(fcz) and fcz > 3.0),
+                     css_evidence=round(css_ev, 2), vein_evidence=round(vein_ev, 2),
                      score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
@@ -698,7 +709,8 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "pial_dist_mm", "bank_frac", "tube_ratio", "surface_alignment", "tram_frac", "vein_tree_mm",
         "mirror_dark_frac", "ich_dist_mm", "near_ich_suggest", "infratentorial", "flair_csf_z",
         "parenchyma_frac", "extent_mm", "cmb_like",
-        "flair_bright", "flair_ctx_z", "flair_ctx_bright", "score_v3", "score_v4", "accept"]
+        "flair_bright", "flair_ctx_z", "flair_ctx_bright", "css_evidence", "vein_evidence",
+        "score_v3", "score_v4", "accept"]
 keep = np.zeros(I.shape, np.int16)
 if rows:
     df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
@@ -888,10 +900,12 @@ class Reviewer:
         if "pial_dist_mm" in r:
             shape = "plate" if num(r.tube_ratio) < 0.4 else ("tube" if num(r.tube_ratio) > 0.5 else "mixed")
             tram = num(r.tram_frac)
+            ev = (f"   |   evidence: cSS {num(r.css_evidence):.2f}  vein {num(r.vein_evidence):.2f}"
+                  if "css_evidence" in r else "")
             feat = (f"\npial {num(r.pial_dist_mm):+.1f} mm   shape {shape} ({num(r.tube_ratio):.2f})   "
                     f"follows surface {num(r.surface_alignment):.2f}   "
                     f"tram-track {'n/a' if np.isnan(tram) else f'{tram:.0%}'}   vein tree {num(r.vein_tree_mm):.0f} mm   "
-                    f"mirror dark {num(r.mirror_dark_frac):.0%}")
+                    f"mirror dark {num(r.mirror_dark_frac):.0%}" + ev)
         done = sum(1 for c in ids if c in calls)
         prev = calls.get(cid)
         self.fig.suptitle(f"{subj}   candidate #{cid}  ({self.pos + 1}/{len(ids)}, {done} decided)   —   "
@@ -939,6 +953,157 @@ cmd = [sys.executable, f"{base}/scripts/mark_css.py", subj, ",".join(map(str, ac
 if ich: cmd += ["--ich", ",".join(map(str, ich))]
 subprocess.run(cmd, check=False)
 print(f"decisions saved: {calls_csv}")
+```
+
+## scripts/expert_sheet.py
+
+```python
+#!/usr/bin/env python3
+"""Blinded picture sheet of all candidates for an expert reader -> review/ID_expert_sheet.pdf
+usage: expert_sheet.py SUBJECT [--top N] [--seed 1]
+
+Each candidate gets a SHEET NUMBER in random order (the detector's rank is hidden, so the
+order cannot bias the expert) and one row of pictures: SWI zoom (40 mm), the same with the
+candidate outlined in red, and an 8 mm minIP slab (veins = continuous tubes). No features or
+scores are printed. Page 1 explains the task; the last page is an answer grid.
+The key (sheet number -> cand_id + fingerprint) is saved separately in
+review/ID_expert_key.csv - do not give it to the expert.
+Import the answers with expert_import.py."""
+import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+import sys, os, numpy as np, nibabel as nib, pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import base as _base, FP
+
+subj = sys.argv[1]
+top = int(sys.argv[sys.argv.index("--top") + 1]) if "--top" in sys.argv else None
+seed = int(sys.argv[sys.argv.index("--seed") + 1]) if "--seed" in sys.argv else 1
+base = _base()
+swi = nib.as_closest_canonical(nib.load(f"{base}/data/{subj}_swi.nii"))
+cnd = nib.as_closest_canonical(nib.load(f"{base}/review/{subj}_candidates.nii.gz"))
+I = swi.get_fdata().astype(np.float32); C = cnd.get_fdata().astype(int)
+vox = swi.header.get_zooms()[:3]
+br = I > 0
+lo, hi = np.percentile(I[br], [1, 99]) if br.any() else (I.min(), I.max())
+df = pd.read_csv(f"{base}/review/{subj}_candidates.csv")
+ids = df.cand_id.astype(int).tolist()[:top]
+order = np.random.default_rng(seed).permutation(len(ids))
+sheet = {n + 1: ids[k] for n, k in enumerate(order)}          # sheet number -> cand_id
+key = df.set_index("cand_id").loc[[sheet[n] for n in sorted(sheet)], FP].reset_index()
+key.insert(0, "sheet_no", sorted(sheet))
+key.to_csv(f"{base}/review/{subj}_expert_key.csv", index=False)
+
+HW = int(round(20 / vox[0]))                                   # 40 mm window
+SLAB = max(1, int(round(4 / vox[2])))
+PER_PAGE = 4
+out = f"{base}/review/{subj}_expert_sheet.pdf"
+with PdfPages(out) as pdf:
+    f = plt.figure(figsize=(8.27, 11.69)); f.text(0.08, 0.92, f"cSS expert reading - {subj}", fontsize=16, weight="bold")
+    f.text(0.08, 0.30, (
+        "For each numbered candidate decide:\n\n"
+        "   C  = cortical superficial siderosis\n"
+        "   V  = vein\n"
+        "   N  = normal / other (artifact, normal dark cortex, ...)\n"
+        "   H  = siderosis contiguous with a lobar ICH\n"
+        "   U  = unsure\n\n"
+        "Definition used (Charidimou et al., Neurology 2017): well-defined, homogeneous\n"
+        "hypointense curvilinear signal on SWI outlining the outer surface of the cortex,\n"
+        "within the adjacent subarachnoid space, or both.\n\n"
+        "Each row: SWI zoom (40 mm)  |  same with the candidate outlined in red  |\n"
+        "8 mm minIP slab (veins appear as continuous branching tubes).\n"
+        "Image orientation: neurological (patient left on the left of the image).\n\n"
+        "Candidates are in RANDOM order; no scores are shown.\n"
+        "Write the letters on the answer grid (last page)."), fontsize=11, va="bottom", family="monospace")
+    pdf.savefig(f); plt.close(f)
+    nums = sorted(sheet)
+    for p0 in range(0, len(nums), PER_PAGE):
+        f, axs = plt.subplots(PER_PAGE, 3, figsize=(8.27, 11.69))
+        f.subplots_adjust(left=0.08, right=0.98, top=0.96, bottom=0.03, wspace=0.04, hspace=0.12)
+        for r in range(PER_PAGE):
+            for a in axs[r]: a.axis("off")
+            if p0 + r >= len(nums): continue
+            n = nums[p0 + r]; m = C == sheet[n]
+            if not m.any(): continue
+            pts = np.argwhere(m); ci, cj = pts[:, 0].mean(), pts[:, 1].mean()
+            kc = int(np.clip(np.bincount(pts[:, 2]).argmax(), 0, I.shape[2] - 1))
+            i0, i1 = int(max(ci - HW, 0)), int(min(ci + HW, I.shape[0]))
+            j0, j1 = int(max(cj - HW, 0)), int(min(cj + HW, I.shape[1]))
+            sl = I[i0:i1, j0:j1, kc].T; ms = m[i0:i1, j0:j1, kc].T
+            k0, k1 = max(kc - SLAB, 0), min(kc + SLAB + 1, I.shape[2])
+            mip = np.where(I[i0:i1, j0:j1, k0:k1] > 0, I[i0:i1, j0:j1, k0:k1], hi).min(axis=2).T
+            for c, (img, outline) in enumerate(((sl, False), (sl, True), (mip, True))):
+                a = axs[r][c]; a.imshow(img, cmap="gray", origin="lower", vmin=lo, vmax=hi)
+                if outline and ms.any():
+                    src = m[i0:i1, j0:j1, k0:k1].any(axis=2).T if c == 2 else ms
+                    a.contour(src.astype(float), levels=[0.5], colors="red", linewidths=0.9)
+            axs[r][0].text(-0.06, 0.5, f"{n}", transform=axs[r][0].transAxes, fontsize=16, weight="bold",
+                           ha="right", va="center")
+            if r == 0 or p0 + r == p0:
+                for c, t in enumerate(("SWI", "outlined", "minIP 8 mm")): axs[r][c].set_title(t, fontsize=9)
+        pdf.savefig(f); plt.close(f)
+    # answer grid
+    f = plt.figure(figsize=(8.27, 11.69)); f.text(0.08, 0.95, f"Answers - {subj}   (C / V / N / H / U)", fontsize=14, weight="bold")
+    f.text(0.08, 0.925, "Reader: ____________________    Date: ____________", fontsize=10)
+    cols = 4; rows = int(np.ceil(len(nums) / cols))
+    for n in nums:
+        c, r = (n - 1) // rows, (n - 1) % rows
+        f.text(0.08 + c * 0.22, 0.89 - r * (0.85 / max(rows, 1)), f"{n:>3}  ____", fontsize=10, family="monospace")
+    pdf.savefig(f); plt.close(f)
+print(f"{subj}: expert sheet with {len(nums)} candidates -> {out}\n"
+      f"      key (do NOT give to the expert): {base}/review/{subj}_expert_key.csv")
+```
+
+## scripts/expert_import.py
+
+```python
+#!/usr/bin/env python3
+"""Import an expert's answers from the blinded sheet (expert_sheet.py) as REFERENCE calls.
+usage: expert_import.py SUBJECT READER --css 3,17,40 [--vein 1,2] [--ich 9] [--unsure 5]
+       expert_import.py SUBJECT READER --letters "1V 2V 3C 4N 5U ..."      (letters from the grid)
+Sheet numbers not listed are recorded as N (normal / other).
+Writes review/ID_expert_READER.csv (cand_id, call, fingerprint) - the reader's own calls in
+review/ID_calls.csv are left untouched. Then scores the expert calls:
+  expert_import.py ... --score     (runs mark_css.py + score_css.py with the expert's cSS / ICH calls)"""
+import sys, os, re, subprocess, pandas as pd
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import base as _base, FP, match_calls
+
+if len(sys.argv) < 3: sys.exit(__doc__)
+subj, reader = sys.argv[1], sys.argv[2]
+base = _base()
+key = pd.read_csv(f"{base}/review/{subj}_expert_key.csv")
+arg = lambda f: sys.argv[sys.argv.index(f) + 1] if f in sys.argv else ""
+nums = lambda s: [int(x) for x in re.split(r"[,\s]+", s.strip()) if x]
+NAME = {"C": "cSS", "V": "Vein", "N": "Normal", "H": "Near ICH", "U": "Unsure"}
+calls = {n: "Normal" for n in key.sheet_no}
+if arg("--letters"):
+    for tok in arg("--letters").split():
+        m = re.fullmatch(r"(\d+)([CVNHU])", tok.strip().upper())
+        if not m: sys.exit(f"cannot read '{tok}' (expected e.g. 12C)")
+        calls[int(m.group(1))] = NAME[m.group(2)]
+for flag, call in (("--css", "cSS"), ("--vein", "Vein"), ("--ich", "Near ICH"), ("--unsure", "Unsure")):
+    for n in nums(arg(flag)): calls[n] = call
+bad = [n for n in calls if n not in set(key.sheet_no)]
+if bad: sys.exit(f"sheet numbers not on the sheet: {bad}")
+key["call"] = key.sheet_no.map(calls)
+# re-attach to the CURRENT candidates by fingerprint (the detector may have been re-run)
+cand = pd.read_csv(f"{base}/review/{subj}_candidates.csv")
+mapped, dropped = match_calls(cand, key[["cand_id", "call"] + FP])
+if dropped: print(f"WARNING: {dropped} answers match no current candidate (detector re-run since the sheet)")
+c = cand.set_index("cand_id")
+rows = [dict(cand_id=k, call=v, **{f: c.loc[k, f] for f in FP}) for k, v in sorted(mapped.items())]
+out = f"{base}/review/{subj}_expert_{reader}.csv"
+pd.DataFrame(rows, columns=["cand_id", "call"] + FP).to_csv(out, index=False)
+summ = pd.Series(list(mapped.values())).value_counts().to_dict()
+print(f"{subj}: expert {reader} -> {out}   {summ}")
+if "--score" in sys.argv:
+    css = sorted(k for k, v in mapped.items() if v == "cSS"); ich = sorted(k for k, v in mapped.items() if v == "Near ICH")
+    cmd = [sys.executable, f"{base}/scripts/mark_css.py", subj, ",".join(map(str, css)) or "none"]
+    if ich: cmd += ["--ich", ",".join(map(str, ich))]
+    subprocess.run(cmd, check=True)
 ```
 
 ## scripts/export_review.py
@@ -1268,14 +1433,18 @@ for jp in sorted(_glob.glob(f"{base}/raw/{subj}/SWI/*.json")):
         if "PHASE" in it or " P " in f" {it} ": continue
         seq = "SWI" if "SWI" in it else ("T2*-GRE" if it else seq)
         te = js.get("EchoTime"); fs = js.get("MagneticFieldStrength")
+        tr = js.get("RepetitionTime"); st = js.get("SliceThickness")
         acq = dict(TE_ms=round(te * 1000, 1) if isinstance(te, (int, float)) else "",
-                   field_T=fs if fs is not None else "", manufacturer=js.get("Manufacturer", ""))
+                   TR_ms=round(tr * 1000, 1) if isinstance(tr, (int, float)) else "",
+                   field_T=fs if fs is not None else "", manufacturer=js.get("Manufacturer", ""),
+                   slice_thickness_mm=st if st is not None else "")
         break
     except Exception:
         pass
 result["sequence"] = seq
 result.update(acq)
 result["voxel_mm"] = "x".join(f"{v:.2f}" for v in vox)
+result["phase_available"] = int(os.path.exists(f"{base}/data/{subj}_phase.nii.gz"))
 result["candidate_volume_mm3"] = round(float(acc.volume_mm3.sum()) if len(acc) else 0.0, 1)
 result["grown_volume_mm3"] = round(grown_vol, 1)
 result["regions"] = sorted(acc.region.unique().tolist()) if len(acc) else []
@@ -1329,22 +1498,37 @@ if result["near_ich_candidates"]:
 
 ```python
 #!/usr/bin/env python3
-"""Compare candidate features between reader calls (cSS vs Vein/Normal/Artifact) across all
-reviewed subjects (review/*_calls.csv written by review_css.py).  usage: feature_report.py"""
+"""Compare candidate features between calls (cSS vs Vein/Normal/Artifact) across all reviewed subjects.
+usage: feature_report.py [--source expert|reader]
+Default: for each subject the EXPERT reference (review/ID_expert_*.csv from expert_import.py) is used
+when it exists, otherwise the reader's own calls (review/ID_calls.csv from review_css.py)."""
 import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 import sys, os, glob, numpy as np, pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, load_calls
+from css_common import base as _base, load_calls, match_calls
 base = _base()
-rows = []
-for f in glob.glob(f"{base}/review/*_calls.csv"):
-    s = os.path.basename(f).replace("_calls.csv", "")
-    d = pd.read_csv(f"{base}/review/{s}_candidates.csv")
-    calls, warn = load_calls(base, s, d)          # v4: matched by fingerprint, not by rank
-    if warn: print("WARNING:", warn)
+src_pref = sys.argv[sys.argv.index("--source") + 1] if "--source" in sys.argv else "expert"
+subjects = sorted({os.path.basename(f).split("_calls.csv")[0] for f in glob.glob(f"{base}/review/*_calls.csv")} |
+                  {os.path.basename(f).split("_expert_")[0] for f in glob.glob(f"{base}/review/*_expert_*.csv")
+                   if not f.endswith("_expert_key.csv")})
+rows = []; used = {}
+for s in subjects:
+    cp = f"{base}/review/{s}_candidates.csv"
+    if not os.path.exists(cp): continue
+    d = pd.read_csv(cp); calls = {}
+    ex = sorted(f for f in glob.glob(f"{base}/review/{s}_expert_*.csv") if not f.endswith("_expert_key.csv"))
+    if ex and src_pref == "expert":
+        calls, dropped = match_calls(d, pd.read_csv(ex[0])); calls = calls or {}
+        used[s] = "expert " + os.path.basename(ex[0]).split("_expert_")[1][:-4]
+        if dropped: print(f"WARNING: {s}: {dropped} expert calls match no current candidate")
+    else:
+        calls, warn = load_calls(base, s, d)          # matched by fingerprint, not by rank
+        if warn: print("WARNING:", warn)
+        used[s] = "reader"
     if not calls: continue
     m = d.merge(pd.DataFrame(list(calls.items()), columns=["cand_id", "call"]), on="cand_id")
     m["subject"] = s; rows.append(m)
+print("labels: " + ", ".join(f"{s}={u}" for s, u in used.items()))
 if not rows: sys.exit("no reviewed cases yet (run review_css.py first)")
 D = pd.concat(rows, ignore_index=True)
 D = D[D.call.isin(["cSS", "Vein", "Normal", "Artifact"])]
@@ -1356,7 +1540,8 @@ def auc(x, y):
 feats = ["darkness_z", "volume_mm3", "n_slices", "elongation", "surface_contact", "cortex_frac",
          "cortex_dist_mm", "branch_per10mm", "surface_gradient",
          "pial_dist_mm", "bank_frac", "tube_ratio", "surface_alignment", "tram_frac", "vein_tree_mm",
-         "mirror_dark_frac", "flair_csf_z", "score_v3", "score_v4", "score"]
+         "mirror_dark_frac", "flair_csf_z", "parenchyma_frac", "css_evidence", "vein_evidence",
+         "score_v3", "score_v4", "score"]
 print(f"{'feature':18s} {'cSS':>8s} {'Vein':>8s} {'Normal':>8s} {'Artifact':>9s}   AUC cSS vs rest")
 for f in feats:
     if f not in D: continue
@@ -1856,6 +2041,26 @@ python -c "import pandas as pd,sys; p=sys.argv[1]+'/review/PH3_candidates.csv'; 
 python $S/score_css.py PH3 > $T/score_b2.log
 grep -q "Boston v2.0 cSS count: 1 focus" $T/score_b2.log || { cat $T/score_b2.log; echo "FAIL: Boston v2.0 single focus"; exit 1; }
 grep "Boston" $T/score_v4.log $T/score_b2.log
+echo "== expert sheet (blinded PDF) + import of the expert's letters"
+python $S/detect_css.py PH3 > /dev/null
+python $S/expert_sheet.py PH3 | head -1
+[ -s $T/review/PH3_expert_sheet.pdf ] || { echo "FAIL: no expert sheet"; exit 1; }
+python - "$T" <<'PYEOF'
+import sys, pandas as pd, nibabel as nib, numpy as np
+b = sys.argv[1]; key = pd.read_csv(b + "/review/PH3_expert_key.csv")
+truth = nib.load(b + "/work/PH3_truth.nii.gz").get_fdata() > 0
+cand = nib.load(b + "/review/PH3_candidates.nii.gz").get_fdata().astype(int)
+letters = " ".join(f"{n}{'C' if (truth[cand == c]).mean() > 0.2 else 'V'}" for n, c in zip(key.sheet_no, key.cand_id))
+open(b + "/letters.txt", "w").write(letters)
+PYEOF
+python $S/expert_import.py PH3 expertA --letters "$(cat $T/letters.txt)" --score | grep -E "expert|multifocality"
+python - "$T" <<'PYEOF'
+import sys, pandas as pd, nibabel as nib
+b = sys.argv[1]; e = pd.read_csv(b + "/review/PH3_expert_expertA.csv")
+assert (e.call == "cSS").sum() == 6, e.call.value_counts()     # all 6 phantom lesions = cSS, mapped back correctly
+print("   expert calls mapped back to the right candidates")
+PYEOF
+python $S/feature_report.py | head -2
 echo; echo "ALL TESTS PASSED  (temp dir $T)"
 ```
 

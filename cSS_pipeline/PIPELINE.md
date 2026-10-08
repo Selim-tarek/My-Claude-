@@ -284,6 +284,38 @@ Enter the result in the workbook (Case Log). **Review before you look at the exp
 
 ---
 
+## 5b. Expert reading (the reference standard)
+
+Your own calls are a "non-expert + tool" reading. The **reference** must come from an expert.
+Make it quick for them:
+
+1. **Make the blinded picture sheet:**
+   ```
+   python ~/css_project/scripts/expert_sheet.py P006
+   ```
+   This creates `~/css_project/review/P006_expert_sheet.pdf`:
+   - one row per candidate (SWI zoom | outlined | 8 mm minIP);
+   - **random order** with new numbers, and **no scores**, so the expert isn't biased;
+   - an instruction page and an answer grid.
+
+   The key (sheet number → candidate) is saved separately in `P006_expert_key.csv`. **Don't send
+   the key**, only the PDF. It contains no names, only the study code.
+2. The expert writes a letter for every number: **C** cSS · **V** vein · **N** normal/other ·
+   **H** contiguous with an ICH · **U** unsure.
+3. **Import the answers.** Numbers you don't list count as N:
+   ```
+   python ~/css_project/scripts/expert_import.py P006 expertA --letters "1V 2V 3C 4N 5U ..."
+   ```
+   or, shorter:
+   ```
+   python ~/css_project/scripts/expert_import.py P006 expertA --css 3,17,40 --unsure 5
+   ```
+   Add `--score` to compute the 0–4 score from the expert's calls. Your own calls are not changed.
+4. For a second reader, use the same sheet with another name (`expertB`). This gives inter-rater
+   agreement.
+5. `feature_report.py` now uses the expert calls automatically when they exist. Use
+   `--source reader` to use yours instead.
+
 ## 6. Validation plan (what makes this publishable)
 
 1. **Re-run P006 with v4.** First back up the v3 review: `mkdir -p ~/css_project/review/v3 && cp ~/css_project/review/P006_* ~/css_project/review/v3/`.

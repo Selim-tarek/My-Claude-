@@ -268,14 +268,18 @@ for jp in sorted(_glob.glob(f"{base}/raw/{subj}/SWI/*.json")):
         if "PHASE" in it or " P " in f" {it} ": continue
         seq = "SWI" if "SWI" in it else ("T2*-GRE" if it else seq)
         te = js.get("EchoTime"); fs = js.get("MagneticFieldStrength")
+        tr = js.get("RepetitionTime"); st = js.get("SliceThickness")
         acq = dict(TE_ms=round(te * 1000, 1) if isinstance(te, (int, float)) else "",
-                   field_T=fs if fs is not None else "", manufacturer=js.get("Manufacturer", ""))
+                   TR_ms=round(tr * 1000, 1) if isinstance(tr, (int, float)) else "",
+                   field_T=fs if fs is not None else "", manufacturer=js.get("Manufacturer", ""),
+                   slice_thickness_mm=st if st is not None else "")
         break
     except Exception:
         pass
 result["sequence"] = seq
 result.update(acq)
 result["voxel_mm"] = "x".join(f"{v:.2f}" for v in vox)
+result["phase_available"] = int(os.path.exists(f"{base}/data/{subj}_phase.nii.gz"))
 result["candidate_volume_mm3"] = round(float(acc.volume_mm3.sum()) if len(acc) else 0.0, 1)
 result["grown_volume_mm3"] = round(grown_vol, 1)
 result["regions"] = sorted(acc.region.unique().tolist()) if len(acc) else []
