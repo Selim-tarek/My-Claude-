@@ -74,6 +74,12 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   was 255 mm for most candidates (network merges brain-wide) -> made recorded-only.
   Auto-ICH flagged skull-base artifact + sagittal sinus (reader: no ICH, alignment good) -> ICH
   blobs must now be >3 mm under the pial surface, off-midline, off the rim, outside artifact zones.
+- P006 full route (recon-all, 100 candidates): detector found 6/7 of the v3-accepted cSS (ranks 5-49;
+  missed one R precentral = iron-rich motor cortex?). Same reader, blinded re-review: accepted 1/100
+  (called the old cSS Normal/Vein) -> non-expert labels unreliable; expert labels needed.
+  Scoring the 7 old foci: L=1 (fixed vs v3 L=2, expert L1), R=1 (expert R2): R sulci intraparietal,
+  postcentral, superior temporal were linked via a shared (supramarginal) gyrus -> "shared gyrus"
+  adjacency may be too loose; --explain added to inspect links before changing the rule (n=1).
 - Phantoms: v4 phantom (tram-track/convexity/single-bank cSS vs tubular sulcal and cortical
   surface veins, ICH, Destrieux labels): 6/6 found, every definition feature separates cSS from
   veins, ICH Dice 0.86, sulcal score 3/4 as constructed. v3 phantom: 8/8 synthetic lesions; its

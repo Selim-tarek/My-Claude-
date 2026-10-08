@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Score accepted candidates.  usage: score_css.py SUBJECT [--truth]
+"""Score accepted candidates.  usage: score_css.py SUBJECT [--truth] [--explain]
+--explain: print which sulci each focus lines and why sulci count as adjacent (shared gyrus / touch)
 v2: adds van Harten-style seeded region growing - accepted candidates grow into connected
 dark voxels (z<-1.5, inside the search zone, max 5 mm from the candidate) to give the
 full lesion extent and a continuous cSS volume (no 0-4 ceiling effect).
@@ -178,7 +179,24 @@ for h in ["L", "R"]:
     foci = groups(ids, D, MERGE_MM); clusters = groups(ids, D, ADJ_MM)
     fpc = [sum(1 for f in foci if f[0] in c) for c in clusters]
     if A2 is not None:
-        S = sorted(set(c for i in ids for c in cand_sulci.get(i) or sulci_of(masks[i], h)))
+        fs = {i: cand_sulci.get(i) or sulci_of(masks[i], h) for i in ids}
+        S = sorted(set(c for i in ids for c in fs[i]))
+        if "--explain" in sys.argv and S:
+            nm = lambda c: lut.get(c, str(c)).replace("ctx_lh_", "").replace("ctx_rh_", "")
+            print(f"\n[{h}] foci -> sulci")
+            for i in ids:
+                print(f"   focus #{i}: {', '.join(nm(c) for c in fs[i]) or '-'}")
+            print(f"[{h}] sulcus pairs: adjacency link | closest foci (mm)")
+            for a_ in S:
+                for b_ in S:
+                    if a_ >= b_: continue
+                    ta, tb = touching(a_), touching(b_)
+                    link = "touch" if (b_ in ta or a_ in tb) else \
+                        ", ".join(nm(g) for g in sorted(ta & tb) if is_gyr(g)) or "NOT adjacent"
+                    dd = [D[(min(i, j), max(i, j))] for i in ids for j in ids
+                          if i != j and a_ in fs[i] and b_ in fs[j]]
+                    dmin = f"{min(dd):.0f}" if dd else ("same focus" if any(a_ in fs[i] and b_ in fs[i] for i in ids) else "-")
+                    print(f"   {nm(a_)} -- {nm(b_)}: {link} | {dmin}")
         ncomp = components(S, adjacent) if S else 0
         score = 0 if not ids else (1 if len(S) <= 3 and ncomp <= 1 else 2)
         result[f"{h}_sulci"] = len(S); total_sulci += len(S)
