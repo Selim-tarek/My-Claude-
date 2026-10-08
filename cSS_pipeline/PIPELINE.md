@@ -284,6 +284,29 @@ Enter the result in the workbook (Case Log). **Review before you look at the exp
 
 ---
 
+## 5a. Fewer false positives (v4.8)
+
+Reader feedback on P006 (duplicates, specks, obvious veins, skull-base artifact, faint normal cortex)
+led to these steps. **Excluded candidates are never deleted.** They are listed with the reason in
+`review/ID_excluded.csv` (and `ID_excluded.nii.gz` to view in freeview).
+
+| Problem | Fix |
+|---|---|
+| One dark line reported 2–3 times | Pieces closer than **3 mm** are merged into one candidate (this also joins the two banks of a tram-track) |
+| Tiny specks | Candidates smaller than **6 mm** overall are excluded (curvilinear cSS is longer) |
+| Microbleeds | Small and ≥ half surrounded by brain tissue (AJNR 2016 rule) → excluded |
+| Obvious veins | **Tubular** (tube_ratio > 0.45), **out in the middle of the sulcal CSF** (> 0.5 mm outside the pial surface) and **no tram-track** → excluded |
+| Skull-base artifact | Artifact-zone labels (orbitofrontal, temporal pole, …) in the lowest 30 % of the brain → excluded |
+| Faint normal dark cortex | Less than **0.75 SD** darker than its 1–2 mm surroundings ("well-defined" in the definition) → excluded |
+
+- Safety checks: on both phantoms every cSS lesion is still kept (6/6 and 8/8), while half the
+  phantom veins are removed.
+- On a real scan, check that your **known** lesions survive:
+  ```
+  python ~/css_project/scripts/check_known.py P006 --old ~/css_project/review/v3/P006_candidates.nii.gz --ids 3,4,5,13,18,19
+  ```
+- To switch every exclusion off (e.g. to compare): `CSS_KEEP_ALL=1 python ~/css_project/scripts/detect_css.py P006`
+
 ## 5b. Expert reading (the reference standard)
 
 Your own calls are a "non-expert + tool" reading. The **reference** must come from an expert.

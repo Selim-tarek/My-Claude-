@@ -52,6 +52,13 @@ GROW_Z = -1.5                          # 'dark' map used for region growing at s
 MIN_MM3, MIN_SLICES, MIN_ELONG = 25.0, 2, 2.0   # v4: 2.0 (tram-track = two parallel plates, ~2.4;
                                                 # round microbleeds stay ~1-1.5)
 PIAL_IN_MM, PIAL_OUT_MM = 3.5, 4.0     # pial band: cortex thickness + blooming / subarachnoid CSF
+# v4.8 false-positive reduction (reader feedback on P006: duplicates, specks, obvious veins, skull-base
+# artifact, faint normal cortex). Excluded candidates are NOT deleted: they are listed with the reason
+# in review/ID_excluded.csv (+ .nii.gz). CSS_KEEP_ALL=1 switches all exclusions off.
+MERGE_GAP_MM = 3.0      # fragments of one dark line closer than this are merged into one candidate
+MIN_EXTENT_MM = 6.0     # specks: smaller than this overall are not curvilinear cSS
+MIN_EDGE_SD = 0.75      # "well-defined": candidate must be darker than its 1-2 mm surroundings by this
+KEEP_ALL = os.environ.get("CSS_KEEP_ALL", "") == "1"
 HESS_SIGMAS_MM = (0.8, 1.6)            # 3-D shape analysis scales
 TRAM_MAX_MM = 10.0                     # look for the opposite bank up to this far across a sulcus
 ICH_MIN_MM3, ICH_MIN_RADIUS_MM = 500.0, 2.5   # automatic lobar ICH: dark, compact (inscribed
@@ -139,6 +146,23 @@ for side in (hemiL, ~hemiL):
     lab[nz] = remap[wl[nz]]
     nxt += len(keep)
 del R, wl, weak, strong
+
+# ---- 4b. merge fragments of the same structure: a line broken by small gaps (noise, partial volume,
+# slice-to-slice wobble) was reported as 2-3 separate candidates; also joins the two banks of a
+# tram-track. Done per hemisphere so left and right never merge.
+if MERGE_GAP_MM > 0 and lab.max() > 0:
+    near_lab = ndi.distance_transform_edt(lab == 0, sampling=vox) <= MERGE_GAP_MM / 2
+    merged = np.zeros_like(lab); nxt = 0
+    for side in (hemiL, ~hemiL):
+        gl, ng = ndi.label(near_lab & side, structure=s3)
+        sel = (lab > 0) & side
+        merged[sel] = gl[sel] + nxt
+        nxt += ng
+    u = np.unique(merged[merged > 0]); remap = np.zeros(int(merged.max()) + 1, np.int32)
+    remap[u] = np.arange(1, len(u) + 1)
+    n_before_merge = int(len(np.unique(lab[lab > 0])))
+    lab = remap[merged]
+    del near_lab, merged
 
 os.makedirs(f"{base}/work", exist_ok=True)
 nib.save(nib.Nifti1Image((zone & (z < GROW_Z)).astype(np.uint8), swi.affine),
@@ -331,6 +355,10 @@ for p in regionprops(lab, spacing=vox):
     pfrac = float(tissue[pad][shell1].mean()) if shell1.any() else np.nan
     ext_mm = float(np.sqrt(sum(((s_.stop - s_.start - 6) * v) ** 2 for s_, v in zip(pad, vox))))
     cmb_like = bool(np.isfinite(pfrac) and pfrac >= 0.5 and ext_mm <= 10.0)
+    # "well-defined" (consensus definition): darker than the 1-2 mm surroundings by >= MIN_EDGE_SD;
+    # normal dark cortex fades gradually into its neighbourhood
+    ring2 = ndi.binary_dilation(mm, structure=s3, iterations=2) & ~mm & brain[pad]
+    edge = float(np.median(z[pad][ring2]) - np.median(z[pad][mm])) if ring2.any() else np.nan
     idist = float(ich_dist[pad][mm].min())
     fz = fcz = np.nan
     if FL is not None:
@@ -387,6 +415,7 @@ for p in regionprops(lab, spacing=vox):
                      flair_csf_z=round(fz, 2), flair_bright=int(np.isfinite(fz) and fz > 3.0),
                      flair_ctx_z=round(fcz, 2), flair_ctx_bright=int(np.isfinite(fcz) and fcz > 3.0),
                      css_evidence=round(css_ev, 2), vein_evidence=round(vein_ev, 2),
+                     edge_contrast=round(edge, 2), _wz=float((swi.affine @ np.r_[c0, 1])[2]),
                      score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
@@ -398,7 +427,37 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "mirror_dark_frac", "ich_dist_mm", "near_ich_suggest", "infratentorial", "flair_csf_z",
         "parenchyma_frac", "extent_mm", "cmb_like",
         "flair_bright", "flair_ctx_z", "flair_ctx_bright", "css_evidence", "vein_evidence",
-        "score_v3", "score_v4", "accept"]
+        "edge_contrast", "score_v3", "score_v4", "accept"]
+
+# ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason
+_bz = (swi.affine @ np.c_[np.argwhere(brain[::4, ::4, ::4]) * 4, np.ones(int(brain[::4, ::4, ::4].sum()))].T)[2]
+z_lo, z_hi = float(_bz.min()), float(_bz.max())
+def exclusion(r):
+    if KEEP_ALL: return ""
+    if r["extent_mm"] < MIN_EXTENT_MM: return f"speck (<{MIN_EXTENT_MM:g} mm)"
+    if r["cmb_like"]: return "microbleed-like (small, >=half in parenchyma)"
+    tub_, tram_ = r["tube_ratio"], r["tram_frac"]
+    if r["pial_dist_mm"] > 0.5 and np.isfinite(tub_) and tub_ > 0.45 and not (np.isfinite(tram_) and tram_ >= 0.2):
+        return "vein: tubular, in the middle of the sulcal CSF"
+    if r["artifact_zone"] and (r["_wz"] - z_lo) < 0.3 * (z_hi - z_lo):
+        return "skull-base susceptibility artifact zone"
+    if np.isfinite(r["edge_contrast"]) and r["edge_contrast"] < MIN_EDGE_SD:
+        return "faint / ill-defined (normal dark cortex)"
+    return ""
+for r in rows: r["_excl"] = exclusion(r)
+excluded = [r for r in rows if r["_excl"]]
+rows = [r for r in rows if not r["_excl"]]
+os.makedirs(f"{base}/review", exist_ok=True)
+xl = np.zeros(I.shape, np.int16)
+if excluded:
+    xdf = pd.DataFrame(excluded).sort_values("score", ascending=False).reset_index(drop=True)
+    xdf.insert(0, "excl_id", np.arange(1, len(xdf) + 1))
+    xr = np.zeros(lab.max() + 1, np.int16); xr[xdf["_lab"].values] = xdf["excl_id"].values; xl = xr[lab]
+    xdf.rename(columns={"_excl": "reason"})[["excl_id", "reason"] + [c for c in cols if c not in ("cand_id", "accept")]] \
+        .to_csv(f"{base}/review/{subj}_excluded.csv", index=False)
+else:
+    pd.DataFrame(columns=["excl_id", "reason"]).to_csv(f"{base}/review/{subj}_excluded.csv", index=False)
+nib.save(nib.Nifti1Image(xl, swi.affine), f"{base}/review/{subj}_excluded.nii.gz")
 keep = np.zeros(I.shape, np.int16)
 if rows:
     df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
@@ -417,6 +476,9 @@ nib.save(nib.Nifti1Image(keep, swi.affine), f"{base}/review/{subj}_candidates.ni
 nib.save(nib.Nifti1Image(ich.astype(np.uint8), swi.affine), f"{base}/work/{subj}_ich_used.nii.gz")
 cnt = lambda c: int(df[c].astype(int).sum()) if len(df) else 0
 print(f"{subj}: {n_raw} raw components -> {len(df)} candidates "
+      f"[{len(excluded)} excluded: " + (", ".join(f"{v} {k.split(' (')[0].split(':')[0]}" for k, v in
+      pd.Series([r['_excl'] for r in excluded]).value_counts().items()) if excluded else "none")
+      + (f"; {n_before_merge - int(lab.max())} pieces joined" if 'n_before_merge' in dir() else "") + "] "
       f"({cnt('artifact_zone')} artifact zone, {cnt('midline_zone')} midline, {cnt('vein_like')} vein-like, "
       f"{cnt('near_ich_suggest')} near ICH [{ich_src}], {cnt('infratentorial')} infratentorial)  rank={RANK}"
       + ("  FLAIR used" if FL is not None else "") + "\n")

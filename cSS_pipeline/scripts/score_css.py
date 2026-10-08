@@ -6,7 +6,8 @@ dark voxels (z<-1.5, inside the search zone, max 5 mm from the candidate) to giv
 full lesion extent and a continuous cSS volume (no 0-4 ceiling effect).
 Candidates marked near_ich=1 (siderosis connected to a lobar ICH) are excluded and reported.
 v4: SULCAL scoring when work/ID_a2009s_swispace.nii.gz exists (recon-all + prep_anat.sh):
-  each accepted focus is assigned to the Destrieux sulci it lines (within 4 mm); two sulci are
+  each accepted focus is assigned to the Destrieux sulci it lines (within 4 mm; >=15 % of the focus
+  or >=20 mm3 of it); two sulci are
   "immediately adjacent" if they touch or border the same gyrus. Per hemisphere (Charidimou):
   0 none; 1 = one sulcus or <=3 adjacent sulci; 2 = >=2 non-adjacent or >3 sulci.
   STRIVE-2 category: focal = 1-3 sulci, disseminated = >3 sulci.
@@ -94,7 +95,10 @@ def sulci_of(mask, hemi):
     if not near.any(): near = m                      # gyral crown: take the nearest sulcus
     codes = a[tuple(i[near] for i in ind)]
     cnt = np.bincount(codes - lo, minlength=100)
-    return [int(c + lo) for c in np.nonzero(cnt >= max(3, 0.15 * len(codes)))[0]]
+    # a sulcus counts when it holds >=15 % of the focus OR >=20 mm3 of it (v4.8: merged foci that
+    # run from one sulcus over the crown into the next must keep both sulci)
+    keep = (cnt >= 3) & ((cnt >= 0.15 * len(codes)) | (cnt * vmm3 >= 20.0))
+    return [int(c + lo) for c in np.nonzero(keep)[0]]
 
 _touch = {}
 def touching(code):

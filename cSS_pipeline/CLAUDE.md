@@ -97,6 +97,13 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
 - v4.7: css_evidence / vein_evidence (rule-based 0-1 summaries, not probabilities); mirror recorded
   only; score records TR, slice thickness, phase availability.
 
+- v4.8 FP reduction: merge pieces <3 mm apart; exclude specks <6 mm, microbleed-like, tubular
+  candidates >0.5 mm out in sulcal CSF without tram-track, skull-base artifact zone (lowest 30 %),
+  edge contrast <0.75 SD. Excluded -> review/ID_excluded.csv/.nii.gz; CSS_KEEP_ALL=1 disables.
+  Phantoms: 6/6 and 8/8 kept, PH3 veins shown 6 -> 3, PH1S candidates 14 -> 12 (AUC .69 -> .75).
+  score_css sulcus assignment: >=15 % of the focus OR >=20 mm3 (merged foci keep both sulci).
+  check_known.py reports whether known lesions survive a detector change.
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.

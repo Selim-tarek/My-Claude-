@@ -81,7 +81,8 @@ python $S/expert_import.py PH3 expertA --letters "$(cat $T/letters.txt)" --score
 python - "$T" <<'PYEOF'
 import sys, pandas as pd, nibabel as nib
 b = sys.argv[1]; e = pd.read_csv(b + "/review/PH3_expert_expertA.csv")
-assert (e.call == "cSS").sum() == 6, e.call.value_counts()     # all 6 phantom lesions = cSS, mapped back correctly
+want = open(b + "/letters.txt").read().count("C")
+assert (e.call == "cSS").sum() == want, (e.call.value_counts(), want)   # every C mapped back to its candidate
 print("   expert calls mapped back to the right candidates")
 PYEOF
 python $S/feature_report.py | head -2

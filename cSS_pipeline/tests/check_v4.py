@@ -17,8 +17,9 @@ df["truth"] = cls
 F = ["darkness_z", "pial_dist_mm", "bank_frac", "tube_ratio", "surface_alignment", "tram_frac",
      "vein_tree_mm", "mirror_dark_frac", "score_v3", "score_v4"]
 print(df[["cand_id", "truth"] + F].to_string(index=False))
-found = sorted({int(c[3:]) for c in cls if c.startswith("cSS")})
-n = int(truth.max()); print(f"\nsensitivity: {len(found)}/{n}  found lesions {found}")
+# a lesion is found when kept candidates cover >=30 % of it (merged neighbours count for both)
+found = [t for t in range(1, int(truth.max()) + 1) if (cand[truth == t] > 0).mean() >= 0.3]
+n = int(truth.max()); print(f"\nsensitivity: {len(found)}/{n}  found lesions {found}  (coverage >=30 %)")
 pos = df[df.truth.str.startswith("cSS")]; neg = df[~df.truth.str.startswith("cSS")]
 def auc(x, y):
     x, y = np.asarray(x, float), np.asarray(y, float); x, y = x[~np.isnan(x)], y[~np.isnan(y)]
@@ -26,6 +27,8 @@ def auc(x, y):
     return float((x[:, None] > y[None, :]).mean() + 0.5 * (x[:, None] == y[None, :]).mean())
 print("AUC cSS vs mimics (>0.5 = higher in cSS):  " +
       "  ".join(f"{f} {auc(pos[f], neg[f]):.2f}" for f in F))
+vk = [v for v in range(1, int(veins.max()) + 1) if (cand[veins == v] > 0).mean() >= 0.3]
+print(f"veins still shown as candidates: {len(vk)}/{int(veins.max())} {vk}")
 ich = nib.load(f"{B}/work/{name}_ich_used.nii.gz").get_fdata() > 0
 icht = nib.load(f"{B}/work/{name}_ich_truth.nii.gz").get_fdata() > 0
 ich_dice = 2 * (ich & icht).sum() / max(ich.sum() + icht.sum(), 1)

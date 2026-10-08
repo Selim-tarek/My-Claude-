@@ -364,6 +364,13 @@ GROW_Z = -1.5                          # 'dark' map used for region growing at s
 MIN_MM3, MIN_SLICES, MIN_ELONG = 25.0, 2, 2.0   # v4: 2.0 (tram-track = two parallel plates, ~2.4;
                                                 # round microbleeds stay ~1-1.5)
 PIAL_IN_MM, PIAL_OUT_MM = 3.5, 4.0     # pial band: cortex thickness + blooming / subarachnoid CSF
+# v4.8 false-positive reduction (reader feedback on P006: duplicates, specks, obvious veins, skull-base
+# artifact, faint normal cortex). Excluded candidates are NOT deleted: they are listed with the reason
+# in review/ID_excluded.csv (+ .nii.gz). CSS_KEEP_ALL=1 switches all exclusions off.
+MERGE_GAP_MM = 3.0      # fragments of one dark line closer than this are merged into one candidate
+MIN_EXTENT_MM = 6.0     # specks: smaller than this overall are not curvilinear cSS
+MIN_EDGE_SD = 0.75      # "well-defined": candidate must be darker than its 1-2 mm surroundings by this
+KEEP_ALL = os.environ.get("CSS_KEEP_ALL", "") == "1"
 HESS_SIGMAS_MM = (0.8, 1.6)            # 3-D shape analysis scales
 TRAM_MAX_MM = 10.0                     # look for the opposite bank up to this far across a sulcus
 ICH_MIN_MM3, ICH_MIN_RADIUS_MM = 500.0, 2.5   # automatic lobar ICH: dark, compact (inscribed
@@ -451,6 +458,23 @@ for side in (hemiL, ~hemiL):
     lab[nz] = remap[wl[nz]]
     nxt += len(keep)
 del R, wl, weak, strong
+
+# ---- 4b. merge fragments of the same structure: a line broken by small gaps (noise, partial volume,
+# slice-to-slice wobble) was reported as 2-3 separate candidates; also joins the two banks of a
+# tram-track. Done per hemisphere so left and right never merge.
+if MERGE_GAP_MM > 0 and lab.max() > 0:
+    near_lab = ndi.distance_transform_edt(lab == 0, sampling=vox) <= MERGE_GAP_MM / 2
+    merged = np.zeros_like(lab); nxt = 0
+    for side in (hemiL, ~hemiL):
+        gl, ng = ndi.label(near_lab & side, structure=s3)
+        sel = (lab > 0) & side
+        merged[sel] = gl[sel] + nxt
+        nxt += ng
+    u = np.unique(merged[merged > 0]); remap = np.zeros(int(merged.max()) + 1, np.int32)
+    remap[u] = np.arange(1, len(u) + 1)
+    n_before_merge = int(len(np.unique(lab[lab > 0])))
+    lab = remap[merged]
+    del near_lab, merged
 
 os.makedirs(f"{base}/work", exist_ok=True)
 nib.save(nib.Nifti1Image((zone & (z < GROW_Z)).astype(np.uint8), swi.affine),
@@ -643,6 +667,10 @@ for p in regionprops(lab, spacing=vox):
     pfrac = float(tissue[pad][shell1].mean()) if shell1.any() else np.nan
     ext_mm = float(np.sqrt(sum(((s_.stop - s_.start - 6) * v) ** 2 for s_, v in zip(pad, vox))))
     cmb_like = bool(np.isfinite(pfrac) and pfrac >= 0.5 and ext_mm <= 10.0)
+    # "well-defined" (consensus definition): darker than the 1-2 mm surroundings by >= MIN_EDGE_SD;
+    # normal dark cortex fades gradually into its neighbourhood
+    ring2 = ndi.binary_dilation(mm, structure=s3, iterations=2) & ~mm & brain[pad]
+    edge = float(np.median(z[pad][ring2]) - np.median(z[pad][mm])) if ring2.any() else np.nan
     idist = float(ich_dist[pad][mm].min())
     fz = fcz = np.nan
     if FL is not None:
@@ -699,6 +727,7 @@ for p in regionprops(lab, spacing=vox):
                      flair_csf_z=round(fz, 2), flair_bright=int(np.isfinite(fz) and fz > 3.0),
                      flair_ctx_z=round(fcz, 2), flair_ctx_bright=int(np.isfinite(fcz) and fcz > 3.0),
                      css_evidence=round(css_ev, 2), vein_evidence=round(vein_ev, 2),
+                     edge_contrast=round(edge, 2), _wz=float((swi.affine @ np.r_[c0, 1])[2]),
                      score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
@@ -710,7 +739,37 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "mirror_dark_frac", "ich_dist_mm", "near_ich_suggest", "infratentorial", "flair_csf_z",
         "parenchyma_frac", "extent_mm", "cmb_like",
         "flair_bright", "flair_ctx_z", "flair_ctx_bright", "css_evidence", "vein_evidence",
-        "score_v3", "score_v4", "accept"]
+        "edge_contrast", "score_v3", "score_v4", "accept"]
+
+# ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason
+_bz = (swi.affine @ np.c_[np.argwhere(brain[::4, ::4, ::4]) * 4, np.ones(int(brain[::4, ::4, ::4].sum()))].T)[2]
+z_lo, z_hi = float(_bz.min()), float(_bz.max())
+def exclusion(r):
+    if KEEP_ALL: return ""
+    if r["extent_mm"] < MIN_EXTENT_MM: return f"speck (<{MIN_EXTENT_MM:g} mm)"
+    if r["cmb_like"]: return "microbleed-like (small, >=half in parenchyma)"
+    tub_, tram_ = r["tube_ratio"], r["tram_frac"]
+    if r["pial_dist_mm"] > 0.5 and np.isfinite(tub_) and tub_ > 0.45 and not (np.isfinite(tram_) and tram_ >= 0.2):
+        return "vein: tubular, in the middle of the sulcal CSF"
+    if r["artifact_zone"] and (r["_wz"] - z_lo) < 0.3 * (z_hi - z_lo):
+        return "skull-base susceptibility artifact zone"
+    if np.isfinite(r["edge_contrast"]) and r["edge_contrast"] < MIN_EDGE_SD:
+        return "faint / ill-defined (normal dark cortex)"
+    return ""
+for r in rows: r["_excl"] = exclusion(r)
+excluded = [r for r in rows if r["_excl"]]
+rows = [r for r in rows if not r["_excl"]]
+os.makedirs(f"{base}/review", exist_ok=True)
+xl = np.zeros(I.shape, np.int16)
+if excluded:
+    xdf = pd.DataFrame(excluded).sort_values("score", ascending=False).reset_index(drop=True)
+    xdf.insert(0, "excl_id", np.arange(1, len(xdf) + 1))
+    xr = np.zeros(lab.max() + 1, np.int16); xr[xdf["_lab"].values] = xdf["excl_id"].values; xl = xr[lab]
+    xdf.rename(columns={"_excl": "reason"})[["excl_id", "reason"] + [c for c in cols if c not in ("cand_id", "accept")]] \
+        .to_csv(f"{base}/review/{subj}_excluded.csv", index=False)
+else:
+    pd.DataFrame(columns=["excl_id", "reason"]).to_csv(f"{base}/review/{subj}_excluded.csv", index=False)
+nib.save(nib.Nifti1Image(xl, swi.affine), f"{base}/review/{subj}_excluded.nii.gz")
 keep = np.zeros(I.shape, np.int16)
 if rows:
     df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
@@ -729,6 +788,9 @@ nib.save(nib.Nifti1Image(keep, swi.affine), f"{base}/review/{subj}_candidates.ni
 nib.save(nib.Nifti1Image(ich.astype(np.uint8), swi.affine), f"{base}/work/{subj}_ich_used.nii.gz")
 cnt = lambda c: int(df[c].astype(int).sum()) if len(df) else 0
 print(f"{subj}: {n_raw} raw components -> {len(df)} candidates "
+      f"[{len(excluded)} excluded: " + (", ".join(f"{v} {k.split(' (')[0].split(':')[0]}" for k, v in
+      pd.Series([r['_excl'] for r in excluded]).value_counts().items()) if excluded else "none")
+      + (f"; {n_before_merge - int(lab.max())} pieces joined" if 'n_before_merge' in dir() else "") + "] "
       f"({cnt('artifact_zone')} artifact zone, {cnt('midline_zone')} midline, {cnt('vein_like')} vein-like, "
       f"{cnt('near_ich_suggest')} near ICH [{ich_src}], {cnt('infratentorial')} infratentorial)  rank={RANK}"
       + ("  FLAIR used" if FL is not None else "") + "\n")
@@ -955,6 +1017,41 @@ subprocess.run(cmd, check=False)
 print(f"decisions saved: {calls_csv}")
 ```
 
+## scripts/check_known.py
+
+```python
+#!/usr/bin/env python3
+"""Safety check: are KNOWN lesions still detected after a detector change?
+usage: check_known.py SUBJECT --old OLD_candidates.nii.gz --ids 3,4,5
+For each listed lesion of an older candidate map (e.g. review/v3/P006_candidates.nii.gz) it reports
+the current candidate(s) covering it, or the exclusion reason (review/ID_excluded.csv), or
+"NOT DETECTED". Grids must match (same imported SWI)."""
+import sys, os, numpy as np, pandas as pd, nibabel as nib
+from scipy import ndimage as ndi
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import base as _base
+
+subj = sys.argv[1]; base = _base()
+arg = lambda f: sys.argv[sys.argv.index(f) + 1] if f in sys.argv else ""
+if not arg("--old") or not arg("--ids"): sys.exit(__doc__)
+old = nib.load(os.path.expanduser(arg("--old"))).get_fdata().astype(int)
+cand = nib.load(f"{base}/review/{subj}_candidates.nii.gz").get_fdata().astype(int)
+xp = f"{base}/review/{subj}_excluded.nii.gz"
+excl = nib.load(xp).get_fdata().astype(int) if os.path.exists(xp) else np.zeros_like(cand)
+xr = pd.read_csv(f"{base}/review/{subj}_excluded.csv").set_index("excl_id")["reason"] \
+    if os.path.exists(f"{base}/review/{subj}_excluded.csv") else pd.Series(dtype=str)
+if old.shape != cand.shape: sys.exit("grids differ - re-import the same SWI")
+kept = 0
+for i in [int(x) for x in arg("--ids").split(",") if x.strip()]:
+    m = ndi.binary_dilation(old == i, iterations=2)
+    c = sorted(set(np.unique(cand[m])) - {0}); x = sorted(set(np.unique(excl[m])) - {0})
+    if c: kept += 1
+    msg = (f"kept as candidate {', '.join('#' + str(v) for v in c)}" if c else "") + \
+          ("; " if c and x else "") + ("; ".join(f"EXCLUDED ({xr.get(v, '?')})" for v in x) if x else "")
+    print(f"known lesion #{i}: {msg or 'NOT DETECTED'}")
+print(f"{subj}: {kept} of {len(arg('--ids').split(','))} known lesions still shown for review")
+```
+
 ## scripts/expert_sheet.py
 
 ```python
@@ -1171,7 +1268,8 @@ dark voxels (z<-1.5, inside the search zone, max 5 mm from the candidate) to giv
 full lesion extent and a continuous cSS volume (no 0-4 ceiling effect).
 Candidates marked near_ich=1 (siderosis connected to a lobar ICH) are excluded and reported.
 v4: SULCAL scoring when work/ID_a2009s_swispace.nii.gz exists (recon-all + prep_anat.sh):
-  each accepted focus is assigned to the Destrieux sulci it lines (within 4 mm); two sulci are
+  each accepted focus is assigned to the Destrieux sulci it lines (within 4 mm; >=15 % of the focus
+  or >=20 mm3 of it); two sulci are
   "immediately adjacent" if they touch or border the same gyrus. Per hemisphere (Charidimou):
   0 none; 1 = one sulcus or <=3 adjacent sulci; 2 = >=2 non-adjacent or >3 sulci.
   STRIVE-2 category: focal = 1-3 sulci, disseminated = >3 sulci.
@@ -1259,7 +1357,10 @@ def sulci_of(mask, hemi):
     if not near.any(): near = m                      # gyral crown: take the nearest sulcus
     codes = a[tuple(i[near] for i in ind)]
     cnt = np.bincount(codes - lo, minlength=100)
-    return [int(c + lo) for c in np.nonzero(cnt >= max(3, 0.15 * len(codes)))[0]]
+    # a sulcus counts when it holds >=15 % of the focus OR >=20 mm3 of it (v4.8: merged foci that
+    # run from one sulcus over the crown into the next must keep both sulci)
+    keep = (cnt >= 3) & ((cnt >= 0.15 * len(codes)) | (cnt * vmm3 >= 20.0))
+    return [int(c + lo) for c in np.nonzero(keep)[0]]
 
 _touch = {}
 def touching(code):
@@ -1951,8 +2052,9 @@ df["truth"] = cls
 F = ["darkness_z", "pial_dist_mm", "bank_frac", "tube_ratio", "surface_alignment", "tram_frac",
      "vein_tree_mm", "mirror_dark_frac", "score_v3", "score_v4"]
 print(df[["cand_id", "truth"] + F].to_string(index=False))
-found = sorted({int(c[3:]) for c in cls if c.startswith("cSS")})
-n = int(truth.max()); print(f"\nsensitivity: {len(found)}/{n}  found lesions {found}")
+# a lesion is found when kept candidates cover >=30 % of it (merged neighbours count for both)
+found = [t for t in range(1, int(truth.max()) + 1) if (cand[truth == t] > 0).mean() >= 0.3]
+n = int(truth.max()); print(f"\nsensitivity: {len(found)}/{n}  found lesions {found}  (coverage >=30 %)")
 pos = df[df.truth.str.startswith("cSS")]; neg = df[~df.truth.str.startswith("cSS")]
 def auc(x, y):
     x, y = np.asarray(x, float), np.asarray(y, float); x, y = x[~np.isnan(x)], y[~np.isnan(y)]
@@ -1960,6 +2062,8 @@ def auc(x, y):
     return float((x[:, None] > y[None, :]).mean() + 0.5 * (x[:, None] == y[None, :]).mean())
 print("AUC cSS vs mimics (>0.5 = higher in cSS):  " +
       "  ".join(f"{f} {auc(pos[f], neg[f]):.2f}" for f in F))
+vk = [v for v in range(1, int(veins.max()) + 1) if (cand[veins == v] > 0).mean() >= 0.3]
+print(f"veins still shown as candidates: {len(vk)}/{int(veins.max())} {vk}")
 ich = nib.load(f"{B}/work/{name}_ich_used.nii.gz").get_fdata() > 0
 icht = nib.load(f"{B}/work/{name}_ich_truth.nii.gz").get_fdata() > 0
 ich_dice = 2 * (ich & icht).sum() / max(ich.sum() + icht.sum(), 1)
@@ -2057,7 +2161,8 @@ python $S/expert_import.py PH3 expertA --letters "$(cat $T/letters.txt)" --score
 python - "$T" <<'PYEOF'
 import sys, pandas as pd, nibabel as nib
 b = sys.argv[1]; e = pd.read_csv(b + "/review/PH3_expert_expertA.csv")
-assert (e.call == "cSS").sum() == 6, e.call.value_counts()     # all 6 phantom lesions = cSS, mapped back correctly
+want = open(b + "/letters.txt").read().count("C")
+assert (e.call == "cSS").sum() == want, (e.call.value_counts(), want)   # every C mapped back to its candidate
 print("   expert calls mapped back to the right candidates")
 PYEOF
 python $S/feature_report.py | head -2
