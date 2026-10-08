@@ -123,6 +123,12 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   2x slice (3-4 mm); elongation filter only for single-piece candidates (merged V-shapes were lost).
   Phantoms back to 8/8, 16/16, 6/6. Conclusion: T1 should be part of the study protocol.
 
+- v4.9.2 on P010 (SWI-only): strong 12/16 (75 %), medium 4/16, faint 3/16; clean FPs 99 (position
+  rules off); ranking/features ~0.5. P006 (T1): 70 candidates, 6/6 known kept (ranks 8-45).
+  Conclusion: hand rules at their limit; SWI-only geometry features carry no signal.
+- v4.9.3: stress_test.py uses the host's T1 labels when present (copies work/H_t1seg_swispace to
+  HS after the synthetic SWI is written). Next: stress test on P006 = do features work WITH T1?
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.

@@ -2,7 +2,8 @@
 """Synthetic stress test across several host scans.
 usage: stress_test.py --detector detect_css.py --tag v3 [--hosts P001,P002,P003,P004,P005]
                       [--depths 0.6,0.45,0.3] [--seeds 1] [--z -2.5]
-Inserts synthetic cSS into each host, runs the detector, and measures sensitivity, worst
+Inserts synthetic cSS into each host (T1 anatomy is used when the host has it), runs the detector,
+and measures sensitivity, worst
 rank, how many real non-lesion candidates (veins/artifacts) outrank the lesions, and AUC."""
 import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
 import argparse, os, re, shutil, subprocess, sys, numpy as np, pandas as pd, nibabel as nib
@@ -23,10 +24,18 @@ rows = []; feats = []
 for h in a.hosts.split(","):
     clean = run(f"{S}/{a.detector}", h, a.z, "85", "3")
     nclean = int(re.search(r"-> (\d+) candidates", clean).group(1))
-    shutil.copy(f"{base}/synthseg/{h}_seg.nii.gz", f"{base}/synthseg/{h}S_seg.nii.gz")
+    # host anatomy: T1-derived labels (prep_anat.sh) when present, else SynthSeg on the SWI
+    t1 = f"{base}/work/{h}_t1seg_swispace.nii.gz"
+    use_t1 = os.path.exists(t1) and os.path.getmtime(t1) >= os.path.getmtime(f"{base}/data/{h}_swi.nii")
+    if not use_t1:
+        shutil.copy(f"{base}/synthseg/{h}_seg.nii.gz", f"{base}/synthseg/{h}S_seg.nii.gz")
+        if os.path.exists(f"{base}/work/{h}S_t1seg_swispace.nii.gz"): os.remove(f"{base}/work/{h}S_t1seg_swispace.nii.gz")
+    print(f"{h}: anatomy {'T1' if use_t1 else 'SWI-only'}", flush=True)
     for d in a.depths.split(","):
         for s in a.seeds.split(","):
             run(f"{S}/make_synthetic.py", h, "8", d, s)
+            if use_t1:   # copied AFTER the synthetic SWI is written, so it counts as up to date
+                shutil.copy(t1, f"{base}/work/{h}S_t1seg_swispace.nii.gz")
             run(f"{S}/align_seg.py", h + "S")
             run(f"{S}/{a.detector}", h + "S", a.z, "85", "3")
             res = re.search(r"RESULT (.*)", run(f"{S}/eval_synthetic.py", h + "S")).group(1)
