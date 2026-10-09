@@ -11,6 +11,7 @@ Truth  work/NAME_truth.nii.gz  (cSS, ids 1-6):
 Mimics work/NAME_veins.nii.gz (ids 1-6):
   1-4 tubular veins in the middle of the sulcal CSF (1,2 and 3,4 are left/right mirror pairs)
   5-6 cortical surface veins running tangentially in the CSF just outside the pial surface
+  7   transcortical / medullary vein: radial tube from the surface CSF through the cortex 14 mm into WM
 Also: a lobar ICH (dark sphere, 8 mm) in left white matter -> work/NAME_ich_truth.nii.gz
 Labels: synthseg/NAME_seg.nii.gz (aseg/DK-like) and work/NAME_a2009s_swispace.nii.gz
 (Destrieux-like: S_k = banks of sulcus k, G_k = gyrus between sulci k and k+1)."""
@@ -98,6 +99,14 @@ for i, (a, z0) in enumerate([(np.radians(60), 8), (np.radians(-120), -6)], 5):
     m = (np.abs(depth + 1.2) < 0.7) & (np.abs(z - z0) < 0.7) & \
         (np.abs(np.angle(np.exp(1j * (ang - a)))) < np.radians(20)) & mask
     veins[m] = i
+# vein 7: radial (perpendicular to the cortex), gyral crown between sulci 1 and 2, from 2 mm outside
+# the pial surface to 14 mm deep; slight tilt so it is seen on several slices
+a7 = A0[1] + np.pi / 16
+u7 = np.array([np.cos(a7) * 52, np.sin(a7) * 58, 6.0]); u7 /= np.linalg.norm(u7)
+P = np.stack([x, y, z - 2.0], -1); tp = P @ u7
+dperp = np.linalg.norm(P - tp[..., None] * u7, axis=-1)
+m = (dperp < 1.0) & (depth > -2) & (depth < 14) & mask
+veins[m] = 7
 ich = (np.sqrt((x + 22) ** 2 + (y - 10) ** 2 + (z - 4) ** 2) < 8) & inside
 darken(truth > 0, 0.6); darken(veins > 0, 0.6, blur=0.4); darken(ich, 0.7, blur=0.8)
 I[~mask] = 0; I[mask] = np.maximum(I[mask], 1)

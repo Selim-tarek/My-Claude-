@@ -136,6 +136,18 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   40 %, vein decoys (--veins, in sulcal CSF) -> work/HS_veins.nii.gz; stress_test --veins 4 default,
   --legacy; feature table adds AUC vs decoy veins.
 
+- P011 (cSS-negative, T1 SynthSeg on a 2.5 mm reformat): 26 candidates (26 excluded); stress v3 strong 94 %,
+  medium 69 %, faint 31 %, AUC ~0.95; features bank_frac .86, cortex_dist .21, mirror .12, vein_tree .24.
+- v4.11 vessel exclusion: vessel map = dark Hessian tubes in the cortical band + WM up to 15 mm (>=3 SD
+  darker than WM, pieces >=3 mm, round blobs and ICH rim excluded, 1-voxel gaps bridged). Features
+  vessel_wm_mm (tube continuing straight on into deep WM inside a 30 deg cone from the candidate's
+  deep end), axis_normal (|long axis . normal|), vessel_run_mm (straight-on continuation beyond the ends,
+  recorded only), vessel_ext_mm (recorded only). Rule "vessel": wm >=4 mm AND axis >=0.5 AND tram <0.4.
+  Pitfalls found on the phantom: axis alone removes cSS wrapping crown->sulcus; un-coned WM reach
+  connects to noise / ICH rim. Phantom: 24/24 synthetic kept, transcortical veins excluded.
+  make_synthetic --radial K (transcortical decoys), stress_test reports missed-lesion reasons and decoy fate.
+  Not yet checked on real data: run check_known on P006, stress on P011.
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""cSS candidate detector v4 - definition-driven.
+"""cSS candidate detector v4 (v4.11) - definition-driven.
 usage: detect_css.py SUBJECT [z_thr=-2.5] [ridge_pct=85] [rim_mm=3]
 env:   CSS_RANK=v3 ranks with the old v3 score (both scores are always written)
 
@@ -15,6 +15,10 @@ Each criterion is measured per candidate:
   tram-track (both banks)         tram_frac                      >0             ~0
   not part of the venous tree     vein_tree_mm (recorded only)   short          long network
   asymmetric                      mirror_dark_frac               low            high (normal veins)
+  stays on the surface (v4.11)    vessel_wm_mm (tube continues   ~0             medullary / transcortical
+                                  into the WM), vessel_ext_mm                   vein: several mm
+  runs along the cortex (v4.11)   axis_normal (long axis . normal) low          high (penetrating vessel,
+                                                                                vein down a sulcus)
   remote from ICH                 ich_dist_mm, near_ich_suggest  far            <=5 mm
   supratentorial, not basal       infra_frac, basal_frac,        ~0             cerebellum/tentorium,
                                   rel_height                                    basal cisterns, skull base
@@ -65,6 +69,15 @@ MIN_EXTENT_MM = 6.0     # specks: smaller than this overall are not curvilinear 
 MIN_EDGE_SD = 0.75      # "well-defined": candidate must be darker than its 1-2 mm surroundings by this
 KEEP_ALL = os.environ.get("CSS_KEEP_ALL", "") == "1"
 HESS_SIGMAS_MM = (0.8, 1.6)            # 3-D shape analysis scales
+# v4.11 vessel exclusion: a dark line that continues as a TUBE beyond the cortical band (into the white
+# matter = medullary / transcortical vein) and runs perpendicular to the cortex is a vessel, not cSS
+VES_WM_MM = 15.0        # how deep under the cortical band the vessel map reaches
+VES_REACH_MM = 20.0     # vessel continuation is measured up to this distance (bounded: vein_tree saturated)
+VES_WM_Z = -3.0         # WM vessel voxels: this many SD darker than the white matter
+VES_MIN_MM = 3.0        # vessel pieces shorter than this are noise
+VES_CONE_DEG = 30.0     # WM continuation counts only inside this cone, straight on from the candidate
+VES_EXCL_WM_MM = 4.0    # exclusion: tube continues >= this far into the WM ...
+VES_EXCL_AXIS = 0.5     # ... AND the candidate runs perpendicular to the cortex (|long axis . normal|)
 TRAM_MAX_MM = 10.0                     # look for the opposite bank up to this far across a sulcus
 ICH_MIN_MM3, ICH_MIN_RADIUS_MM = 500.0, 2.5   # automatic lobar ICH: dark, compact (inscribed
                                                # radius >= 2.5 mm, i.e. not a vein/sheet) blob
@@ -220,6 +233,40 @@ del eig, evec3, best, tube_v
 
 # ---- 6. venous network: dark tubular voxels in the subarachnoid space / cortex
 vnet = need & (z < Z_LOW) & (TUBE > 0.5) & (pial_sd > -1.5)
+# v4.11 vessel map that ALSO covers the white matter under the cortex: veins do not stop at the cortex -
+# medullary / transcortical veins run radially into the WM, cortical veins continue along the surface.
+# cSS is confined to the surface. WM is darker than cortex on SWI, so WM voxels are judged against WM.
+_wmm = np.isin(seg, [2, 41])
+wm_mu = float(np.median(Ic[_wmm])) if _wmm.any() else mu
+wneed = _wmm & ((Ic - wm_mu) / sd < VES_WM_Z) & (pial_sd > -VES_WM_MM - PIAL_IN_MM) & ~need
+if wneed.any():
+    widx = np.nonzero(wneed); wbest = np.full(len(widx[0]), -np.inf, np.float32)
+    weig = np.zeros((len(widx[0]), 3), np.float32)
+    for s_mm in HESS_SIGMAS_MM:
+        sg = mm2vox(s_mm); H = np.zeros((len(widx[0]), 3, 3), np.float32)
+        for a in range(3):
+            for b in range(a, 3):
+                order = [0, 0, 0]; order[a] += 1; order[b] += 1
+                h = ndi.gaussian_filter(Ic, sg, order=order)[widx] / (vox[a] * vox[b]) * s_mm ** 2
+                H[:, a, b] = h; H[:, b, a] = h
+        w = np.linalg.eigvalsh(H); w = np.take_along_axis(w, np.argsort(np.abs(w), axis=1), 1)
+        upd = w[:, 2] > wbest; wbest[upd] = w[upd, 2]; weig[upd] = w[upd]
+        del H, w
+    # tube = two large curvatures and one small one; a round blob (haematoma, microbleed) is not a vessel
+    _l3 = np.maximum(weig[:, 2], 1e-6)
+    TUBE[widx] = np.where((weig[:, 2] > 0) & (np.abs(weig[:, 0]) / _l3 < 0.5), np.abs(weig[:, 1]) / _l3, np.nan)
+    del weig, wbest
+VES = ((need & (z < Z_LOW)) | wneed) & (TUBE > 0.5)        # dark tubes: band + WM
+del wneed
+# noise specks are not vessels: keep tube pieces at least VES_MIN_MM long
+_vl, _ = ndi.label(VES, structure=s3)
+_ok = np.zeros(int(_vl.max()) + 1, bool)
+for n, sl_ in enumerate(ndi.find_objects(_vl), 1):
+    if sl_ is not None:
+        _ok[n] = np.sqrt(sum(((s_.stop - s_.start) * v) ** 2 for s_, v in zip(sl_, vox))) >= VES_MIN_MM
+VES = _ok[_vl]; del _vl, _ok
+deep_wm = _wmm & (ndi.distance_transform_edt(_wmm, sampling=vox) >= 1.5)   # WM proper, not the cortex border
+nib.save(nib.Nifti1Image(VES.astype(np.uint8), swi.affine), f"{base}/work/{subj}_vessels.nii.gz")   # for freeview
 vl, nv = ndi.label(vnet | (lab > 0), structure=s3)
 vext = np.zeros(nv + 1, np.float32)
 for n, sl in enumerate(ndi.find_objects(vl), 1):
@@ -379,6 +426,51 @@ for p in regionprops(lab, spacing=vox):
     tram, _ = tram_track(pts)
     comps = np.unique(vl[pad][ndi.binary_dilation(mm, structure=s3)]); comps = comps[comps > 0]
     vtree = float(vext[comps].max()) if len(comps) else 0.0
+    # long axis vs the cortical surface normal: cSS runs ALONG the cortex (~0), penetrating / bridging
+    # vessels and veins running down the middle of a sulcus run ALONG the normal (~1)
+    pm = pts * np.array(vox); pm = pm - pm.mean(0)
+    ua = np.linalg.svd(pm[:: max(1, len(pm) // 2000)], full_matrices=False)[2][0] if len(pm) >= 3 else np.zeros(3)
+    axn = float(np.median(np.abs(sum(ua[a] * normal[a][tuple(pts.T)] for a in range(3)))))
+    # v4.11 vessel continuation, bounded to VES_REACH_MM: follow dark TUBES connected to the candidate
+    #  vessel_ext_mm = how far the tube continues beyond the candidate (cortical vein running on)
+    #  vessel_wm_mm  = how far it runs on, in line with the candidate, inside the white matter (medullary vein)
+    pv = tuple(int(np.ceil(VES_REACH_MM / v)) for v in vox)
+    vb = tuple(slice(max(s_.start - q_, 0), min(s_.stop + q_, n_)) for s_, q_, n_ in zip(sl, pv, I.shape))
+    cm = lab[vb] == p.label
+    dcm = ndi.distance_transform_edt(~cm, sampling=vox)
+    vv_ = VES[vb] & (dcm <= VES_REACH_MM)
+    # 1-voxel gaps are bridged (thin veins break up at the cortex/WM contrast step and in noise);
+    # distances are then measured on real vessel voxels only
+    gl_, _ = ndi.label(ndi.binary_dilation(vv_, structure=s3) | cm, structure=s3)
+    gid = np.unique(gl_[cm]); gid = gid[gid > 0]
+    reach = np.isin(gl_, gid) & vv_ & ~cm
+    ves_ext = float(dcm[reach].max()) if reach.any() else 0.0
+    rwm = reach & deep_wm[vb] & (ich_dist[vb] > 3.0)          # a haematoma's rim is not a vessel
+    # only WM vessel that carries STRAIGHT ON beyond the candidate's deep end:
+    # a transcortical vein continues in line; cSS that merely touches an unrelated vessel does not
+    # cone (half-angle VES_CONE_DEG) from the candidate's deepest point, pointing inward: the mean
+    # inward surface normal + the centre->deepest-point direction (where a transcortical vein exits)
+    if rwm.any():
+        vx_ = np.array(vox); deep = pts[np.argmin(psd)] * vx_
+        nin = -np.array([normal[a][tuple(pts.T)].mean() for a in range(3)])
+        dvec = deep - pts.mean(0) * vx_
+        ud = nin / (np.linalg.norm(nin) + 1e-6) + dvec / (np.linalg.norm(dvec) + 1e-6)
+        ud = ud / np.linalg.norm(ud) if np.linalg.norm(ud) > 0.3 else ua
+        fp = (np.argwhere(rwm) + [s_.start for s_ in vb]) * vx_ - deep
+        inline = (fp @ ud) >= np.cos(np.radians(VES_CONE_DEG)) * np.linalg.norm(fp, axis=1)
+        ves_wm = float(dcm[rwm][inline].max()) if inline.any() else 0.0
+    else:
+        ves_wm = 0.0
+    # vessel_run_mm (recorded only): tube continuing straight on beyond EITHER end of the candidate's long
+    # axis (a cortical vein runs on towards a sinus; cSS stops). Bounded by VES_REACH_MM.
+    ves_run = 0.0
+    if reach.any() and len(pts) >= 3:
+        vx_ = np.array(vox); pm_ = pts * vx_; proj = (pm_ - pm_.mean(0)) @ ua
+        fq = (np.argwhere(reach) + [s_.start for s_ in vb]) * vx_
+        for end, sgn in ((pm_[np.argmax(proj)], 1.0), (pm_[np.argmin(proj)], -1.0)):
+            fe = fq - end; ok_ = (fe @ (sgn * ua)) >= np.cos(np.radians(VES_CONE_DEG)) * np.linalg.norm(fe, axis=1)
+            if ok_.any(): ves_run = max(ves_run, float(np.linalg.norm(fe[ok_], axis=1).max()))
+    del dcm, gl_, reach, rwm
     mdark = mirror_dark(pts)
     # microbleed vs cSS (Charidimou, AJNR 2016;37:E43): microbleeds are small (generally 2-5 mm),
     # round/oval and at least half surrounded by brain parenchyma - cSS lies on the surface / in CSF
@@ -424,7 +516,8 @@ for p in regionprops(lab, spacing=vox):
     #  vein = tube-like, out in the sulcal CSF, not parallel to the cortex
     fin = lambda v: v if np.isfinite(v) else None
     ce = [on_surf, 1 - tub if np.isfinite(tub) else None, fin(aln), fin(tram), bankf]
-    ve = [fin(tub), 1 / (1 + np.exp(-(pdist - 0.3) / 0.5)), 1 - aln if np.isfinite(aln) else None]
+    ve = [fin(tub), 1 / (1 + np.exp(-(pdist - 0.3) / 0.5)), 1 - aln if np.isfinite(aln) else None,
+          axn, min(ves_wm / VES_EXCL_WM_MM, 1.0)]
     css_ev = float(np.mean([v for v in ce if v is not None]))
     vein_ev = float(np.mean([v for v in ve if v is not None]))
     c0 = pts.mean(0)
@@ -449,6 +542,7 @@ for p in regionprops(lab, spacing=vox):
                      edge_contrast=round(edge, 2), _wz=float((swi.affine @ np.r_[c0, 1])[2]),
                      infra_frac=round(float((d_infra[pad][mm] <= INFRA_MM).mean()), 2),
                      basal_frac=round(float((d_basal[pad][mm] <= BASAL_MM).mean()), 2),
+                     vessel_ext_mm=round(ves_ext, 1), vessel_wm_mm=round(ves_wm, 1), vessel_run_mm=round(min(ves_run, VES_REACH_MM), 1), axis_normal=round(axn, 2),
                      score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
@@ -460,7 +554,8 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "mirror_dark_frac", "ich_dist_mm", "near_ich_suggest", "infratentorial", "flair_csf_z",
         "parenchyma_frac", "extent_mm", "cmb_like",
         "flair_bright", "flair_ctx_z", "flair_ctx_bright", "css_evidence", "vein_evidence",
-        "edge_contrast", "infra_frac", "basal_frac", "rel_height", "score_v3", "score_v4", "accept"]
+        "edge_contrast", "infra_frac", "basal_frac", "rel_height",
+        "vessel_ext_mm", "vessel_wm_mm", "vessel_run_mm", "axis_normal", "score_v3", "score_v4", "accept"]
 
 # ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason
 # height is measured within the CEREBRUM (cortex + cerebral WM), so 0 = floor of the temporal/frontal
@@ -489,6 +584,9 @@ def exclusion(r):
     tub_, tram_ = r["tube_ratio"], r["tram_frac"]
     if r["pial_dist_mm"] > 0.5 and np.isfinite(tub_) and tub_ > 0.45 and not (np.isfinite(tram_) and tram_ >= 0.2):
         return "vein: tubular, in the middle of the sulcal CSF"
+    if r["vessel_wm_mm"] >= VES_EXCL_WM_MM and r["axis_normal"] >= VES_EXCL_AXIS \
+            and not (np.isfinite(tram_) and tram_ >= 0.4):     # clear tram-track (cSS ~0.9) overrides
+        return "vessel: continues as a tube into the white matter, runs perpendicular to the cortex"
     if FULL_BOTTOM and r["artifact_zone"] and r["rel_height"] < 0.4:
         return "skull-base susceptibility artifact zone"
     if np.isfinite(r["edge_contrast"]) and r["edge_contrast"] < MIN_EDGE_SD:

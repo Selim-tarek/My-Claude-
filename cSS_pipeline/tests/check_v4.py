@@ -33,7 +33,9 @@ ich = nib.load(f"{B}/work/{name}_ich_used.nii.gz").get_fdata() > 0
 icht = nib.load(f"{B}/work/{name}_ich_truth.nii.gz").get_fdata() > 0
 ich_dice = 2 * (ich & icht).sum() / max(ich.sum() + icht.sum(), 1)
 print(f"automatic ICH mask Dice vs truth: {ich_dice:.2f}")
-ok = len(found) >= n - 1 and auc(pos.score_v4, neg.score_v4) >= 0.8 and ich_dice > 0.5
+tc_shown = bool(veins.max() >= 7 and (cand[veins == 7] > 0).any())     # any overlap: most of it is in WM
+if veins.max() >= 7: print("transcortical vein (7) " + ("STILL SHOWN" if tc_shown else "excluded/not shown"))
+ok = len(found) >= n - 1 and not tc_shown and auc(pos.score_v4, neg.score_v4) >= 0.8 and ich_dice > 0.5
 print("RESULT v4 " + ("OK" if ok else "FAIL") +
       f" found={len(found)} total={n} auc_v3={auc(pos.score_v3, neg.score_v3):.2f} "
       f"auc_v4={auc(pos.score_v4, neg.score_v4):.2f} ich_dice={ich_dice:.2f}")

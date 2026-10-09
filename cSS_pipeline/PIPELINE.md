@@ -371,6 +371,50 @@ lesions were too big and blob-like, so size and branching separated them "for th
 python ~/css_project/scripts/stress_test.py --hosts P006 --depths 0.6,0.45,0.3 --seeds 1,2 --tag p006_v3
 ```
 
+## 5d. Excluding vessels (v4.11)
+
+Veins are the commonest false positive. Without phase, a vein and cSS look the same on one SWI slice
+(both are dark: deoxyhaemoglobin and hemosiderin are both paramagnetic). They differ in **3-D shape and
+in where they go**. A radiologist tells them apart by scrolling: a vein carries on, cSS stays on the
+cortical surface. v4.11 measures this:
+
+| Measure (column) | What it asks | cSS | Vessel |
+|---|---|---|---|
+| `vessel_wm_mm` | Does a dark **tube** continue from the candidate's deep end **straight on into the white matter** (within a 30° cone)? | ~0 mm | medullary / transcortical vein: several mm |
+| `axis_normal` | Does the candidate run **perpendicular** to the cortex (0 = along the surface, 1 = straight in)? | low | high |
+| `vessel_run_mm` | Does a tube continue **straight on beyond either end** along the surface? (recorded only) | short | cortical vein running on |
+| `vessel_ext_mm` | Any dark tube connected within 20 mm (recorded only; saturates on real SWI) | — | — |
+
+**New exclusion: "vessel"** = `vessel_wm_mm ≥ 4` **and** `axis_normal ≥ 0.5` **and** no clear
+tram-track (`tram_frac < 0.4`). Both signs are needed:
+- `axis_normal` alone would remove real cSS that wraps from the gyral crown down into a sulcus;
+- the white-matter tube alone would remove cSS that happens to touch a medullary vein.
+
+The existing **"vein"** rule (tubular, out in the middle of the sulcal CSF, no tram-track) stays.
+
+How the vessel map is built:
+- dark tubular voxels (3-D Hessian: two strong curvatures, one weak) in the cortical band, and in the
+  white matter up to 15 mm deep, judged against the WM (≥ 3 SD darker than WM);
+- pieces shorter than 3 mm are dropped as noise; 1-voxel gaps are bridged;
+- round blobs and the rim of a lobar haematoma are not counted as vessels.
+
+**View it:** `freeview -v data/P011_swi.nii work/P011_vessels.nii.gz:colormap=heat:opacity=0.4`
+
+**Stress test** (`--radial 2`, the default) also inserts **transcortical vein decoys**: straight
+tubes from the CSF through the cortex 10–18 mm into the WM. Two new summary lines:
+- `missed synthetic lesions: ...` says *which rule* removed a synthetic cSS. If "vessel" appears
+  often on a real host, the rule is too aggressive.
+- `decoy veins: N still shown, N excluded (...), N not detected`.
+
+Phantom results: all synthetic lesions are kept (24/24); the phantom's transcortical vein and 2 of 2
+radial decoys are excluded.
+
+**Limits (honest):**
+- A cortical vein lying **along** the surface is the hardest mimic. `vessel_run_mm` is recorded
+  so its value can be measured on real data before any rule uses it.
+- Thresholds are set on phantoms, not on real patients. **Run `check_known.py` on P006** to confirm that the
+  known foci are not excluded as "vessel".
+
 ## 6. Validation plan (what makes this publishable)
 
 1. **Re-run P006 with v4.** First back up the v3 review: `mkdir -p ~/css_project/review/v3 && cp ~/css_project/review/P006_* ~/css_project/review/v3/`.

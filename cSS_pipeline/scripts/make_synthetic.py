@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Insert synthetic cSS (and optional synthetic vein decoys) into a presumed cSS-negative host -> {HOST}S.
-usage: make_synthetic.py HOST [n_lesions=8] [depth=0.6] [seed=1] [--tram 0.4] [--veins 4] [--legacy]
+usage: make_synthetic.py HOST [n_lesions=8] [depth=0.6] [seed=1] [--tram 0.4] [--veins 4] [--radial 2] [--legacy]
 
 v3 (realistic lesions; after the P006 stress test showed v2 lesions were too big and blob-like, so
 volume / branching / elongation separated them for the wrong reason):
@@ -10,15 +10,17 @@ volume / branching / elongation separated them for the wrong reason):
   - darkness per lesion around `depth`, edge blur, and noise inside the lesion
   - --veins K: K tubular decoys (radius 0.5-0.9 mm, 15-40 mm) in the sulcal CSF, as dark as the
     lesions; written to work/HOSTS_veins.nii.gz (Cao et al. 2026: vessel decoys reduce false positives)
+  - --radial K (v4.11): K transcortical / medullary vein decoys: straight tubes starting 2 mm out in the
+    CSF and running perpendicular to the cortex 10-18 mm into the white matter (same veins file)
 --legacy reproduces the v2 generator (flood-filled, thicker lesions) for comparison."""
 import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
 import sys, os, numpy as np, nibabel as nib
 from scipy import ndimage as ndi
 
 flag = lambda f, d: type(d)(sys.argv[sys.argv.index(f) + 1]) if f in sys.argv else d
-TRAM, NVEIN, LEGACY = flag("--tram", 0.4), flag("--veins", 0), "--legacy" in sys.argv
+TRAM, NVEIN, NRAD, LEGACY = flag("--tram", 0.4), flag("--veins", 0), flag("--radial", 0), "--legacy" in sys.argv
 # positional values given after a flag (e.g. "--veins 4") must not be read as lesion arguments
-pos = [a for i, a in enumerate(sys.argv[1:], 1) if not a.startswith("--") and not sys.argv[i - 1] in ("--tram", "--veins")]
+pos = [a for i, a in enumerate(sys.argv[1:], 1) if not a.startswith("--") and not sys.argv[i - 1] in ("--tram", "--veins", "--radial")]
 host = pos[0]; N = int(pos[1]) if len(pos) > 1 else 8
 depth = float(pos[2]) if len(pos) > 2 else 0.6; seed = int(pos[3]) if len(pos) > 3 else 1
 rng = np.random.default_rng(seed)
@@ -147,6 +149,29 @@ if NVEIN and not LEGACY:
             pts.append(ii)
         if len(pts) * 0.5 < 10: continue
         m = np.zeros(I.shape, bool); m[tuple(np.array(pts).T)] = True
+        m = (ndi.distance_transform_edt(~m, sampling=vox) <= r) & brain
+        if (truth[m] > 0).any() or (veins[m] > 0).any(): continue
+        nv += 1; veins[m] = nv
+        dark = np.maximum(dark, m * float(np.clip(depth + rng.uniform(-0.1, 0.1), 0.05, 0.9)))
+
+# ---- transcortical / medullary vein decoys: straight tubes perpendicular to the cortex into the WM
+if NRAD and not LEGACY:
+    wm = np.isin(seg, [2, 41])
+    g = np.gradient(ndi.gaussian_filter(ndi.distance_transform_edt(~wm, sampling=vox), 1.0), *vox)
+    nv, vt = int(veins.max()), 0; n0 = nv
+    while nv - n0 < NRAD and vt < 2000:
+        vt += 1
+        q = pts_all[rng.integers(len(pts_all))].astype(float)
+        if any(np.linalg.norm((q - s_) * vox) < 15 for s_ in seeds) or veins[tuple(q.astype(int))]: continue
+        u = -np.array([gg[tuple(q.astype(int))] for gg in g]); nu = np.linalg.norm(u)
+        if nu < 0.3: continue
+        u = u / nu                                         # mm direction toward the white matter
+        L, r = rng.uniform(10, 18), rng.uniform(0.5, 0.9)
+        tt = np.arange(-2.0, 3.0 + L, 0.3)                 # 2 mm outside, ~3 mm cortex, L mm into WM
+        ii = np.round(q[None, :] + tt[:, None] * u[None, :] / vox).astype(int)
+        if (ii < 0).any() or (ii >= np.array(I.shape)).any(): continue
+        if wm[tuple(ii[tt > 4.0].T)].mean() < 0.6 or not brain[tuple(ii.T)].all(): continue
+        m = np.zeros(I.shape, bool); m[tuple(ii.T)] = True
         m = (ndi.distance_transform_edt(~m, sampling=vox) <= r) & brain
         if (truth[m] > 0).any() or (veins[m] > 0).any(): continue
         nv += 1; veins[m] = nv
