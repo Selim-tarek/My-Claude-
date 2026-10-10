@@ -163,6 +163,12 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   score_v4 >=1.24. v4.12 adopts a CONSERVATIVE definition rule "off the cortex": T1 only, cortex_frac<0.30
   AND pial_dist>0.30 AND tram<0.2. score threshold not adopted (ranking, would cut synthetic).
 
+- v4.12 on real data: P006 66 -> 59 candidates (9 "off the cortex"), 6/6 known kept; P011 26 -> 8
+  (18 "off the cortex"); P011 stress unchanged 94/75/25 %, AUC .93/.98/.97, 0 synthetic lesions lost to the
+  new rule. Remaining P011 FPs: 5 orbitofrontal (frontal-sinus susceptibility zone, rel_height >= 0.4),
+  rostral ACC, precuneus, middle temporal. Candidate next rule: orbitofrontal artifact zone - needs more
+  negatives first.
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.
