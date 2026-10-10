@@ -70,17 +70,26 @@ M[piece(drop == d_ok[0])] = 1                                       # dropped (g
 seg = nib.load(f"{B}/work/PH3_seg_swispace.nii.gz").get_fdata().astype(int)
 free = np.isin(seg, [2, 41]) & (ndi.distance_transform_edt((cand == 0) & (excl == 0) & (drop == 0), sampling=vox) > 6)
 p = np.argwhere(free)[len(np.argwhere(free)) // 2]
-M[p[0] - 1:p[0] + 2, p[1] - 1:p[1] + 2, p[2]:p[2] + 2] = 1          # nothing there -> not generated
+M[p[0] - 1:p[0] + 2, p[1] - 1:p[1] + 2, p[2]:p[2] + 2] = 1          # nothing there -> not generated (WM)
+# v4.17: a second never-generated outline on normal (not dark) cortex inside the search zone
+gen = nib.load(f"{B}/work/PH3_gen.nii.gz").get_fdata().astype(int)
+ok_ctx = (seg >= 1000) & ((gen & 1) > 0) & ((gen & 8) == 0) & \
+    (ndi.distance_transform_edt((cand == 0) & (excl == 0) & (drop == 0) & (M == 0), sampling=vox) > 6)
+q = np.argwhere(ok_ctx)[len(np.argwhere(ok_ctx)) // 3]
+M[q[0], q[1], q[2]] = 1; M[q[0] + 1, q[1], q[2]] = 1
 os.makedirs(f"{B}/labels", exist_ok=True)
 aff = nib.load(f"{B}/data/PH3_swi.nii").affine
 nib.save(nib.Nifti1Image(M, aff), f"{B}/labels/PH3_missed_expertB.nii.gz")
 print("   " + run(f"{S}/label_missed.py", "PH3", "expertB").stdout.strip().replace("\n", "\n   "))
 ml = pd.read_csv(f"{B}/labels/missed_lesions.csv")
-if sorted(ml.fate) != sorted(["shown", "excluded", "dropped", "not generated"]): fail(f"fates {ml.fate.tolist()}")
+if sorted(ml.fate) != sorted(["shown", "excluded", "dropped", "not generated", "not generated"]): fail(f"fates {ml.fate.tolist()}")
+ng = sorted(ml[ml.fate == "not generated"].reason.astype(str))
+if ng != ["not dark enough (z >= -2 everywhere)", "outside the search zone: white matter / deep-nucleus label"]:
+    fail(f"not-generated reasons {ng}")
 if not ml[ml.fate == "excluded"].rule_version.iloc[0].startswith("E"): fail("excluded fate without rule id")
 if not str(ml[ml.fate == "dropped"].reason.iloc[0]).startswith(("volume", "<2", "elong", "no cortex")): fail("dropped reason")
 run(f"{S}/label_missed.py", "PH3", "expertB")
-if len(pd.read_csv(f"{B}/labels/missed_lesions.csv")) != 4: fail("re-run duplicated missed-lesion rows")
+if len(pd.read_csv(f"{B}/labels/missed_lesions.csv")) != 5: fail("re-run duplicated missed-lesion rows")
 
 # 4. study metadata: QC fields copied, split fixed once assigned
 print("   " + run(f"{S}/study_meta.py", "PH3", "--status", "pos", "--ref-L", "1", "--ref-R", "2", "--split", "dev").stdout.strip())

@@ -217,6 +217,18 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   artifact > other), id overlay (.mgh, +cand/-excl), per-object Destrieux sulcus/gyrus from
   label/?h.aparc.a2009s.annot, freeview command printed. tests/check_overlay.py.
 
+- v4.17 audit Stage 2 + review follow-ups. Detector: CSF = brain & ~tissue (B2; confirmed on a phantom with
+  recon-all labels: v4.13 surface_contact 0.00 for every candidate, FLAIR CSF reference = basal label-24 region),
+  3-D Hessian on If (B3; phantom tube_ratio change <= 0.08, 0.17 on sinus pieces at the mask edge; same objects,
+  same exclusions, ranks shift slightly), E8 needs T1 (B6), stale FLAIR / Destrieux / phase / LTA ignored or
+  refused (B11), work/ID_gen.nii.gz generation-stage bits, review/ID_manifest.json (sha256 of inputs, params,
+  package + FreeSurfer versions; surface_features adds its section). label_missed splits "not generated" into
+  outside zone (rim / WM label / beyond band), not dark, no ridge, no strong seed. consensus.py: two-reader
+  consensus, adjudication_todo.csv + --apply, Cohen kappa (cSS vs not, 6 classes) with patient-bootstrap CIs;
+  agreement.py adds quadratic weighted kappa for multifocality / L / R score. environment.yml. Tests:
+  check_stage2.py, check_consensus.py. Still to confirm on P006 recon-all labels: count of label 0 vs 24 in
+  brain & ~tissue (the fix is safe either way).
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.
@@ -231,12 +243,12 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
 2. Expert labels with fine codes (VS!) + missed-lesion outlines + study_meta split for every new case.
 3. Patient-grouped evaluation script reading labels/ (FP per negative scan, top-k sensitivity, FROC, CIs).
 4. Regularised ranking model with nested patient-level CV; review tiers from it; hard rules only after test.
-5. Stage 2 fixes from the audit (CSF label on recon-all, Hessian at mask edge, E8 gated on T1, staleness).
+5. Decide the phenotype scope for inferior temporal/occipital cSS (excluded by E1/E3/E8 by design).
 
 ## How to test
 `bash tests/run_tests.sh` — v3 phantom (radial sulci, fissure, veins) end to end, fails if synthetic
 sensitivity < 4/8; v4 phantom (check_v4.py: sensitivity, score_v4 AUC ≥0.8, ICH Dice, sulcal 3/4).
-tests/check_surfvein.py + check_overlay.py (v4.16, PH6), tests/check_labels.py (v4.15) and tests/check_qc.py (all called by run_tests.sh): v4.14 QC status, column contract, dropped log, extent at the
+tests/check_stage2.py + check_consensus.py (v4.17), check_surfvein.py + check_overlay.py (v4.16, PH6), check_labels.py (v4.15) and check_qc.py (all called by run_tests.sh): v4.14 QC status, column contract, dropped log, extent at the
 volume edge, label-shift monotonicity, transposed-orientation detection.
 `bash tests/test_shell.sh` — run_css.sh / prep_anat.sh / run_all.sh flow with stubbed FreeSurfer.
 No FreeSurfer or patient data needed.

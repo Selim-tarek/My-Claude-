@@ -46,6 +46,9 @@ a = ap.parse_args(); subj = a.subject; base = _base()
 sdir = a.subjects_dir or os.environ.get("CSS_SUBJECTS_DIR", f"{base}/subjects")
 swi = nib.load(f"{base}/data/{subj}_swi.nii"); aff = swi.affine; inv_aff = np.linalg.inv(aff)
 T, tsrc, checks, surfs = surface_to_swi(base, subj, sdir, a.surface_xfm, a.force)
+from css_common import update_manifest, sha256
+update_manifest(base, subj, "surface_features", dict(transform_source=tsrc, label_agreement_mm=checks,
+    pial={h: sha256(f"{sdir}/{subj}/surf/{h}.pial") for h in ("lh", "rh")}, near_mm=a.near_mm, reach_mm=a.reach_mm))
 
 dark = nib.load(f"{base}/work/{subj}_dark.nii.gz").get_fdata() > 0
 

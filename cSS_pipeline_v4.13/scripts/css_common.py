@@ -130,3 +130,71 @@ def append_rows(path, rows, key):
         new = pd.concat([old, new], ignore_index=True)
     new.to_csv(path, index=False)
     return new
+
+
+# ---- v4.17 provenance helpers
+def fresh(path, ref):
+    """True if path exists and is not older than ref (a derived file made after its source was imported)"""
+    return os.path.exists(path) and (not os.path.exists(ref) or os.path.getmtime(path) >= os.path.getmtime(ref))
+
+
+def sha256(path, block=1 << 20):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(block), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def update_manifest(b, subj, section, data):
+    """merge {section: data} into review/ID_manifest.json (one machine-readable provenance record per case)"""
+    import json
+    p = f"{b}/review/{subj}_manifest.json"
+    m = json.load(open(p)) if os.path.exists(p) else {"subject": subj}
+    m[section] = data
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    json.dump(m, open(p, "w"), indent=2, default=str)
+
+
+def environment_record():
+    """python / package / FreeSurfer versions for the manifest"""
+    import platform, importlib
+    rec = {"python": platform.python_version(), "platform": platform.platform()}
+    for mod in ("numpy", "scipy", "nibabel", "pandas", "skimage", "matplotlib"):
+        try:
+            rec[mod] = importlib.import_module(mod).__version__
+        except Exception:
+            rec[mod] = None
+    fs = os.environ.get("FREESURFER_HOME", "")
+    stamp = os.path.join(fs, "build-stamp.txt")
+    rec["freesurfer"] = open(stamp).read().strip() if os.path.exists(stamp) else (fs or None)
+    return rec
+
+
+def label_class(label):
+    """fine expert label -> display / agreement class (shared by surface_overlay.py and consensus.py)"""
+    if label == "cSS": return "cSS"
+    if label == "uncertain": return "uncertain"
+    if label == "vein_surface": return "surface_vein"
+    if label.startswith("vein_") or label == "thrombosed_vein": return "other_vein"
+    if label.startswith("artifact"): return "artifact"
+    return "other_normal"
+
+
+def cohen_kappa(a, b, categories=None, weights=None):
+    """Cohen's kappa for two raters; weights=None (unweighted), 'linear' or 'quadratic' (ordered categories)"""
+    a, b = list(a), list(b)
+    cats = list(categories) if categories is not None else sorted(set(a) | set(b))
+    if len(a) == 0 or len(cats) < 2:
+        return float("nan")
+    k = {c: i for i, c in enumerate(cats)}; n = len(cats)
+    O = np.zeros((n, n))
+    for x, y in zip(a, b):
+        O[k[x], k[y]] += 1
+    O /= O.sum()
+    E = np.outer(O.sum(1), O.sum(0))
+    i, j = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    W = np.where(i == j, 0.0, 1.0) if weights is None else (np.abs(i - j) / (n - 1)) ** (2 if weights == "quadratic" else 1)
+    den = (W * E).sum()
+    return float(1 - (W * O).sum() / den) if den > 0 else float("nan")

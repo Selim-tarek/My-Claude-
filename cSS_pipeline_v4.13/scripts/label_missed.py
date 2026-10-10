@@ -9,7 +9,9 @@ For each blob this script records where it went in the pipeline:
   shown       a current candidate covers >= 30 % of it (it was not missed; check the sheet call)
   excluded    an excluded object covers it -> the rule id and reason (review/ID_excluded.csv)
   dropped     removed by a generation gate -> the reason (work/ID_dropped.csv, v4.14)
-  not generated  never a dark ridge component (contrast / ridge threshold / outside the search zone)
+  not generated  never a dark ridge component; v4.17 says why, from work/ID_gen.nii.gz (detect_css.py):
+                 outside the search zone (skull-strip rim / white matter or deep-nucleus label / beyond the
+                 pial band), not dark enough (z >= -2), dark but no ridge response, or no strong seed
 -> labels/missed_lesions.csv (one row per blob; earlier rows of the same study/reader/session replaced)"""
 import sys, os, datetime, numpy as np, pandas as pd, nibabel as nib
 from scipy import ndimage as ndi
@@ -31,6 +33,21 @@ M = np.asarray(M.dataobj).reshape(swi.shape[:3]) > 0
 ld = lambda p: nib.load(p).get_fdata().astype(int) if os.path.exists(p) else np.zeros(swi.shape[:3], int)
 cand = ld(f"{base}/review/{subj}_candidates.nii.gz"); excl = ld(f"{base}/review/{subj}_excluded.nii.gz")
 drop = ld(f"{base}/work/{subj}_dropped.nii.gz")
+gen = ld(f"{base}/work/{subj}_gen.nii.gz")        # v4.17 generation-stage bits (all 0 for older detector runs)
+
+def why_not_generated(m):
+    """first generation stage the outline failed (bits from detect_css.py)"""
+    g = gen[m]
+    if not g.any(): return "unknown (no work/ID_gen.nii.gz - re-run detect_css.py v4.17)"
+    if (g & 1).mean() < 0.5:
+        rim_, wm_ = (g & 2 > 0).mean(), (g & 4 > 0).mean()
+        if max(rim_, wm_) < 0.25: return "outside the search zone: beyond the pial band (-3.5..+4 mm)"
+        return "outside the search zone: " + ("skull-strip rim (3 mm)" if rim_ >= wm_ else "white matter / deep-nucleus label")
+    z_ = g[(g & 1) > 0]
+    if not (z_ & 8).any(): return "not dark enough (z >= -2 everywhere)"
+    if not ((z_ & 8 > 0) & (z_ & 32 > 0)).any(): return "dark but no ridge response (not line-shaped at the filter scales)"
+    if not (g & 128).any(): return "no strong seed (needs z < z_thr AND a strong ridge for hysteresis)"
+    return "generated, but no object covers it (split or merged away)"
 xt = pd.read_csv(f"{base}/review/{subj}_excluded.csv").set_index("excl_id") \
     if os.path.exists(f"{base}/review/{subj}_excluded.csv") else pd.DataFrame()
 dt = pd.read_csv(f"{base}/work/{subj}_dropped.csv").set_index("drop_id") \
@@ -64,7 +81,7 @@ for i, sl in enumerate(ndi.find_objects(lab), 1):
         d = top(drop, near); r["fate"], r["obj_id"] = "dropped", d
         r["reason"] = dt.loc[d, "reason"] if d in dt.index else ""
     else:
-        r["fate"] = "not generated"
+        r["fate"] = "not generated"; r["reason"] = why_not_generated(m)
     rows.append(r)
 # replace this study/reader/session's earlier rows (a redrawn mask may have fewer blobs)
 path = f"{base}/labels/missed_lesions.csv"

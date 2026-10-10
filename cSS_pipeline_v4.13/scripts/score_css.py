@@ -28,7 +28,7 @@ import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when pipe
 import sys, os, json, numpy as np, nibabel as nib, pandas as pd
 from scipy import ndimage as ndi
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import load_lut
+from css_common import load_lut, fresh
 
 subj = sys.argv[1]
 MERGE_MM, ADJ_MM, GROW_MM = 3.0, 10.0, 5.0
@@ -70,7 +70,9 @@ def groups(ids, D, thr):
 
 # ---- Destrieux sulcal labels (optional)
 a2_p = f"{base}/work/{subj}_a2009s_swispace.nii.gz"
-A2 = nib.load(a2_p).get_fdata().astype(np.int32) if os.path.exists(a2_p) else None
+A2 = nib.load(a2_p).get_fdata().astype(np.int32) if fresh(a2_p, f"{base}/data/{subj}_swi.nii") else None
+if os.path.exists(a2_p) and A2 is None:          # v4.17: Destrieux labels from before the SWI was re-imported
+    print("WARNING: Destrieux labels are older than the SWI - ignored (re-run prep_anat.sh); Euclidean scoring")
 lut = load_lut()
 is_sulc = lambda c: 11100 <= c < 12200 and ("_S_" in lut.get(c, "") or "Lat_Fis" in lut.get(c, ""))
 is_gyr = lambda c: 11100 <= c < 12200 and not is_sulc(c)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""cSS candidate detector v4 (v4.14) - definition-driven.
+"""cSS candidate detector v4 (v4.17) - definition-driven.
 usage: detect_css.py SUBJECT [z_thr=-2.5] [ridge_pct=85] [rim_mm=3]
 env:   CSS_RANK=v3 ranks with the old v3 score (both scores are always written)
 
@@ -45,6 +45,12 @@ v4.14 bookkeeping (no change to which candidates are shown or excluded, except B
                            cortex nearby) - before v4.14 they vanished without a record
   new columns (appended): candidates qc_status, rule_version, n_pieces; excluded also exclusion_confidence
   B1 fix: extent_mm was underestimated for candidates touching the first array slice/row/column
+v4.17 (audit Stage 2): sulcal CSF = brain voxels outside the labelled tissue (recon-all aparc+aseg leaves sulcal CSF
+  as label 0; label 24 alone missed it -> surface_contact and the FLAIR CSF reference were wrong on that route);
+  3-D Hessian on the mask-filled image (zeros outside the mask made edge curvature); E8 artifact-zone rule needs
+  T1 anatomy like E2/E3; a FLAIR older than the SWI is ignored; work/ID_gen.nii.gz records per voxel which
+  generation stage it passed (label_missed.py uses it); review/ID_manifest.json records inputs (sha256),
+  versions and environment.
 v4.16: bounded local vein tracking columns (css_vessel.py; recorded only - no rule or score uses them):
   cand_geodesic_mm, local_cont_max/min/total_mm, terminal_ends, local_net_mm, local_branch_points/_per10mm
 """
@@ -55,7 +61,7 @@ from skimage.filters import sato
 from skimage.measure import regionprops
 from skimage.morphology import skeletonize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, load_lut
+from css_common import base as _base, load_lut, fresh, sha256, update_manifest, environment_record
 import css_qc, css_vessel
 
 subj   = sys.argv[1]
@@ -63,7 +69,7 @@ z_thr  = float(sys.argv[2]) if len(sys.argv) > 2 else -2.5
 r_pct  = float(sys.argv[3]) if len(sys.argv) > 3 else 85
 RIM_MM = float(sys.argv[4]) if len(sys.argv) > 4 else 3.0
 RANK   = os.environ.get("CSS_RANK", "v4")
-RULESET = "v4.16"                        # written to every row as rule_version
+RULESET = "v4.17"                        # written to every row as rule_version
 Z_LOW, R_PCT_LOW = -2.0, 80           # hysteresis (weak) thresholds
 GROW_Z = -1.5                          # 'dark' map used for region growing at scoring
 MIN_MM3, MIN_SLICES, MIN_ELONG = 25.0, 2, 2.0   # v4: 2.0 (tram-track = two parallel plates, ~2.4;
@@ -121,11 +127,13 @@ brain  = ndi.binary_fill_holes(I > 0)
 cortex = (seg >= 1000) | (seg == 3) | (seg == 42)
 it = max(1, int(round(2.0 / vox[0])))
 edge_band = brain & ~ndi.binary_erosion(brain, structure=s2d, iterations=it)
-surface = (~brain) | np.isin(seg, CSF)
-near_surface = ndi.binary_dilation(surface, structure=s2d, iterations=it)
-
 # ---- 0. signed distance to the pial surface (mm; <0 inside tissue, >0 in CSF) + normals
 tissue = ndi.binary_fill_holes(brain & (seg > 0) & ~np.isin(seg, CSF))    # fills ventricles
+# v4.17: CSF = brain voxels that are not labelled tissue. SynthSeg labels extracerebral/sulcal CSF 24, but
+# recon-all aparc+aseg leaves sulcal CSF unlabelled (0) and uses 24 for a small basal region only
+csf_space = brain & ~tissue
+surface = (~brain) | csf_space
+near_surface = ndi.binary_dilation(surface, structure=s2d, iterations=it)
 pial_sd = (ndi.distance_transform_edt(~tissue, sampling=vox)
            - ndi.distance_transform_edt(tissue, sampling=vox)).astype(np.float32)
 _g = np.gradient(ndi.gaussian_filter(pial_sd, mm2vox(1.0)), *vox)
@@ -165,6 +173,11 @@ for k in range(I.shape[2]):
 r_hi = np.percentile(R[shell], r_pct); r_lo = np.percentile(R[shell], R_PCT_LOW)
 strong = zone & (z < z_thr) & (R > r_hi)
 weak   = zone & (z < Z_LOW) & (R > r_lo)          # strong is a subset of weak
+# v4.17 generation-stage record per voxel (bits): 1 search zone, 2 skull-strip rim, 4 WM / deep-nucleus label,
+# 8 z < -2 (weak dark), 16 z < z_thr (strong dark), 32 ridge > weak pct, 64 ridge > strong pct,
+# 128 in a component kept by hysteresis -> work/ID_gen.nii.gz, read by label_missed.py
+GEN = (zone * 1 + rim * 2 + np.isin(seg, WM + DEEP) * 4 + (brain & (z < Z_LOW)) * 8 + (brain & (z < z_thr)) * 16
+       + (brain & (R > r_lo)) * 32 + (brain & (R > r_hi)) * 64).astype(np.uint8)
 
 # ---- 4. hemisphere map; hysteresis labelling separately in each hemisphere
 Lm = np.isin(seg, LH) | ((seg >= 1000) & (seg < 2000))
@@ -183,6 +196,8 @@ for side in (hemiL, ~hemiL):
     nz = wl > 0
     lab[nz] = remap[wl[nz]]
     nxt += len(keep)
+GEN[lab > 0] |= 128
+nib.save(nib.Nifti1Image(GEN, swi.affine), f"{base}/work/{subj}_gen.nii.gz"); del GEN
 del R, wl, weak, strong
 
 # ---- 4b. merge fragments of the same structure: a line broken by small gaps (noise, partial volume,
@@ -229,7 +244,7 @@ for s_mm in HESS_SIGMAS_MM:
     for a in range(3):
         for b in range(a, 3):
             order = [0, 0, 0]; order[a] += 1; order[b] += 1
-            h = ndi.gaussian_filter(Ic, sg, order=order)[idx] / (vox[a] * vox[b]) * s_mm ** 2
+            h = ndi.gaussian_filter(If, sg, order=order)[idx] / (vox[a] * vox[b]) * s_mm ** 2   # v4.17: If
             H[:, a, b] = h; H[:, b, a] = h
     w, v = np.linalg.eigh(H)                              # ascending signed eigenvalues
     o = np.argsort(np.abs(w), axis=1)                     # sort by magnitude |l1|<=|l2|<=|l3|
@@ -260,7 +275,7 @@ if wneed.any():
         for a in range(3):
             for b in range(a, 3):
                 order = [0, 0, 0]; order[a] += 1; order[b] += 1
-                h = ndi.gaussian_filter(Ic, sg, order=order)[widx] / (vox[a] * vox[b]) * s_mm ** 2
+                h = ndi.gaussian_filter(If, sg, order=order)[widx] / (vox[a] * vox[b]) * s_mm ** 2
                 H[:, a, b] = h; H[:, b, a] = h
         w = np.linalg.eigvalsh(H); w = np.take_along_axis(w, np.argsort(np.abs(w), axis=1), 1)
         upd = w[:, 2] > wbest; wbest[upd] = w[upd, 2]; weig[upd] = w[upd]
@@ -338,10 +353,12 @@ ich_dist = ndi.distance_transform_edt(~ich, sampling=vox) if ich.any() else np.f
 
 # ---- 9. optional FLAIR (acute convexity SAH is FLAIR-bright in the sulci; chronic cSS is not)
 fl_p = f"{base}/work/{subj}_flair_swispace.nii.gz"
-FL = None
-if os.path.exists(fl_p):
+FL = None; fl_note = ""
+if os.path.exists(fl_p) and not fresh(fl_p, f"{base}/data/{subj}_swi.nii"):
+    fl_note = "FLAIR IGNORED (older than the SWI - re-run prep_anat.sh)"
+elif os.path.exists(fl_p):
     FL = nib.load(fl_p).get_fdata().astype(np.float32)
-    csf_ref = FL[np.isin(seg, CSF) & brain & (FL > 0)]
+    csf_ref = FL[csf_space & (FL > 0)]                      # v4.17 (was label 24 only)
     tis_ref = FL[tissue & brain & (FL > 0)]
     ctx_ref = FL[cortex & brain & (FL > 0)]
     if csf_ref.size and tis_ref.size and ctx_ref.size:
@@ -642,8 +659,8 @@ def exclusion(r):
     if T1_ANAT and r["cortex_frac"] < OFF_CTX_FRAC and r["pial_dist_mm"] > OFF_PIAL_MM \
             and not (np.isfinite(tram_) and tram_ >= 0.2):
         return "E7@v4.12", "off the cortex: lies in the sulcal CSF without touching the cortex (vein)"
-    if FULL_BOTTOM and r["artifact_zone"] and r["rel_height"] < 0.4:
-        return "E8@v4.9", "skull-base susceptibility artifact zone"
+    if T1_ANAT and FULL_BOTTOM and r["artifact_zone"] and r["rel_height"] < 0.4:   # v4.17: T1 only, like E2/E3
+        return "E8@v4.17", "skull-base susceptibility artifact zone"
     if np.isfinite(r["edge_contrast"]) and r["edge_contrast"] < MIN_EDGE_SD:
         return "E9@v4.8", "faint / ill-defined (normal dark cortex)"
     return "", ""
@@ -706,6 +723,7 @@ print(f"{subj}: {n_raw} raw components -> {len(df)} candidates "
       f"({cnt('artifact_zone')} artifact zone, {cnt('midline_zone')} midline, {cnt('vein_like')} vein-like, "
       f"{cnt('near_ich_suggest')} near ICH [{ich_src}], {cnt('infratentorial')} infratentorial)  rank={RANK}"
       + ("  FLAIR used" if FL is not None else ""))
+if fl_note: print(f"{subj}: {fl_note}")
 print(f"{subj}: QC {QC['status']}" + (f" ({'; '.join(QC['reasons'])})" if QC["reasons"] else "")
       + f", pial edge agreement {QC['edge_agreement_mm']} mm, {len(dropped)} components below the generation gates"
       + " [review/" + subj + "_qc.json; reported only]\n")
@@ -713,3 +731,16 @@ if len(df):
     print(df.head(15)[["cand_id", "hemi", "region", "volume_mm3", "darkness_z", "pial_dist_mm",
                        "tube_ratio", "surface_alignment", "tram_frac", "vein_tree_mm", "score",
                        "vox_i", "vox_j", "vox_k"]].to_string(index=False))
+# v4.17 provenance: inputs (sha256), parameters, versions -> review/ID_manifest.json
+_inputs = {k: p_ for k, p_ in (("swi", f"{base}/data/{subj}_swi.nii"), ("labels", f"{base}/work/{subj}_seg_swispace.nii.gz"),
+                               ("t1_labels", _t1p), ("destrieux", f"{base}/work/{subj}_a2009s_swispace.nii.gz"),
+                               ("flair", fl_p), ("phase", f"{base}/data/{subj}_phase.nii.gz"),
+                               ("registration", f"{base}/work/{subj}_swi2t1.lta"), ("ich_drawn", ich_p))
+           if os.path.exists(p_)}
+update_manifest(base, subj, "detect", dict(
+    pipeline_version=RULESET, run_at=pd.Timestamp.now().isoformat(timespec="seconds"), args=sys.argv[1:],
+    parameters=dict(z_thr=z_thr, ridge_pct=r_pct, rim_mm=RIM_MM, rank=RANK, keep_all=KEEP_ALL),
+    anatomy="T1" if T1_ANAT else "SWI-only", flair_used=FL is not None, qc_status=QC["status"],
+    n_candidates=int(len(df)), n_excluded=len(excluded), n_dropped=len(dropped),
+    inputs={k: dict(path=p_, sha256=sha256(p_), mtime=os.path.getmtime(p_)) for k, p_ in _inputs.items()},
+    environment=environment_record()))

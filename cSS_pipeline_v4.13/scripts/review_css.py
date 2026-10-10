@@ -64,7 +64,9 @@ HW = int(round(30 / vox[0]))          # 60 mm zoom window
 # Sign conventions differ by vendor (Vaccarino et al. 2025), so compare with a vein on the same image.
 PH = None
 _php = f"{base}/data/{subj}_phase.nii.gz"
-if os.path.exists(_php):
+if os.path.exists(_php) and os.path.getmtime(_php) < os.path.getmtime(f"{base}/data/{subj}_swi.nii"):
+    print("WARNING: phase image is older than the SWI - not shown (re-import it with run_css.sh --phase)")
+elif os.path.exists(_php):
     from nibabel.processing import resample_from_to
     _ph = nib.load(_php)
     if _ph.shape[:3] != swi.shape[:3] or not np.allclose(_ph.affine, swi.affine, atol=1e-3):

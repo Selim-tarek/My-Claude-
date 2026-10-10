@@ -1,4 +1,4 @@
-# cSS pipeline v4.16 — runbook
+# cSS pipeline v4.17 — runbook
 
 Step-by-step operation of the whole pipeline, from DICOM to a validated research score. Method details and
 the reasoning behind each rule are in [PIPELINE.md](PIPELINE.md); the audit and plan in
@@ -35,9 +35,10 @@ Replace `P012` with your study code. Never use names or MRNs. Never commit patie
 
 ```zsh
 cd ~/Downloads/cSS_pipeline_v4.16
+conda env create -f environment.yml   # once (or: conda env update -f environment.yml)
 zsh install.sh                     # copies scripts to ~/css_project/scripts, backs up old ones
 # open a NEW Terminal window
-conda activate css                 # python 3.11: numpy scipy nibabel pandas scikit-image matplotlib
+conda activate css
 bash tests/run_tests.sh            # ~10 min, must end with: ALL TESTS PASSED
 bash tests/test_shell.sh           # must end with: SHELL TESTS PASSED
 ```
@@ -110,6 +111,8 @@ Main outputs:
 | `review/P012_qc.json` | case QC (step 4) |
 | `work/P012_vessels.nii.gz`, `work/P012_dark.nii.gz` | vessel map; dark-voxel map for region growing |
 | `work/P012_reg.json` | registration method and cost |
+| `review/P012_manifest.json` | provenance: input file hashes, parameters, package and FreeSurfer versions |
+| `work/P012_gen.nii.gz` | per voxel, which detection stage it passed (used to explain missed cSS) |
 
 ---
 
@@ -190,6 +193,12 @@ blinded to scores and ranks.
    import warns: that exclusion rule removed real cSS — note it.
 4. **Second reader** (same sheet): `expert_import.py P012 expertB --letters "..."`.
    **Blinded re-read** weeks later: add `--session 2`.
+5. **Consensus**: `consensus.py --readers expertA,expertB --subjects P012` → objects both readers put in the
+   same class get a consensus label; disagreements go to `labels/adjudication_todo.csv`. A third reader (or a
+   consensus meeting) fills `adjudicated_label` (a code such as `C` or `VS`) and `adjudicator`, then
+   `consensus.py --readers expertA,expertB --apply labels/adjudication_todo.csv`. Kappa (cSS vs not, six
+   classes) with patient-bootstrap CIs → `labels/agreement_stats.json`. **The consensus is the reference for
+   evaluation**, not either reader alone.
 
 All answers go to `labels/candidate_labels.csv`.
 
@@ -203,8 +212,9 @@ All answers go to `labels/candidate_labels.csv`.
    ```zsh
    python ~/css_project/scripts/label_missed.py P012 expertA
    ```
-   For each outline it records whether it was excluded (which rule), dropped (which gate) or never generated
-   → `labels/missed_lesions.csv`. **Without this step sensitivity cannot be measured.** If outlining is not
+   For each outline it records whether it was excluded (which rule), dropped (which gate) or never generated,
+   and if never generated, why: outside the search zone (skull-strip rim / white-matter label / beyond the pial
+   band), not dark enough, no ridge response, or no strong seed → `labels/missed_lesions.csv`. **Without this step sensitivity cannot be measured.** If outlining is not
    practical, ask for slice and location and draw it yourself from those notes.
 2. **Patient-level reference**:
    ```zsh
@@ -255,7 +265,8 @@ python ~/css_project/scripts/check_known.py P006 --old ~/css_project/review/v3/P
 
 | Task | Command |
 |---|---|
-| Inter-/intra-rater agreement of two scoring sessions | `cp -R review review_session1` (later `review_session2`); `agreement.py --a review_session1 --b review_session2 --col surface_mm2 --plot results/agreement.png` |
+| Reader agreement on candidate calls | `consensus.py --readers expertA,expertB` (step 7.5) |
+| Inter-/intra-rater agreement of two scoring sessions (incl. weighted kappa of the 0–4 score) | `cp -R review review_session1` (later `review_session2`); `agreement.py --a review_session1 --b review_session2 --col surface_mm2 --plot results/agreement.png` |
 | Volume / surface vs multifocality (ceiling effect) | `agreement.py --vs-score ~/css_project/review --col surface_mm2 --plot results/vs_score.png` |
 | Synthetic stress test on cSS-negative hosts (dev only) | `stress_test.py --hosts P011 --depths 0.6,0.45,0.3 --seeds 1,2 --surface-veins 2 --tag v416` |
 | Shortlist exclusion rules (dev only, hypothesis generation) | `rule_test.py --pos P006 --old ... --ids ... --neg P011` |
@@ -266,6 +277,11 @@ python ~/css_project/scripts/check_known.py P006 --old ~/css_project/review/v3/P
   results, with patient-bootstrap confidence intervals — not only AUC.
 - A new hard exclusion is adopted only if, on `test` cases, it removes **no** adjudicated cSS and reduces false
   positives per negative scan.
+
+**Phenotype scope (a study decision, not a setting):** candidates on the inferior temporal / occipital surface
+over the tentorium and near the skull base are excluded by design (rules E1, E3, E8; all listed in
+`ID_excluded.csv`). Decide before the study whether such cSS is outside the phenotype, or must be retained
+(then those rules have to become review flags), and state it in the methods.
 
 **Not built yet (planned, in this order):** a patient-grouped evaluation script that reads `labels/`; a
 regularised ranking model validated by patient-level cross-validation; review tiers from that model. Until

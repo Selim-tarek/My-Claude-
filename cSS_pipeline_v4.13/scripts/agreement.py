@@ -9,6 +9,7 @@ usage: agreement.py --a DIR_A --b DIR_B [--col grown_volume_mm3] [--plot out.png
                Pearson r, ICC(A,1) absolute agreement (two-way), Bland-Altman bias and 95 % limits of
                agreement, and per-subject Dice of the cSS masks. van Harten: ICC 0.995, Pearson 0.991,
                mean Dice 0.75 (Dice is low for small, sparse masks even when volumes agree).
+               v4.17: quadratic weighted kappa for multifocality_0_4 and L/R_score (ordinal visual scale).
   --vs-score   size measure against the 0-4 multifocality score (their Fig. 4: wide spread inside the
                top categories = the ceiling effect a continuous measure avoids)
 Compare sizes only between scans acquired with the same protocol (field strength, TE, voxel size)."""
@@ -55,6 +56,15 @@ diff = x - y; bias = diff.mean(); sd = diff.std(ddof=1)
 r = float(np.corrcoef(x, y)[0, 1]) if x.std() > 0 and y.std() > 0 else float("nan")
 print(f"{len(m)} subjects, {col}:  Pearson r {r:.3f}   ICC(A,1) {icc_a1(x, y):.3f}   "
       f"Bland-Altman bias {bias:.1f}, 95 % limits {bias - 1.96 * sd:.1f} to {bias + 1.96 * sd:.1f}")
+# v4.17: weighted kappa for the ordinal multifocality score (and per hemisphere), as used for visual rating scales
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import cohen_kappa
+for sc, cats in (("multifocality_0_4", range(5)), ("L_score", range(3)), ("R_score", range(3))):
+    if sc in da.columns and sc in db.columns:
+        k_ = da[["subject", sc]].merge(db[["subject", sc]], on="subject", suffixes=("_a", "_b")).dropna()
+        if len(k_) >= 2:
+            print(f"{sc}: quadratic weighted kappa {cohen_kappa(k_[sc + '_a'].astype(int), k_[sc + '_b'].astype(int), cats, 'quadratic'):.3f}"
+                  f"  exact agreement {(k_[sc + '_a'] == k_[sc + '_b']).mean():.0%}  (n={len(k_)})")
 dice = []
 for s in m.subject:
     pa, pb = f"{A}/{s}_css_mask.nii.gz", f"{Bd}/{s}_css_mask.nii.gz"

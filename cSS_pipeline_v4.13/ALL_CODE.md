@@ -1,4 +1,4 @@
-# All code — cSS pipeline v4.16
+# All code — cSS pipeline v4.17
 
 Generated from the files below; the files are authoritative.
 
@@ -228,6 +228,7 @@ usage: agreement.py --a DIR_A --b DIR_B [--col grown_volume_mm3] [--plot out.png
                Pearson r, ICC(A,1) absolute agreement (two-way), Bland-Altman bias and 95 % limits of
                agreement, and per-subject Dice of the cSS masks. van Harten: ICC 0.995, Pearson 0.991,
                mean Dice 0.75 (Dice is low for small, sparse masks even when volumes agree).
+               v4.17: quadratic weighted kappa for multifocality_0_4 and L/R_score (ordinal visual scale).
   --vs-score   size measure against the 0-4 multifocality score (their Fig. 4: wide spread inside the
                top categories = the ceiling effect a continuous measure avoids)
 Compare sizes only between scans acquired with the same protocol (field strength, TE, voxel size)."""
@@ -274,6 +275,15 @@ diff = x - y; bias = diff.mean(); sd = diff.std(ddof=1)
 r = float(np.corrcoef(x, y)[0, 1]) if x.std() > 0 and y.std() > 0 else float("nan")
 print(f"{len(m)} subjects, {col}:  Pearson r {r:.3f}   ICC(A,1) {icc_a1(x, y):.3f}   "
       f"Bland-Altman bias {bias:.1f}, 95 % limits {bias - 1.96 * sd:.1f} to {bias + 1.96 * sd:.1f}")
+# v4.17: weighted kappa for the ordinal multifocality score (and per hemisphere), as used for visual rating scales
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import cohen_kappa
+for sc, cats in (("multifocality_0_4", range(5)), ("L_score", range(3)), ("R_score", range(3))):
+    if sc in da.columns and sc in db.columns:
+        k_ = da[["subject", sc]].merge(db[["subject", sc]], on="subject", suffixes=("_a", "_b")).dropna()
+        if len(k_) >= 2:
+            print(f"{sc}: quadratic weighted kappa {cohen_kappa(k_[sc + '_a'].astype(int), k_[sc + '_b'].astype(int), cats, 'quadratic'):.3f}"
+                  f"  exact agreement {(k_[sc + '_a'] == k_[sc + '_b']).mean():.0%}  (n={len(k_)})")
 dice = []
 for s in m.subject:
     pa, pb = f"{A}/{s}_css_mask.nii.gz", f"{Bd}/{s}_css_mask.nii.gz"
@@ -358,6 +368,101 @@ for i in [int(x) for x in arg("--ids").split(",") if x.strip()]:
           ("; " if c and x else "") + ("; ".join(f"EXCLUDED ({xr.get(v, '?')})" for v in x) if x else "")
     print(f"known lesion #{i}: {msg or 'NOT DETECTED'}")
 print(f"{subj}: {kept} of {len(arg('--ids').split(','))} known lesions still shown for review")
+```
+
+## scripts/consensus.py
+
+```python
+#!/usr/bin/env python3
+"""Two-reader consensus, adjudication and agreement statistics for expert candidate labels (v4.17).
+usage: consensus.py --readers expertA,expertB [--subjects P012,P013] [--session 1]
+       consensus.py --readers expertA,expertB --apply labels/adjudication_todo.csv
+Reads labels/candidate_labels.csv (expert_import.py). For every object both readers labelled:
+  same fine label            -> consensus = that label                     (method "agreement")
+  same class, different code -> consensus = the class (e.g. other_vein)    (method "agreement")
+  different class            -> listed in labels/adjudication_todo.csv     (method "pending")
+Classes (css_common.label_class): cSS, uncertain, surface_vein, other_vein, artifact, other_normal.
+Objects only one reader saw are kept as "single_reader". A third reader (or a consensus meeting) fills
+adjudicated_label (a sheet code such as C / VS / A, or a label name) and adjudicator, then --apply writes them
+as method "adjudicated". Output: labels/consensus.csv (one row per object) and labels/agreement_stats.json.
+Agreement: Cohen's kappa for cSS vs not-cSS and for the six classes, raw agreement, with 95 % CIs from
+bootstrapping PATIENTS (candidates of one patient are not independent)."""
+import sys, os, json, numpy as np, pandas as pd
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import base as _base, LABELS, label_class, cohen_kappa, append_rows
+
+arg = lambda f, d="": sys.argv[sys.argv.index(f) + 1] if f in sys.argv else d
+if not arg("--readers") or len(arg("--readers").split(",")) != 2: sys.exit(__doc__)
+ra, rb = arg("--readers").split(","); base = _base()
+lp = f"{base}/labels/candidate_labels.csv"
+if not os.path.exists(lp): sys.exit(f"no {lp} - import expert answers first (expert_import.py)")
+L = pd.read_csv(lp)
+session = int(arg("--session", "1")); L = L[L.session == session]
+if arg("--subjects"): L = L[L.study_id.astype(str).isin(arg("--subjects").split(","))]
+CLASSES = ["cSS", "uncertain", "surface_vein", "other_vein", "artifact", "other_normal"]
+cons_p = f"{base}/labels/consensus.csv"; todo_p = f"{base}/labels/adjudication_todo.csv"
+key = ["study_id", "cand_uid", "list"]
+
+if arg("--apply"):
+    A = pd.read_csv(os.path.expanduser(arg("--apply")))
+    A = A[A.adjudicated_label.notna() & (A.adjudicated_label.astype(str).str.strip() != "")]
+    names = {v[0] for v in LABELS.values()}
+    rows = []
+    for _, r in A.iterrows():
+        v = str(r.adjudicated_label).strip()
+        lab = LABELS[v.upper()][0] if v.upper() in LABELS else v if v in names else None
+        if lab is None: sys.exit(f"cannot read adjudicated_label '{v}' (use a sheet code or a label name)")
+        rows.append(dict(study_id=r.study_id, cand_uid=r.cand_uid, list=r.list, obj_id=r.obj_id,
+                         consensus_label=lab, consensus_class=label_class(lab), method="adjudicated",
+                         readers=f"{ra}+{rb}", adjudicator=r.get("adjudicator", "")))
+    append_rows(cons_p, rows, key)
+    print(f"{len(rows)} adjudicated labels -> {cons_p}"); sys.exit(0)
+
+a = L[L.reader_id == ra].set_index(key); b = L[L.reader_id == rb].set_index(key)
+if not len(a) or not len(b): sys.exit(f"need labels from both {ra} and {rb} (session {session})")
+both = a.index.intersection(b.index)
+rows, todo = [], []
+for k in a.index.union(b.index):
+    if k in both:
+        la, lb = a.loc[k, "label"], b.loc[k, "label"]; ca, cb = label_class(la), label_class(lb)
+        r = dict(zip(key, k), obj_id=a.loc[k, "obj_id"], readers=f"{ra}+{rb}", adjudicator="")
+        if ca == cb:
+            rows.append(dict(r, consensus_label=la if la == lb else ca, consensus_class=ca, method="agreement"))
+        else:
+            rows.append(dict(r, consensus_label="", consensus_class="", method="pending"))
+            todo.append(dict(zip(key, k), obj_id=a.loc[k, "obj_id"], sheet_no=a.loc[k, "sheet_no"],
+                             **{f"label_{ra}": la, f"label_{rb}": lb}, adjudicated_label="", adjudicator=""))
+    else:
+        src = a if k in a.index else b
+        rows.append(dict(zip(key, k), obj_id=src.loc[k, "obj_id"], consensus_label=src.loc[k, "label"],
+                         consensus_class=label_class(src.loc[k, "label"]), method="single_reader",
+                         readers=ra if k in a.index else rb, adjudicator=""))
+append_rows(cons_p, rows, key)
+pd.DataFrame(todo, columns=key + ["obj_id", "sheet_no", f"label_{ra}", f"label_{rb}", "adjudicated_label",
+                                  "adjudicator"]).to_csv(todo_p, index=False)
+
+# agreement on objects both readers labelled; CIs by bootstrapping patients
+P = pd.DataFrame([dict(study=k[0], ca=label_class(a.loc[k, "label"]), cb=label_class(b.loc[k, "label"])) for k in both])
+def stats(D):
+    return dict(kappa_css=cohen_kappa(D.ca == "cSS", D.cb == "cSS", [False, True]),
+                kappa_class=cohen_kappa(D.ca, D.cb, CLASSES), agreement=float((D.ca == D.cb).mean()))
+est = stats(P); rng = np.random.default_rng(0); studies = P.study.unique(); boot = []
+if len(studies) >= 3:
+    for _ in range(1000):
+        pick = rng.choice(studies, len(studies), replace=True)
+        boot.append(stats(pd.concat([P[P.study == s_] for s_ in pick])))
+ci = {k: ([round(float(np.nanpercentile([b_[k] for b_ in boot], q)), 3) for q in (2.5, 97.5)] if boot else None)
+      for k in est}
+out = dict(readers=[ra, rb], session=session, n_objects=int(len(P)), n_patients=int(len(studies)),
+           estimates={k: round(v, 3) for k, v in est.items()}, ci95_patient_bootstrap=ci,
+           confusion=pd.crosstab(P.ca, P.cb).to_dict(), pending=len(todo))
+json.dump(out, open(f"{base}/labels/agreement_stats.json", "w"), indent=2)
+f = lambda k: f"{est[k]:.2f}" + (f" [{ci[k][0]:.2f}, {ci[k][1]:.2f}]" if ci[k] else " (CI needs >= 3 patients)")
+print(f"{ra} vs {rb}: {len(P)} objects in {len(studies)} patient(s): kappa cSS-vs-not {f('kappa_css')}, "
+      f"kappa 6 classes {f('kappa_class')}, raw agreement {f('agreement')}")
+print(f"consensus -> {cons_p} ({sum(r['method'] == 'agreement' for r in rows)} agreed, {len(todo)} pending, "
+      f"{sum(r['method'] == 'single_reader' for r in rows)} single-reader)"
+      + (f"; to adjudicate: {todo_p} (fill adjudicated_label, then --apply)" if todo else ""))
 ```
 
 ## scripts/css_common.py
@@ -495,6 +600,74 @@ def append_rows(path, rows, key):
         new = pd.concat([old, new], ignore_index=True)
     new.to_csv(path, index=False)
     return new
+
+
+# ---- v4.17 provenance helpers
+def fresh(path, ref):
+    """True if path exists and is not older than ref (a derived file made after its source was imported)"""
+    return os.path.exists(path) and (not os.path.exists(ref) or os.path.getmtime(path) >= os.path.getmtime(ref))
+
+
+def sha256(path, block=1 << 20):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(block), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def update_manifest(b, subj, section, data):
+    """merge {section: data} into review/ID_manifest.json (one machine-readable provenance record per case)"""
+    import json
+    p = f"{b}/review/{subj}_manifest.json"
+    m = json.load(open(p)) if os.path.exists(p) else {"subject": subj}
+    m[section] = data
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    json.dump(m, open(p, "w"), indent=2, default=str)
+
+
+def environment_record():
+    """python / package / FreeSurfer versions for the manifest"""
+    import platform, importlib
+    rec = {"python": platform.python_version(), "platform": platform.platform()}
+    for mod in ("numpy", "scipy", "nibabel", "pandas", "skimage", "matplotlib"):
+        try:
+            rec[mod] = importlib.import_module(mod).__version__
+        except Exception:
+            rec[mod] = None
+    fs = os.environ.get("FREESURFER_HOME", "")
+    stamp = os.path.join(fs, "build-stamp.txt")
+    rec["freesurfer"] = open(stamp).read().strip() if os.path.exists(stamp) else (fs or None)
+    return rec
+
+
+def label_class(label):
+    """fine expert label -> display / agreement class (shared by surface_overlay.py and consensus.py)"""
+    if label == "cSS": return "cSS"
+    if label == "uncertain": return "uncertain"
+    if label == "vein_surface": return "surface_vein"
+    if label.startswith("vein_") or label == "thrombosed_vein": return "other_vein"
+    if label.startswith("artifact"): return "artifact"
+    return "other_normal"
+
+
+def cohen_kappa(a, b, categories=None, weights=None):
+    """Cohen's kappa for two raters; weights=None (unweighted), 'linear' or 'quadratic' (ordered categories)"""
+    a, b = list(a), list(b)
+    cats = list(categories) if categories is not None else sorted(set(a) | set(b))
+    if len(a) == 0 or len(cats) < 2:
+        return float("nan")
+    k = {c: i for i, c in enumerate(cats)}; n = len(cats)
+    O = np.zeros((n, n))
+    for x, y in zip(a, b):
+        O[k[x], k[y]] += 1
+    O /= O.sum()
+    E = np.outer(O.sum(1), O.sum(0))
+    i, j = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    W = np.where(i == j, 0.0, 1.0) if weights is None else (np.abs(i - j) / (n - 1)) ** (2 if weights == "quadratic" else 1)
+    den = (W * E).sum()
+    return float(1 - (W * O).sum() / den) if den > 0 else float("nan")
 ```
 
 ## scripts/css_qc.py
@@ -699,7 +872,10 @@ def surface_to_swi(base, subj, sdir, surface_xfm="", force=False):
     else:
         orig = nib.load(f"{sdir}/{subj}/mri/orig.mgz")
         tkr2t1 = orig.header.get_vox2ras() @ np.linalg.inv(orig.header.get_vox2ras_tkr())
-        R = read_lta(f"{base}/work/{subj}_swi2t1.lta")
+        lta = f"{base}/work/{subj}_swi2t1.lta"
+        if os.path.getmtime(lta) < os.path.getmtime(f"{base}/data/{subj}_swi.nii") and not force:
+            sys.exit(f"{subj}: {lta} is older than the SWI (re-imported?) - re-run prep_anat.sh (or --force)")
+        R = read_lta(lta)
         opts = {"LTA maps SWI->T1": np.linalg.inv(R) @ tkr2t1, "LTA maps T1->SWI": R @ tkr2t1}
         checks = {k: agree(apply(Tk, Vall)) for k, Tk in opts.items()}
         src = min(checks, key=checks.get); T = opts[src]
@@ -864,7 +1040,7 @@ def local_tracking(cm, ves, vox, reach_mm, band=None, dark=None):
 
 ```python
 #!/usr/bin/env python3
-"""cSS candidate detector v4 (v4.14) - definition-driven.
+"""cSS candidate detector v4 (v4.17) - definition-driven.
 usage: detect_css.py SUBJECT [z_thr=-2.5] [ridge_pct=85] [rim_mm=3]
 env:   CSS_RANK=v3 ranks with the old v3 score (both scores are always written)
 
@@ -910,6 +1086,12 @@ v4.14 bookkeeping (no change to which candidates are shown or excluded, except B
                            cortex nearby) - before v4.14 they vanished without a record
   new columns (appended): candidates qc_status, rule_version, n_pieces; excluded also exclusion_confidence
   B1 fix: extent_mm was underestimated for candidates touching the first array slice/row/column
+v4.17 (audit Stage 2): sulcal CSF = brain voxels outside the labelled tissue (recon-all aparc+aseg leaves sulcal CSF
+  as label 0; label 24 alone missed it -> surface_contact and the FLAIR CSF reference were wrong on that route);
+  3-D Hessian on the mask-filled image (zeros outside the mask made edge curvature); E8 artifact-zone rule needs
+  T1 anatomy like E2/E3; a FLAIR older than the SWI is ignored; work/ID_gen.nii.gz records per voxel which
+  generation stage it passed (label_missed.py uses it); review/ID_manifest.json records inputs (sha256),
+  versions and environment.
 v4.16: bounded local vein tracking columns (css_vessel.py; recorded only - no rule or score uses them):
   cand_geodesic_mm, local_cont_max/min/total_mm, terminal_ends, local_net_mm, local_branch_points/_per10mm
 """
@@ -920,7 +1102,7 @@ from skimage.filters import sato
 from skimage.measure import regionprops
 from skimage.morphology import skeletonize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, load_lut
+from css_common import base as _base, load_lut, fresh, sha256, update_manifest, environment_record
 import css_qc, css_vessel
 
 subj   = sys.argv[1]
@@ -928,7 +1110,7 @@ z_thr  = float(sys.argv[2]) if len(sys.argv) > 2 else -2.5
 r_pct  = float(sys.argv[3]) if len(sys.argv) > 3 else 85
 RIM_MM = float(sys.argv[4]) if len(sys.argv) > 4 else 3.0
 RANK   = os.environ.get("CSS_RANK", "v4")
-RULESET = "v4.16"                        # written to every row as rule_version
+RULESET = "v4.17"                        # written to every row as rule_version
 Z_LOW, R_PCT_LOW = -2.0, 80           # hysteresis (weak) thresholds
 GROW_Z = -1.5                          # 'dark' map used for region growing at scoring
 MIN_MM3, MIN_SLICES, MIN_ELONG = 25.0, 2, 2.0   # v4: 2.0 (tram-track = two parallel plates, ~2.4;
@@ -986,11 +1168,13 @@ brain  = ndi.binary_fill_holes(I > 0)
 cortex = (seg >= 1000) | (seg == 3) | (seg == 42)
 it = max(1, int(round(2.0 / vox[0])))
 edge_band = brain & ~ndi.binary_erosion(brain, structure=s2d, iterations=it)
-surface = (~brain) | np.isin(seg, CSF)
-near_surface = ndi.binary_dilation(surface, structure=s2d, iterations=it)
-
 # ---- 0. signed distance to the pial surface (mm; <0 inside tissue, >0 in CSF) + normals
 tissue = ndi.binary_fill_holes(brain & (seg > 0) & ~np.isin(seg, CSF))    # fills ventricles
+# v4.17: CSF = brain voxels that are not labelled tissue. SynthSeg labels extracerebral/sulcal CSF 24, but
+# recon-all aparc+aseg leaves sulcal CSF unlabelled (0) and uses 24 for a small basal region only
+csf_space = brain & ~tissue
+surface = (~brain) | csf_space
+near_surface = ndi.binary_dilation(surface, structure=s2d, iterations=it)
 pial_sd = (ndi.distance_transform_edt(~tissue, sampling=vox)
            - ndi.distance_transform_edt(tissue, sampling=vox)).astype(np.float32)
 _g = np.gradient(ndi.gaussian_filter(pial_sd, mm2vox(1.0)), *vox)
@@ -1030,6 +1214,11 @@ for k in range(I.shape[2]):
 r_hi = np.percentile(R[shell], r_pct); r_lo = np.percentile(R[shell], R_PCT_LOW)
 strong = zone & (z < z_thr) & (R > r_hi)
 weak   = zone & (z < Z_LOW) & (R > r_lo)          # strong is a subset of weak
+# v4.17 generation-stage record per voxel (bits): 1 search zone, 2 skull-strip rim, 4 WM / deep-nucleus label,
+# 8 z < -2 (weak dark), 16 z < z_thr (strong dark), 32 ridge > weak pct, 64 ridge > strong pct,
+# 128 in a component kept by hysteresis -> work/ID_gen.nii.gz, read by label_missed.py
+GEN = (zone * 1 + rim * 2 + np.isin(seg, WM + DEEP) * 4 + (brain & (z < Z_LOW)) * 8 + (brain & (z < z_thr)) * 16
+       + (brain & (R > r_lo)) * 32 + (brain & (R > r_hi)) * 64).astype(np.uint8)
 
 # ---- 4. hemisphere map; hysteresis labelling separately in each hemisphere
 Lm = np.isin(seg, LH) | ((seg >= 1000) & (seg < 2000))
@@ -1048,6 +1237,8 @@ for side in (hemiL, ~hemiL):
     nz = wl > 0
     lab[nz] = remap[wl[nz]]
     nxt += len(keep)
+GEN[lab > 0] |= 128
+nib.save(nib.Nifti1Image(GEN, swi.affine), f"{base}/work/{subj}_gen.nii.gz"); del GEN
 del R, wl, weak, strong
 
 # ---- 4b. merge fragments of the same structure: a line broken by small gaps (noise, partial volume,
@@ -1094,7 +1285,7 @@ for s_mm in HESS_SIGMAS_MM:
     for a in range(3):
         for b in range(a, 3):
             order = [0, 0, 0]; order[a] += 1; order[b] += 1
-            h = ndi.gaussian_filter(Ic, sg, order=order)[idx] / (vox[a] * vox[b]) * s_mm ** 2
+            h = ndi.gaussian_filter(If, sg, order=order)[idx] / (vox[a] * vox[b]) * s_mm ** 2   # v4.17: If
             H[:, a, b] = h; H[:, b, a] = h
     w, v = np.linalg.eigh(H)                              # ascending signed eigenvalues
     o = np.argsort(np.abs(w), axis=1)                     # sort by magnitude |l1|<=|l2|<=|l3|
@@ -1125,7 +1316,7 @@ if wneed.any():
         for a in range(3):
             for b in range(a, 3):
                 order = [0, 0, 0]; order[a] += 1; order[b] += 1
-                h = ndi.gaussian_filter(Ic, sg, order=order)[widx] / (vox[a] * vox[b]) * s_mm ** 2
+                h = ndi.gaussian_filter(If, sg, order=order)[widx] / (vox[a] * vox[b]) * s_mm ** 2
                 H[:, a, b] = h; H[:, b, a] = h
         w = np.linalg.eigvalsh(H); w = np.take_along_axis(w, np.argsort(np.abs(w), axis=1), 1)
         upd = w[:, 2] > wbest; wbest[upd] = w[upd, 2]; weig[upd] = w[upd]
@@ -1203,10 +1394,12 @@ ich_dist = ndi.distance_transform_edt(~ich, sampling=vox) if ich.any() else np.f
 
 # ---- 9. optional FLAIR (acute convexity SAH is FLAIR-bright in the sulci; chronic cSS is not)
 fl_p = f"{base}/work/{subj}_flair_swispace.nii.gz"
-FL = None
-if os.path.exists(fl_p):
+FL = None; fl_note = ""
+if os.path.exists(fl_p) and not fresh(fl_p, f"{base}/data/{subj}_swi.nii"):
+    fl_note = "FLAIR IGNORED (older than the SWI - re-run prep_anat.sh)"
+elif os.path.exists(fl_p):
     FL = nib.load(fl_p).get_fdata().astype(np.float32)
-    csf_ref = FL[np.isin(seg, CSF) & brain & (FL > 0)]
+    csf_ref = FL[csf_space & (FL > 0)]                      # v4.17 (was label 24 only)
     tis_ref = FL[tissue & brain & (FL > 0)]
     ctx_ref = FL[cortex & brain & (FL > 0)]
     if csf_ref.size and tis_ref.size and ctx_ref.size:
@@ -1507,8 +1700,8 @@ def exclusion(r):
     if T1_ANAT and r["cortex_frac"] < OFF_CTX_FRAC and r["pial_dist_mm"] > OFF_PIAL_MM \
             and not (np.isfinite(tram_) and tram_ >= 0.2):
         return "E7@v4.12", "off the cortex: lies in the sulcal CSF without touching the cortex (vein)"
-    if FULL_BOTTOM and r["artifact_zone"] and r["rel_height"] < 0.4:
-        return "E8@v4.9", "skull-base susceptibility artifact zone"
+    if T1_ANAT and FULL_BOTTOM and r["artifact_zone"] and r["rel_height"] < 0.4:   # v4.17: T1 only, like E2/E3
+        return "E8@v4.17", "skull-base susceptibility artifact zone"
     if np.isfinite(r["edge_contrast"]) and r["edge_contrast"] < MIN_EDGE_SD:
         return "E9@v4.8", "faint / ill-defined (normal dark cortex)"
     return "", ""
@@ -1571,6 +1764,7 @@ print(f"{subj}: {n_raw} raw components -> {len(df)} candidates "
       f"({cnt('artifact_zone')} artifact zone, {cnt('midline_zone')} midline, {cnt('vein_like')} vein-like, "
       f"{cnt('near_ich_suggest')} near ICH [{ich_src}], {cnt('infratentorial')} infratentorial)  rank={RANK}"
       + ("  FLAIR used" if FL is not None else ""))
+if fl_note: print(f"{subj}: {fl_note}")
 print(f"{subj}: QC {QC['status']}" + (f" ({'; '.join(QC['reasons'])})" if QC["reasons"] else "")
       + f", pial edge agreement {QC['edge_agreement_mm']} mm, {len(dropped)} components below the generation gates"
       + " [review/" + subj + "_qc.json; reported only]\n")
@@ -1578,6 +1772,19 @@ if len(df):
     print(df.head(15)[["cand_id", "hemi", "region", "volume_mm3", "darkness_z", "pial_dist_mm",
                        "tube_ratio", "surface_alignment", "tram_frac", "vein_tree_mm", "score",
                        "vox_i", "vox_j", "vox_k"]].to_string(index=False))
+# v4.17 provenance: inputs (sha256), parameters, versions -> review/ID_manifest.json
+_inputs = {k: p_ for k, p_ in (("swi", f"{base}/data/{subj}_swi.nii"), ("labels", f"{base}/work/{subj}_seg_swispace.nii.gz"),
+                               ("t1_labels", _t1p), ("destrieux", f"{base}/work/{subj}_a2009s_swispace.nii.gz"),
+                               ("flair", fl_p), ("phase", f"{base}/data/{subj}_phase.nii.gz"),
+                               ("registration", f"{base}/work/{subj}_swi2t1.lta"), ("ich_drawn", ich_p))
+           if os.path.exists(p_)}
+update_manifest(base, subj, "detect", dict(
+    pipeline_version=RULESET, run_at=pd.Timestamp.now().isoformat(timespec="seconds"), args=sys.argv[1:],
+    parameters=dict(z_thr=z_thr, ridge_pct=r_pct, rim_mm=RIM_MM, rank=RANK, keep_all=KEEP_ALL),
+    anatomy="T1" if T1_ANAT else "SWI-only", flair_used=FL is not None, qc_status=QC["status"],
+    n_candidates=int(len(df)), n_excluded=len(excluded), n_dropped=len(dropped),
+    inputs={k: dict(path=p_, sha256=sha256(p_), mtime=os.path.getmtime(p_)) for k, p_ in _inputs.items()},
+    environment=environment_record()))
 ```
 
 ## scripts/eval_synthetic.py
@@ -1943,7 +2150,9 @@ For each blob this script records where it went in the pipeline:
   shown       a current candidate covers >= 30 % of it (it was not missed; check the sheet call)
   excluded    an excluded object covers it -> the rule id and reason (review/ID_excluded.csv)
   dropped     removed by a generation gate -> the reason (work/ID_dropped.csv, v4.14)
-  not generated  never a dark ridge component (contrast / ridge threshold / outside the search zone)
+  not generated  never a dark ridge component; v4.17 says why, from work/ID_gen.nii.gz (detect_css.py):
+                 outside the search zone (skull-strip rim / white matter or deep-nucleus label / beyond the
+                 pial band), not dark enough (z >= -2), dark but no ridge response, or no strong seed
 -> labels/missed_lesions.csv (one row per blob; earlier rows of the same study/reader/session replaced)"""
 import sys, os, datetime, numpy as np, pandas as pd, nibabel as nib
 from scipy import ndimage as ndi
@@ -1965,6 +2174,21 @@ M = np.asarray(M.dataobj).reshape(swi.shape[:3]) > 0
 ld = lambda p: nib.load(p).get_fdata().astype(int) if os.path.exists(p) else np.zeros(swi.shape[:3], int)
 cand = ld(f"{base}/review/{subj}_candidates.nii.gz"); excl = ld(f"{base}/review/{subj}_excluded.nii.gz")
 drop = ld(f"{base}/work/{subj}_dropped.nii.gz")
+gen = ld(f"{base}/work/{subj}_gen.nii.gz")        # v4.17 generation-stage bits (all 0 for older detector runs)
+
+def why_not_generated(m):
+    """first generation stage the outline failed (bits from detect_css.py)"""
+    g = gen[m]
+    if not g.any(): return "unknown (no work/ID_gen.nii.gz - re-run detect_css.py v4.17)"
+    if (g & 1).mean() < 0.5:
+        rim_, wm_ = (g & 2 > 0).mean(), (g & 4 > 0).mean()
+        if max(rim_, wm_) < 0.25: return "outside the search zone: beyond the pial band (-3.5..+4 mm)"
+        return "outside the search zone: " + ("skull-strip rim (3 mm)" if rim_ >= wm_ else "white matter / deep-nucleus label")
+    z_ = g[(g & 1) > 0]
+    if not (z_ & 8).any(): return "not dark enough (z >= -2 everywhere)"
+    if not ((z_ & 8 > 0) & (z_ & 32 > 0)).any(): return "dark but no ridge response (not line-shaped at the filter scales)"
+    if not (g & 128).any(): return "no strong seed (needs z < z_thr AND a strong ridge for hysteresis)"
+    return "generated, but no object covers it (split or merged away)"
 xt = pd.read_csv(f"{base}/review/{subj}_excluded.csv").set_index("excl_id") \
     if os.path.exists(f"{base}/review/{subj}_excluded.csv") else pd.DataFrame()
 dt = pd.read_csv(f"{base}/work/{subj}_dropped.csv").set_index("drop_id") \
@@ -1998,7 +2222,7 @@ for i, sl in enumerate(ndi.find_objects(lab), 1):
         d = top(drop, near); r["fate"], r["obj_id"] = "dropped", d
         r["reason"] = dt.loc[d, "reason"] if d in dt.index else ""
     else:
-        r["fate"] = "not generated"
+        r["fate"] = "not generated"; r["reason"] = why_not_generated(m)
     rows.append(r)
 # replace this study/reader/session's earlier rows (a redrawn mask may have fewer blobs)
 path = f"{base}/labels/missed_lesions.csv"
@@ -2376,7 +2600,9 @@ HW = int(round(30 / vox[0]))          # 60 mm zoom window
 # Sign conventions differ by vendor (Vaccarino et al. 2025), so compare with a vein on the same image.
 PH = None
 _php = f"{base}/data/{subj}_phase.nii.gz"
-if os.path.exists(_php):
+if os.path.exists(_php) and os.path.getmtime(_php) < os.path.getmtime(f"{base}/data/{subj}_swi.nii"):
+    print("WARNING: phase image is older than the SWI - not shown (re-import it with run_css.sh --phase)")
+elif os.path.exists(_php):
     from nibabel.processing import resample_from_to
     _ph = nib.load(_php)
     if _ph.shape[:3] != swi.shape[:3] or not np.allclose(_ph.affine, swi.affine, atol=1e-3):
@@ -2650,7 +2876,7 @@ import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when pipe
 import sys, os, json, numpy as np, nibabel as nib, pandas as pd
 from scipy import ndimage as ndi
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import load_lut
+from css_common import load_lut, fresh
 
 subj = sys.argv[1]
 MERGE_MM, ADJ_MM, GROW_MM = 3.0, 10.0, 5.0
@@ -2692,7 +2918,9 @@ def groups(ids, D, thr):
 
 # ---- Destrieux sulcal labels (optional)
 a2_p = f"{base}/work/{subj}_a2009s_swispace.nii.gz"
-A2 = nib.load(a2_p).get_fdata().astype(np.int32) if os.path.exists(a2_p) else None
+A2 = nib.load(a2_p).get_fdata().astype(np.int32) if fresh(a2_p, f"{base}/data/{subj}_swi.nii") else None
+if os.path.exists(a2_p) and A2 is None:          # v4.17: Destrieux labels from before the SWI was re-imported
+    print("WARNING: Destrieux labels are older than the SWI - ignored (re-run prep_anat.sh); Euclidean scoring")
 lut = load_lut()
 is_sulc = lambda c: 11100 <= c < 12200 and ("_S_" in lut.get(c, "") or "Lat_Fis" in lut.get(c, ""))
 is_gyr = lambda c: 11100 <= c < 12200 and not is_sulc(c)
@@ -3253,6 +3481,9 @@ a = ap.parse_args(); subj = a.subject; base = _base()
 sdir = a.subjects_dir or os.environ.get("CSS_SUBJECTS_DIR", f"{base}/subjects")
 swi = nib.load(f"{base}/data/{subj}_swi.nii"); aff = swi.affine; inv_aff = np.linalg.inv(aff)
 T, tsrc, checks, surfs = surface_to_swi(base, subj, sdir, a.surface_xfm, a.force)
+from css_common import update_manifest, sha256
+update_manifest(base, subj, "surface_features", dict(transform_source=tsrc, label_agreement_mm=checks,
+    pial={h: sha256(f"{sdir}/{subj}/surf/{h}.pial") for h in ("lh", "rh")}, near_mm=a.near_mm, reach_mm=a.reach_mm))
 
 dark = nib.load(f"{base}/work/{subj}_dark.nii.gz").get_fdata() > 0
 
@@ -3373,7 +3604,7 @@ import sys, os, argparse, numpy as np, nibabel as nib, pandas as pd
 from scipy.spatial import cKDTree
 from nibabel.freesurfer.io import write_annot, read_annot
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, FP, match_calls
+from css_common import base as _base, FP, match_calls, label_class
 from css_surface import apply, surface_to_swi
 
 ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -3393,13 +3624,7 @@ else:
                ("not_labelled", (150, 230, 150))]
 PRIO = {c: k for k, (c, _) in enumerate(CLASSES)}
 
-def expert_class(label):
-    if label == "cSS": return "cSS"
-    if label == "uncertain": return "uncertain"
-    if label == "vein_surface": return "surface_vein"
-    if label.startswith("vein_") or label == "thrombosed_vein": return "other_vein"
-    if label.startswith("artifact"): return "artifact"
-    return "other_normal"
+expert_class = label_class                    # css_common (shared with consensus.py)
 
 # ---- objects (candidates + excluded) and their class
 objs = []

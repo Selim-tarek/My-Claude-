@@ -55,7 +55,10 @@ def surface_to_swi(base, subj, sdir, surface_xfm="", force=False):
     else:
         orig = nib.load(f"{sdir}/{subj}/mri/orig.mgz")
         tkr2t1 = orig.header.get_vox2ras() @ np.linalg.inv(orig.header.get_vox2ras_tkr())
-        R = read_lta(f"{base}/work/{subj}_swi2t1.lta")
+        lta = f"{base}/work/{subj}_swi2t1.lta"
+        if os.path.getmtime(lta) < os.path.getmtime(f"{base}/data/{subj}_swi.nii") and not force:
+            sys.exit(f"{subj}: {lta} is older than the SWI (re-imported?) - re-run prep_anat.sh (or --force)")
+        R = read_lta(lta)
         opts = {"LTA maps SWI->T1": np.linalg.inv(R) @ tkr2t1, "LTA maps T1->SWI": R @ tkr2t1}
         checks = {k: agree(apply(Tk, Vall)) for k, Tk in opts.items()}
         src = min(checks, key=checks.get); T = opts[src]

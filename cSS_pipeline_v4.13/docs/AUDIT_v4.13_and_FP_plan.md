@@ -596,3 +596,11 @@ checked transform of `css_surface.py`; output is a FreeSurfer annotation (catego
 id overlay for freeview, coloured by detector list or by expert calls, with a cSS call always drawn on top; the
 Destrieux sulcus/gyrus under each object is tabulated. Model probabilities and tiers can be added as a colour mode
 only after a model has passed the patient-level validation in section 5.
+
+- **v4.17** Stage 2 done (B2, B3, B6, B11) plus the follow-ups agreed after the external review: generation-stage
+  record and "not generated" reasons, two-reader consensus/adjudication with kappa, weighted kappa for the 0-4
+  score, per-case manifest with input hashes, environment.yml. B2 confirmed on a phantom with recon-all-style
+  labels (v4.13: surface_contact 0.00 for every candidate; FLAIR CSF reference taken from the basal label-24
+  region). Effect of B3 on phantoms: same objects and same exclusion decisions; tube_ratio changes <= 0.08,
+  up to 0.17 on sinus pieces lying at the mask edge; ranks shift slightly. Detector version to freeze for the
+  first labelled cohort: v4.17.

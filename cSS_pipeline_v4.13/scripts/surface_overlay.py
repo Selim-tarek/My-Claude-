@@ -21,7 +21,7 @@ import sys, os, argparse, numpy as np, nibabel as nib, pandas as pd
 from scipy.spatial import cKDTree
 from nibabel.freesurfer.io import write_annot, read_annot
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, FP, match_calls
+from css_common import base as _base, FP, match_calls, label_class
 from css_surface import apply, surface_to_swi
 
 ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -41,13 +41,7 @@ else:
                ("not_labelled", (150, 230, 150))]
 PRIO = {c: k for k, (c, _) in enumerate(CLASSES)}
 
-def expert_class(label):
-    if label == "cSS": return "cSS"
-    if label == "uncertain": return "uncertain"
-    if label == "vein_surface": return "surface_vein"
-    if label.startswith("vein_") or label == "thrombosed_vein": return "other_vein"
-    if label.startswith("artifact"): return "artifact"
-    return "other_normal"
+expert_class = label_class                    # css_common (shared with consensus.py)
 
 # ---- objects (candidates + excluded) and their class
 objs = []
