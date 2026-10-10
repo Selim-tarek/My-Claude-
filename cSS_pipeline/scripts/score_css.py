@@ -13,6 +13,8 @@ v4: SULCAL scoring when work/ID_a2009s_swispace.nii.gz exists (recon-all + prep_
   STRIVE-2 category: focal = 1-3 sulci, disseminated = >3 sulci.
   Without Destrieux labels the v3 Euclidean approximation is used (3 mm foci, 10 mm adjacency).
 Infratentorial candidates (classical superficial siderosis pattern) are reported, not scored.
+v4.13 (van Harten 2023 Discussion): cortical surface area covered by cSS (mm2) and % of each hemisphere's
+cortical surface - less blooming- and protocol-dependent than volume.
 v4.3 ICH rule (Charidimou et al., Neurology 2017;89:2128): cSS "contiguous or potentially anatomically
 connected with any lobar ICH" is not scored; cSS must be separated from any lobar ICH by >=3
 unaffected sulci, or by >=2 (at multiple axial levels) if the haematoma has no superficial path along
@@ -215,7 +217,7 @@ for h in ["L", "R"]:
     total += score; total_foci += len(foci)
 
 # seeded region growing for full extent / volume
-grown_vol = 0.0
+grown_vol = 0.0; grown = np.zeros(lab.shape, bool)
 seeds = np.isin(lab, acc.cand_id.astype(int).tolist()) if len(acc) else np.zeros(lab.shape, bool)
 dark_p = f"{base}/work/{subj}_dark.nii.gz"
 if seeds.any() and os.path.exists(dark_p):
@@ -225,6 +227,24 @@ if seeds.any() and os.path.exists(dark_p):
                                    mask=(dark & near) | seeds)
     grown_vol = float(grown.sum() * vmm3)
     nib.save(nib.Nifti1Image(grown.astype(np.uint8), img.affine), f"{base}/review/{subj}_css_mask.nii.gz")
+
+# v4.13 surface-based burden (van Harten et al. 2023, Discussion): blooming widens cSS PERPENDICULAR to the
+# cortex far more than along it, so the cortical surface area covered - and that area as a % of the
+# hemisphere's cortical surface (internally calibrated) - should depend less on field strength / TE /
+# voxel size than volume does. Surface = cortex voxels facing CSF; covered = within 1.5 mm of the mask.
+surf_area = {"L": 0.0, "R": 0.0}; surf_pct = {"L": 0.0, "R": 0.0}
+seg_p = f"{base}/work/{subj}_seg_swispace.nii.gz"
+if os.path.exists(seg_p):
+    sg = nib.load(seg_p).get_fdata().astype(np.int32)
+    ctx = (sg >= 1000) | np.isin(sg, [3, 42])
+    tis = (sg > 0) & (sg != 24)
+    surf = ctx & ndi.binary_dilation(~tis, structure=ndi.generate_binary_structure(3, 1))
+    a_vox = float(np.prod(vox)) ** (2.0 / 3.0)               # mean face area of one voxel (mm2)
+    cov = (ndi.distance_transform_edt(~grown, sampling=vox) <= 1.5) if grown_vol > 0 else np.zeros(sg.shape, bool)
+    for h, m in (("L", ((sg >= 1000) & (sg < 2000)) | (sg == 3)), ("R", (sg >= 2000) | (sg == 42))):
+        sh_ = surf & m
+        surf_area[h] = float((sh_ & cov).sum() * a_vox)
+        surf_pct[h] = 100.0 * (sh_ & cov).sum() / max(int(sh_.sum()), 1)
 
 result["multifocality_0_4"] = total
 result["n_foci_total"] = total_foci
@@ -286,6 +306,13 @@ result["voxel_mm"] = "x".join(f"{v:.2f}" for v in vox)
 result["phase_available"] = int(os.path.exists(f"{base}/data/{subj}_phase.nii.gz"))
 result["candidate_volume_mm3"] = round(float(acc.volume_mm3.sum()) if len(acc) else 0.0, 1)
 result["grown_volume_mm3"] = round(grown_vol, 1)
+for h in ("L", "R"):
+    result[f"{h}_surface_mm2"] = round(surf_area[h], 1); result[f"{h}_surface_pct"] = round(surf_pct[h], 2)
+result["surface_mm2"] = round(surf_area["L"] + surf_area["R"], 1)
+# van Harten 2023: below ~1 mm resolution partial volume starts to bias the volume; and any size measure
+# is only comparable between scans acquired with the same protocol (field, TE, voxel size)
+result["volume_note"] = ("thick slices (>1.5 mm): partial volume - compare sizes only within one protocol"
+                         if max(vox) > 1.5 else "compare sizes only within one protocol")
 result["regions"] = sorted(acc.region.unique().tolist()) if len(acc) else []
 ich = df[df.near_ich == 1] if "near_ich" in df.columns and len(df) else df.iloc[0:0]
 result["n_candidates"] = int(len(df))
@@ -309,6 +336,9 @@ for h, nm in (("L", "left "), ("R", "right")):
 if A2 is not None and sulci_names:
     print(f"  sulci: {', '.join(sulci_names)}")
 print(f"  volume: candidates {result['candidate_volume_mm3']} mm3, grown (full extent) {result['grown_volume_mm3']} mm3")
+if os.path.exists(seg_p):
+    print(f"  cortical surface covered: {result['surface_mm2']} mm2  (L {result['L_surface_pct']} %, "
+          f"R {result['R_surface_pct']} % of the hemisphere surface)  [{result['volume_note']}]")
 print(f"  regions: {', '.join(result['regions'])}")
 if result["n_unreviewed"]:
     print(f"  WARNING: {result['n_unreviewed']} of {result['n_candidates']} candidates were not reviewed "

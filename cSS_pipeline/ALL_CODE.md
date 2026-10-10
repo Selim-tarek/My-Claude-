@@ -1434,6 +1434,8 @@ v4: SULCAL scoring when work/ID_a2009s_swispace.nii.gz exists (recon-all + prep_
   STRIVE-2 category: focal = 1-3 sulci, disseminated = >3 sulci.
   Without Destrieux labels the v3 Euclidean approximation is used (3 mm foci, 10 mm adjacency).
 Infratentorial candidates (classical superficial siderosis pattern) are reported, not scored.
+v4.13 (van Harten 2023 Discussion): cortical surface area covered by cSS (mm2) and % of each hemisphere's
+cortical surface - less blooming- and protocol-dependent than volume.
 v4.3 ICH rule (Charidimou et al., Neurology 2017;89:2128): cSS "contiguous or potentially anatomically
 connected with any lobar ICH" is not scored; cSS must be separated from any lobar ICH by >=3
 unaffected sulci, or by >=2 (at multiple axial levels) if the haematoma has no superficial path along
@@ -1636,7 +1638,7 @@ for h in ["L", "R"]:
     total += score; total_foci += len(foci)
 
 # seeded region growing for full extent / volume
-grown_vol = 0.0
+grown_vol = 0.0; grown = np.zeros(lab.shape, bool)
 seeds = np.isin(lab, acc.cand_id.astype(int).tolist()) if len(acc) else np.zeros(lab.shape, bool)
 dark_p = f"{base}/work/{subj}_dark.nii.gz"
 if seeds.any() and os.path.exists(dark_p):
@@ -1646,6 +1648,24 @@ if seeds.any() and os.path.exists(dark_p):
                                    mask=(dark & near) | seeds)
     grown_vol = float(grown.sum() * vmm3)
     nib.save(nib.Nifti1Image(grown.astype(np.uint8), img.affine), f"{base}/review/{subj}_css_mask.nii.gz")
+
+# v4.13 surface-based burden (van Harten et al. 2023, Discussion): blooming widens cSS PERPENDICULAR to the
+# cortex far more than along it, so the cortical surface area covered - and that area as a % of the
+# hemisphere's cortical surface (internally calibrated) - should depend less on field strength / TE /
+# voxel size than volume does. Surface = cortex voxels facing CSF; covered = within 1.5 mm of the mask.
+surf_area = {"L": 0.0, "R": 0.0}; surf_pct = {"L": 0.0, "R": 0.0}
+seg_p = f"{base}/work/{subj}_seg_swispace.nii.gz"
+if os.path.exists(seg_p):
+    sg = nib.load(seg_p).get_fdata().astype(np.int32)
+    ctx = (sg >= 1000) | np.isin(sg, [3, 42])
+    tis = (sg > 0) & (sg != 24)
+    surf = ctx & ndi.binary_dilation(~tis, structure=ndi.generate_binary_structure(3, 1))
+    a_vox = float(np.prod(vox)) ** (2.0 / 3.0)               # mean face area of one voxel (mm2)
+    cov = (ndi.distance_transform_edt(~grown, sampling=vox) <= 1.5) if grown_vol > 0 else np.zeros(sg.shape, bool)
+    for h, m in (("L", ((sg >= 1000) & (sg < 2000)) | (sg == 3)), ("R", (sg >= 2000) | (sg == 42))):
+        sh_ = surf & m
+        surf_area[h] = float((sh_ & cov).sum() * a_vox)
+        surf_pct[h] = 100.0 * (sh_ & cov).sum() / max(int(sh_.sum()), 1)
 
 result["multifocality_0_4"] = total
 result["n_foci_total"] = total_foci
@@ -1707,6 +1727,13 @@ result["voxel_mm"] = "x".join(f"{v:.2f}" for v in vox)
 result["phase_available"] = int(os.path.exists(f"{base}/data/{subj}_phase.nii.gz"))
 result["candidate_volume_mm3"] = round(float(acc.volume_mm3.sum()) if len(acc) else 0.0, 1)
 result["grown_volume_mm3"] = round(grown_vol, 1)
+for h in ("L", "R"):
+    result[f"{h}_surface_mm2"] = round(surf_area[h], 1); result[f"{h}_surface_pct"] = round(surf_pct[h], 2)
+result["surface_mm2"] = round(surf_area["L"] + surf_area["R"], 1)
+# van Harten 2023: below ~1 mm resolution partial volume starts to bias the volume; and any size measure
+# is only comparable between scans acquired with the same protocol (field, TE, voxel size)
+result["volume_note"] = ("thick slices (>1.5 mm): partial volume - compare sizes only within one protocol"
+                         if max(vox) > 1.5 else "compare sizes only within one protocol")
 result["regions"] = sorted(acc.region.unique().tolist()) if len(acc) else []
 ich = df[df.near_ich == 1] if "near_ich" in df.columns and len(df) else df.iloc[0:0]
 result["n_candidates"] = int(len(df))
@@ -1730,6 +1757,9 @@ for h, nm in (("L", "left "), ("R", "right")):
 if A2 is not None and sulci_names:
     print(f"  sulci: {', '.join(sulci_names)}")
 print(f"  volume: candidates {result['candidate_volume_mm3']} mm3, grown (full extent) {result['grown_volume_mm3']} mm3")
+if os.path.exists(seg_p):
+    print(f"  cortical surface covered: {result['surface_mm2']} mm2  (L {result['L_surface_pct']} %, "
+          f"R {result['R_surface_pct']} % of the hemisphere surface)  [{result['volume_note']}]")
 print(f"  regions: {', '.join(result['regions'])}")
 if result["n_unreviewed"]:
     print(f"  WARNING: {result['n_unreviewed']} of {result['n_candidates']} candidates were not reviewed "
@@ -1752,6 +1782,90 @@ if ich_check:
 if result["near_ich_candidates"]:
     print(f"  near-ICH siderosis (NOT in score): {result['near_ich_candidates']} candidates, "
           f"{result['near_ich_volume_mm3']} mm3")
+```
+
+## scripts/agreement.py
+
+```python
+#!/usr/bin/env python3
+"""Reproducibility statistics as in van Harten et al. (NeuroImage Clin 2023;38:103447).
+usage: agreement.py --a DIR_A --b DIR_B [--col grown_volume_mm3] [--plot out.png]
+       agreement.py --vs-score DIR [--col surface_mm2] [--plot out.png]
+  DIR = a copy of the review folder after one complete scoring session, e.g.
+        cp -R ~/css_project/review ~/css_project/review_reader1_session1
+        (it must contain css_scores.csv and, for Dice, ID_css_mask.nii.gz)
+  --a/--b      two sessions of one reader (intra-observer) or two readers (inter-observer):
+               Pearson r, ICC(A,1) absolute agreement (two-way), Bland-Altman bias and 95 % limits of
+               agreement, and per-subject Dice of the cSS masks. van Harten: ICC 0.995, Pearson 0.991,
+               mean Dice 0.75 (Dice is low for small, sparse masks even when volumes agree).
+  --vs-score   size measure against the 0-4 multifocality score (their Fig. 4: wide spread inside the
+               top categories = the ceiling effect a continuous measure avoids)
+Compare sizes only between scans acquired with the same protocol (field strength, TE, voxel size)."""
+import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+import sys, os, numpy as np, pandas as pd, nibabel as nib
+
+arg = lambda f, d="": sys.argv[sys.argv.index(f) + 1] if f in sys.argv else d
+col = arg("--col", "grown_volume_mm3")
+ex = lambda p: os.path.expanduser(p)
+
+
+def icc_a1(x, y):
+    """two-way, absolute agreement, single measures (McGraw & Wong ICC(A,1))"""
+    Y = np.c_[x, y]; n, k = Y.shape
+    gm = Y.mean(); rm = Y.mean(1); cm = Y.mean(0)
+    msr = k * ((rm - gm) ** 2).sum() / (n - 1)
+    msc = n * ((cm - gm) ** 2).sum() / (k - 1)
+    mse = ((Y - rm[:, None] - cm[None, :] + gm) ** 2).sum() / ((n - 1) * (k - 1))
+    return float((msr - mse) / (msr + (k - 1) * mse + k * (msc - mse) / n))
+
+
+if arg("--vs-score"):
+    d = pd.read_csv(f"{ex(arg('--vs-score'))}/css_scores.csv")
+    if col not in d.columns: sys.exit(f"column {col} not in css_scores.csv (re-score with score_css.py v4.13)")
+    print(f"{col} by multifocality score ({len(d)} subjects):")
+    for s, g in d.groupby("multifocality_0_4"):
+        print(f"  score {s}: n={len(g)}  median {g[col].median():.1f}  range {g[col].min():.1f}-{g[col].max():.1f}")
+    if arg("--plot"):
+        import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(5, 4))
+        jit = np.random.default_rng(0).uniform(-0.12, 0.12, len(d))
+        ax.scatter(d.multifocality_0_4 + jit, d[col], s=25)
+        ax.set_xlabel("cSS multifocality score (0-4)"); ax.set_ylabel(col); ax.set_xticks(range(5))
+        fig.tight_layout(); fig.savefig(ex(arg("--plot")), dpi=150); print(f"plot -> {arg('--plot')}")
+    sys.exit(0)
+
+if not (arg("--a") and arg("--b")): sys.exit(__doc__)
+A, Bd = ex(arg("--a")), ex(arg("--b"))
+da, db = pd.read_csv(f"{A}/css_scores.csv"), pd.read_csv(f"{Bd}/css_scores.csv")
+m = da[["subject", col]].merge(db[["subject", col]], on="subject", suffixes=("_a", "_b")).dropna()
+if len(m) < 2: sys.exit(f"need >=2 subjects scored in both folders (found {len(m)})")
+x, y = m[f"{col}_a"].to_numpy(float), m[f"{col}_b"].to_numpy(float)
+diff = x - y; bias = diff.mean(); sd = diff.std(ddof=1)
+r = float(np.corrcoef(x, y)[0, 1]) if x.std() > 0 and y.std() > 0 else float("nan")
+print(f"{len(m)} subjects, {col}:  Pearson r {r:.3f}   ICC(A,1) {icc_a1(x, y):.3f}   "
+      f"Bland-Altman bias {bias:.1f}, 95 % limits {bias - 1.96 * sd:.1f} to {bias + 1.96 * sd:.1f}")
+dice = []
+for s in m.subject:
+    pa, pb = f"{A}/{s}_css_mask.nii.gz", f"{Bd}/{s}_css_mask.nii.gz"
+    if os.path.exists(pa) and os.path.exists(pb):
+        a_, b_ = nib.load(pa).get_fdata() > 0, nib.load(pb).get_fdata() > 0
+        if a_.shape == b_.shape and (a_.any() or b_.any()):
+            dice.append((s, 2 * (a_ & b_).sum() / (a_.sum() + b_.sum())))
+if dice:
+    dv = np.array([v for _, v in dice])
+    print(f"Dice of the cSS masks: mean {dv.mean():.2f} +/- {dv.std():.2f}  ("
+          + ", ".join(f"{s} {v:.2f}" for s, v in dice) + ")")
+print(m.to_string(index=False))
+if arg("--plot"):
+    import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(1, 2, figsize=(9, 4))
+    lim = [0, max(x.max(), y.max()) * 1.05]
+    ax[0].scatter(x, y); ax[0].plot(lim, lim, "k--", lw=0.8)
+    ax[0].set_xlabel(f"{col} (A)"); ax[0].set_ylabel(f"{col} (B)"); ax[0].set_title(f"r = {r:.3f}")
+    mean = (x + y) / 2; ax[1].scatter(mean, diff)
+    for v, ls in ((bias, "-"), (bias - 1.96 * sd, "--"), (bias + 1.96 * sd, "--")): ax[1].axhline(v, color="k", ls=ls, lw=0.8)
+    ax[1].set_xlabel("mean of A and B"); ax[1].set_ylabel("A - B"); ax[1].set_title("Bland-Altman")
+    fig.tight_layout(); fig.savefig(ex(arg("--plot")), dpi=150); print(f"plot -> {arg('--plot')}")
 ```
 
 ## scripts/feature_report.py
@@ -2557,6 +2671,12 @@ echo "== v4 phantom: tram-track / convexity cSS vs tubular & surface veins, ICH,
 python $ROOT/tests/phantom_v4.py PH3 1; python $S/align_seg.py PH3 > /dev/null
 python $S/detect_css.py PH3 | head -1
 python $ROOT/tests/check_v4.py PH3 | tail -3
+echo "== surface measure + agreement statistics (van Harten 2023)"
+python $S/score_css.py PH3 --truth | grep "cortical surface covered" || { echo "FAIL: surface measure"; exit 1; }
+cp -R $T/review $T/sessA; cp -R $T/review $T/sessB
+python $S/score_css.py PH1S --truth > /dev/null; cp $T/review/css_scores.csv $T/sessA/; cp $T/review/css_scores.csv $T/sessB/
+python $S/agreement.py --a $T/sessA --b $T/sessB | grep -q "ICC(A,1) 1.000" || { echo "FAIL: agreement on identical sessions"; exit 1; }
+echo "   identical sessions -> ICC 1.000"
 echo "== rule_test (known lesions vs a negative scan)"
 python $S/rule_test.py --pos PH3 --old $T/work/PH3_truth.nii.gz --ids 1,2,3,4,5,6 --neg PH1 | grep -q "known cSS (PH3)" || { echo "FAIL: rule_test"; exit 1; }
 python $S/score_css.py PH3 --truth > $T/score_v4.log

@@ -441,6 +441,39 @@ Evidence (rule_test, 6 known P006 foci vs 26 P011 false positives): known cSS ha
 and pial_dist ≤ −0.57 mm; false positives have medians 0.16 and +1.22 mm. The thresholds sit
 well away from every known lesion, deliberately looser than the tightest "safe" cut-offs.
 
+## 5g. Ideas from van Harten et al. 2023 (Leiden), implemented in v4.13
+
+Their method: 2-D vesselness filter (σ = 1 voxel) → rater-placed seeds → 3-D 6-neighbour region
+growing → false positives removed by the rater → cSS volume. Our pipeline already does the same steps
+automatically (ridge filter, automatic seeds, 6-neighbour growing in `score_css.py`, reader review).
+What their **Discussion** adds:
+
+1. **Volume depends on the scanner.** Blooming makes cSS look wider at 3 T, at longer TE and on
+   SWI. It widens the lesion *perpendicular* to the cortex much more than *along* it. They suggest
+   the **cortical surface area** covered, or a **percentage** of the cortex, instead. `score_css.py`
+   now reports:
+   - `surface_mm2`: cortical surface covered by cSS;
+   - `L_surface_pct` / `R_surface_pct`: % of each hemisphere's cortical surface;
+   - `volume_note`: a warning when slices are thicker than 1.5 mm.
+
+   On the phantom, adding 1 voxel of blooming doubled the volume (×2.13) but raised the surface
+   area only ×1.30 (2 voxels: ×3.22 vs ×1.55).
+2. **Reproducibility statistics** they report (intra- and inter-observer): Pearson, ICC (absolute
+   agreement), Bland–Altman and Dice. `agreement.py` computes all four between two scoring sessions
+   or two readers:
+   ```
+   cp -R ~/css_project/review ~/css_project/review_session1     # after scoring all patients once
+   # ... weeks later, review and score again blinded ...
+   cp -R ~/css_project/review ~/css_project/review_session2
+   python ~/css_project/scripts/agreement.py --a ~/css_project/review_session1 --b ~/css_project/review_session2 --col surface_mm2 --plot ~/css_project/results/agreement.png
+   ```
+   Their values: ICC 0.995, Pearson 0.991, mean Dice 0.75. Dice is naturally low for thin, sparse masks.
+3. **Ceiling effect** (their Fig. 4): patients scored 4/4 ranged from 2.7 to 14.3 mL. To check this
+   in your data:
+   `python ~/css_project/scripts/agreement.py --vs-score ~/css_project/review --col surface_mm2 --plot ~/css_project/results/vs_score.png`
+4. **Progression** is their main use case. Follow-up scans must use the same scanner and protocol.
+   Not implemented yet (see the next steps in CLAUDE.md).
+
 ## 6. Validation plan (what makes this publishable)
 
 1. **Re-run P006 with v4.** First back up the v3 review: `mkdir -p ~/css_project/review/v3 && cp ~/css_project/review/P006_* ~/css_project/review/v3/`.

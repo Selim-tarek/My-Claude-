@@ -42,6 +42,12 @@ echo "== v4 phantom: tram-track / convexity cSS vs tubular & surface veins, ICH,
 python $ROOT/tests/phantom_v4.py PH3 1; python $S/align_seg.py PH3 > /dev/null
 python $S/detect_css.py PH3 | head -1
 python $ROOT/tests/check_v4.py PH3 | tail -3
+echo "== surface measure + agreement statistics (van Harten 2023)"
+python $S/score_css.py PH3 --truth | grep "cortical surface covered" || { echo "FAIL: surface measure"; exit 1; }
+cp -R $T/review $T/sessA; cp -R $T/review $T/sessB
+python $S/score_css.py PH1S --truth > /dev/null; cp $T/review/css_scores.csv $T/sessA/; cp $T/review/css_scores.csv $T/sessB/
+python $S/agreement.py --a $T/sessA --b $T/sessB | grep -q "ICC(A,1) 1.000" || { echo "FAIL: agreement on identical sessions"; exit 1; }
+echo "   identical sessions -> ICC 1.000"
 echo "== rule_test (known lesions vs a negative scan)"
 python $S/rule_test.py --pos PH3 --old $T/work/PH3_truth.nii.gz --ids 1,2,3,4,5,6 --neg PH1 | grep -q "known cSS (PH3)" || { echo "FAIL: rule_test"; exit 1; }
 python $S/score_css.py PH3 --truth > $T/score_v4.log

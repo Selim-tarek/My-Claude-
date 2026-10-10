@@ -169,6 +169,12 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   rostral ACC, precuneus, middle temporal. Candidate next rule: orbitofrontal artifact zone - needs more
   negatives first.
 
+- v4.13 from van Harten 2023 (full text re-read incl. Discussion): score_css adds surface_mm2 and
+  L/R_surface_pct (cortex voxels facing CSF within 1.5 mm of the grown mask; voxel face area = V^(2/3))
+  + volume_note; phantom blooming test +1 vox: volume x2.13 vs surface x1.30. agreement.py: Pearson,
+  ICC(A,1), Bland-Altman, Dice between two review-folder copies; --vs-score (their Fig. 4).
+  Not done: follow-up/progression mode (register follow-up SWI to baseline, new cSS volume/area/sulci).
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.
