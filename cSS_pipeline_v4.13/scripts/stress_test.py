@@ -59,11 +59,20 @@ for h in a.hosts.split(","):
                 tl = nib.load(f"{base}/work/{h}S_truth.nii.gz").get_fdata().astype(int)
                 xm = nib.load(f"{base}/review/{h}S_excluded.nii.gz").get_fdata().astype(int)
                 xr = pd.read_csv(f"{base}/review/{h}S_excluded.csv").set_index("excl_id")["reason"]
+                # v4.14: components removed by the generation gates (size / slices / elongation / no cortex)
+                dp_ = f"{base}/work/{h}S_dropped.nii.gz"
+                dm = nib.load(dp_).get_fdata().astype(int) if os.path.exists(dp_) else np.zeros_like(xm)
+                dr_ = pd.read_csv(f"{base}/work/{h}S_dropped.csv").set_index("drop_id")["reason"] \
+                    if os.path.exists(f"{base}/work/{h}S_dropped.csv") else pd.Series(dtype=str)
                 for t_ in range(1, int(tl.max()) + 1):
                     m_ = tl == t_
                     if (cm[m_] > 0).mean() >= 0.3: continue
-                    r_ = (str(xr.get(int(np.bincount(xm[m_][xm[m_] > 0]).argmax()), "?")).split(":")[0].split(" (")[0]
-                          if (xm[m_] > 0).any() else "not detected")
+                    if (xm[m_] > 0).any():
+                        r_ = str(xr.get(int(np.bincount(xm[m_][xm[m_] > 0]).argmax()), "?")).split(":")[0].split(" (")[0]
+                    elif (dm[m_] > 0).any():
+                        r_ = "dropped: " + str(dr_.get(int(np.bincount(dm[m_][dm[m_] > 0]).argmax()), "?"))
+                    else:
+                        r_ = "not detected"
                     lost[r_] = lost.get(r_, 0) + 1
                 # what happened to each decoy vein: still shown for review, excluded (why), or never detected
                 if os.path.exists(vp):

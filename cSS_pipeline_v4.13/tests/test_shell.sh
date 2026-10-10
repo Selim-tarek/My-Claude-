@@ -42,12 +42,17 @@ seen "mri_vol2vol --mov $T/base/data/P2_swi.nii --targ $T/base/work/P2_t1synthse
 seen "mri_coreg --mov $T/base/work/P2_flair_brain.nii.gz --ref $T/base/data/P2_swi.nii"
 seen "mri_vol2vol --mov $T/base/work/P2_flair_brain.nii.gz --targ $T/base/data/P2_swi.nii"
 notseen "mri_synthseg --i $T/base/data/P2_swi.nii"; notseen recon-all; notseen bbregister
+grep -q '"method": "mri_coreg", "cost": null' $T/base/work/P2_reg.json || fail "registration QC record (mri_coreg)"
 echo "== 5. --recon (recon-all, bbregister, Destrieux)"
 : > $T/log; $SH $T/base/scripts/run_css.sh P3 $T/swi.nii --t1 $T/t1.nii --recon > /dev/null
 seen "recon-all -s P3"; seen "bbregister --s P3 --mov $T/base/data/P3_swi.nii --reg $T/base/work/P3_swi2t1.lta --t2 --init-coreg"
 seen "aparc.a2009s+aseg.mgz --lta $T/base/work/P3_swi2t1.lta --inv --interp nearest --o $T/base/work/P3_a2009s_swispace"
-echo "== 6. recon-all already done -> re-used without --recon"
+grep -q '"method": "bbregister", "cost": null' $T/base/work/P3_reg.json || fail "registration QC record (bbregister, no mincost)"
+echo "== 6. recon-all already done -> re-used without --recon; bbregister mincost recorded"
+printf '#!/bin/bash\necho "bbregister $*" >> $STUBLOG\necho "0.512 1 2 3" > %s/base/work/P3_swi2t1.lta.mincost\n' $T > $T/bin/bbregister.new
+chmod +x $T/bin/bbregister.new; mv -f $T/bin/bbregister.new $T/bin/bbregister
 : > $T/log; $SH $T/base/scripts/prep_anat.sh P3 --t1 $T/t1.nii > /dev/null; notseen "recon-all"; seen bbregister
+grep -q '"cost": 0.512' $T/base/work/P3_reg.json || fail "bbregister mincost not recorded"
 echo "== 6b. --phase is imported for the reviewer"
 echo ph > $T/ph.nii; : > $T/log; $SH $T/base/scripts/run_css.sh P4 $T/swi.nii --phase $T/ph.nii > /dev/null
 seen "mri_convert $T/ph.nii $T/base/data/P4_phase.nii.gz"

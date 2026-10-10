@@ -41,6 +41,13 @@ vox = swi.header.get_zooms()[:3]
 br = I > 0
 lo, hi = np.percentile(I[br], [1, 99]) if br.any() else (I.min(), I.max())
 df = pd.read_csv(csv)
+_qcp = f"{base}/review/{subj}_qc.json"          # v4.14 case QC (detect_css.py)
+if os.path.exists(_qcp):
+    import json as _json
+    _qc = _json.load(open(_qcp))
+    if _qc.get("status") != "ok":
+        print(f"WARNING: case QC {_qc.get('status')}: {'; '.join(_qc.get('reasons', []))} - "
+              f"anatomy-based features and exclusions are less reliable for this scan")
 ids = df.cand_id.astype(int).tolist()[:top]
 calls = {}
 if not redo:

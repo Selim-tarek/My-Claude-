@@ -175,6 +175,18 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   ICC(A,1), Bland-Altman, Dice between two review-folder copies; --vs-score (their Fig. 4).
   Not done: follow-up/progression mode (register follow-up SWI to baseline, new cSS volume/area/sulci).
 
+- v4.14 Stage 1 of docs/AUDIT_v4.13_and_FP_plan.md (bookkeeping, no change to shown/excluded candidates on
+  the phantoms - old CSV columns identical in values on PH1/PH1S/PH2/PH3/PH4/PH5): css_qc.py -> review/ID_qc.json
+  (protocol, orientation, coverage, anatomy, registration cost from prep_anat work/ID_reg.json, label-pial
+  vs SWI-edge agreement overall + L/R x inferior/middle/superior, background ratio) and status ok /
+  low_confidence_review / insufficient_quality - PROVISIONAL thresholds, REPORTED ONLY. Appended columns
+  qc_status, rule_version (E1-E9 ids), n_pieces; excluded.csv adds exclusion_confidence. Generation-gate
+  drops (volume/slices/elongation/no cortex) now logged in work/ID_dropped.csv/.nii.gz; stress_test names
+  them in "missed synthetic lesions". Fix B1: extent_mm was 2-3.5 mm too small for objects on array slice 0
+  (partial slabs -> false "speck" exclusions). Phantom: edge agreement 0.12 / 0.88 / 1.38 / 1.62 mm for
+  label shifts 0 / 0.8 / 1.6 / 3.2 mm (only the 3.2 mm shift crosses the 1.5 mm threshold). Not yet run on
+  P006/P011.
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.
@@ -193,6 +205,8 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
 ## How to test
 `bash tests/run_tests.sh` — v3 phantom (radial sulci, fissure, veins) end to end, fails if synthetic
 sensitivity < 4/8; v4 phantom (check_v4.py: sensitivity, score_v4 AUC ≥0.8, ICH Dice, sulcal 3/4).
+tests/check_qc.py (called by run_tests.sh): v4.14 QC status, column contract, dropped log, extent at the
+volume edge, label-shift monotonicity, transposed-orientation detection.
 `bash tests/test_shell.sh` — run_css.sh / prep_anat.sh / run_all.sh flow with stubbed FreeSurfer.
 No FreeSurfer or patient data needed.
 

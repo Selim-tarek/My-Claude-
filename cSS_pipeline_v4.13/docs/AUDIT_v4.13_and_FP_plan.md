@@ -1,7 +1,7 @@
 # cSS pipeline v4.13: code audit, evidence review and false-positive reduction plan
 
-Status: **audit and plan only. No pipeline file has been changed.** Implementation waits for approval
-(deliverable 7). This is research software. Nothing here is clinically validated, and nothing in this
+Status: audit and plan written against unchanged v4.13. **Stage 1 (section 6) is implemented as v4.14**
+(see "Stage 1 result" below); later stages wait for approval. This is research software. Nothing here is clinically validated, and nothing in this
 document should be read as evidence that it is.
 
 Contents
@@ -418,6 +418,23 @@ deletes or renames an existing column, file or rule.
   except `extent_mm` for edge-clipped candidates; P006 6/6 kept; P011 candidate count unchanged
   unless an edge-clipped speck is restored (reported).
 - **Decision type**: QC output + reviewer flags. No exclusion behaviour changes.
+
+**Stage 1 result (v4.14).** Implemented as planned, with three deviations: QC is computed inside
+`detect_css.py` (via `css_qc.case_qc`) rather than as a separate `run_css.sh` step, so batch runs and the
+stress test get it too; the motion proxy is only a background-noise ratio and only when `work/ID_raw.nii.gz`
+exists; `review_css.py` prints a warning when the status is not ok. Verified:
+- `bash tests/run_tests.sh`: ALL TESTS PASSED, every pre-existing number unchanged (PH1S 8/8, stress 16/16
+  and 8/8, PH3 6/6 AUC 1.00, PH4 T1 stress still 5/8, AUC 0.40, which is a pre-existing weakness).
+- Old (v4.13) vs new detector on PH1, PH1S, PH2, PH3, PH4, PH5: all v4.13 columns identical, same rows.
+- B1 confirmed on a phantom cropped so lesions start on slice 0: v4.13 `extent_mm` 2.0-3.5 mm below the
+  bounding box for all 8 edge objects; v4.14 equal.
+- `tests/check_qc.py`: label shifts 0 / 0.8 / 1.6 / 3.2 mm give edge agreement 0.12 / 0.88 / 1.38 / 1.62 mm.
+  **Limitation:** only the 3.2 mm shift crosses the provisional 1.5 mm threshold. The measure saturates
+  because the search window is ±3 mm, and a 1.6 mm misregistration is still "ok". The threshold needs
+  real cases with a known-good and a known-bad registration before it means anything.
+- Not run on P006/P011 (no patient data here). Before relying on it: `check_known.py P006` (expect 6/6),
+  P011 candidate count (expect 8, or more only if an edge-clipped "speck" is restored), and look at the
+  `edge_agreement_by_region_mm` values in both QC files.
 
 ### Stage 2: feature-changing bug fixes (B2, B3, B6, B11)
 

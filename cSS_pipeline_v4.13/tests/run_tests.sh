@@ -122,6 +122,9 @@ cp $T/synthseg/PH4_seg.nii.gz $T/work/PH4_t1seg_swispace.nii.gz; python $S/align
 python $S/detect_css.py PH4 | head -2
 python $S/check_known.py PH4 --old $T/work/PH3_truth.nii.gz --ids 1,2,3,4,5,6 | tail -1 | grep -q "6 of 6" || { echo "FAIL: cSS lost (T1 mode)"; exit 1; }
 python $S/check_known.py PH4 --old $T/work/PH4_infra_line.nii.gz --ids 1 | head -1 | grep -q "kept" && { echo "FAIL: cerebellar line kept (T1 mode)"; exit 1; }
+echo "== v4.14 case QC, generation-gate log, extent at the volume edge, CSV column contract"
+python $ROOT/tests/check_qc.py | tee $T/qc.log | grep -v "^RESULT"
+grep -q "RESULT qc OK" $T/qc.log || { echo "FAIL: v4.14 QC checks"; exit 1; }
 echo "== stress test on a host with T1 anatomy (PH4)"
 python $S/stress_test.py --hosts PH4 --depths 0.6 --seeds 1 --tag t1host | grep -E "anatomy|darkness"
 echo; echo "ALL TESTS PASSED  (temp dir $T)"

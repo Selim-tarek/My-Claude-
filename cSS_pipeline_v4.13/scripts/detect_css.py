@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""cSS candidate detector v4 (v4.11) - definition-driven.
+"""cSS candidate detector v4 (v4.14) - definition-driven.
 usage: detect_css.py SUBJECT [z_thr=-2.5] [ridge_pct=85] [rim_mm=3]
 env:   CSS_RANK=v3 ranks with the old v3 score (both scores are always written)
 
@@ -38,6 +38,13 @@ Candidate generation (unchanged idea from v3, tightened):
   - 2-D Sato ridge + hysteresis, per hemisphere; >=25 mm3, >=2 slices, elongation >=2.0
 Labels: work/ID_seg_swispace.nii.gz (from T1 via prep_anat.sh when available, else SWI SynthSeg).
 Lobar ICH mask: work/ID_ich.nii.gz if you drew one (freeview), else found automatically.
+v4.14 bookkeeping (no change to which candidates are shown or excluded, except B1 below):
+  review/ID_qc.json        case QC (css_qc.py): protocol, orientation, coverage, anatomy, pial-edge agreement,
+                           status ok / low_confidence_review / insufficient_quality (reported only)
+  work/ID_dropped.csv/.nii.gz  components removed by the generation gates (size, slices, elongation, no
+                           cortex nearby) - before v4.14 they vanished without a record
+  new columns (appended): candidates qc_status, rule_version, n_pieces; excluded also exclusion_confidence
+  B1 fix: extent_mm was underestimated for candidates touching the first array slice/row/column
 """
 import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
 import sys, os, numpy as np, nibabel as nib, pandas as pd
@@ -47,12 +54,14 @@ from skimage.measure import regionprops
 from skimage.morphology import skeletonize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from css_common import base as _base, load_lut
+import css_qc
 
 subj   = sys.argv[1]
 z_thr  = float(sys.argv[2]) if len(sys.argv) > 2 else -2.5
 r_pct  = float(sys.argv[3]) if len(sys.argv) > 3 else 85
 RIM_MM = float(sys.argv[4]) if len(sys.argv) > 4 else 3.0
 RANK   = os.environ.get("CSS_RANK", "v4")
+RULESET = "v4.14"                        # written to every row as rule_version
 Z_LOW, R_PCT_LOW = -2.0, 80           # hysteresis (weak) thresholds
 GROW_Z = -1.5                          # 'dark' map used for region growing at scoring
 MIN_MM3, MIN_SLICES, MIN_ELONG = 25.0, 2, 2.0   # v4: 2.0 (tram-track = two parallel plates, ~2.4;
@@ -109,7 +118,7 @@ mm2vox = lambda mm: tuple(mm / v for v in vox)
 brain  = ndi.binary_fill_holes(I > 0)
 cortex = (seg >= 1000) | (seg == 3) | (seg == 42)
 it = max(1, int(round(2.0 / vox[0])))
-edge  = brain & ~ndi.binary_erosion(brain, structure=s2d, iterations=it)
+edge_band = brain & ~ndi.binary_erosion(brain, structure=s2d, iterations=it)
 surface = (~brain) | np.isin(seg, CSF)
 near_surface = ndi.binary_dilation(surface, structure=s2d, iterations=it)
 
@@ -143,7 +152,7 @@ dist_mm = ndi.distance_transform_edt(brain, sampling=vox)
 rim = brain & (dist_mm < RIM_MM)
 If = Ic.copy(); If[~brain] = mu
 shell = brain & (pial_sd >= -PIAL_IN_MM) & (pial_sd <= PIAL_OUT_MM) & ~np.isin(seg, WM + DEEP)
-shell |= edge & ~np.isin(seg, WM + DEEP)
+shell |= edge_band & ~np.isin(seg, WM + DEEP)
 zone = shell & ~rim
 
 # ---- 3. curvilinear dark structures, slice by slice (candidate generation)
@@ -162,6 +171,7 @@ hemiL = ndi.distance_transform_edt(~Lm, sampling=vox) <= ndi.distance_transform_
 dmid = np.where(hemiL, ndi.distance_transform_edt(hemiL, sampling=vox),
                 ndi.distance_transform_edt(~hemiL, sampling=vox))
 lab = np.zeros(I.shape, np.int32); n_raw = 0; nxt = 0
+n_pieces = None; n_before_merge = None     # set by the merge step
 for side in (hemiL, ~hemiL):
     wl, nw = ndi.label(weak & side, structure=s3)
     n_raw += nw
@@ -379,24 +389,37 @@ def tram_track(pts):
 
 objs = ndi.find_objects(lab)
 rows = []
+# v4.14: components removed by the generation gates are logged (work/ID_dropped.csv/.nii.gz), not shown
+dropped = []
+def drop(p, why, vol, n_sl=None, elong=None):
+    c_ = np.asarray(p.centroid) / np.array(vox)              # regionprops centroid is in mm (spacing)
+    dropped.append(dict(drop_id=len(dropped) + 1, reason=why, volume_mm3=round(vol, 1),
+                        n_slices=n_sl, elongation=None if elong is None else round(elong, 1),
+                        vox_i=int(round(c_[0])), vox_j=int(round(c_[1])), vox_k=int(round(c_[2])),
+                        hemi="L" if hemiL[tuple(np.clip(np.round(c_).astype(int), 0, np.array(I.shape) - 1))] else "R",
+                        _lab=p.label))
 for p in regionprops(lab, spacing=vox):
     vol = float(p.area)                         # already mm3 because spacing is given
-    if vol < MIN_MM3: continue
+    if vol < MIN_MM3:
+        drop(p, f"volume <{MIN_MM3:g} mm3", vol); continue
     sl = objs[p.label - 1]
     pad = tuple(slice(max(s.start - 3, 0), s.stop + 3) for s in sl)
     mm = lab[pad] == p.label
     n_sl = int(mm.any(axis=(0, 1)).sum())
-    if n_sl < MIN_SLICES: continue
+    if n_sl < MIN_SLICES:
+        drop(p, f"<{MIN_SLICES} slices", vol, n_sl); continue
     elong = p.axis_major_length / max(p.axis_minor_length, 1e-3)
     # elongation rejects round microbleeds, which are single pieces; a merged candidate (two banks,
     # a bent line) can be compact overall and is not rejected for it (v4.9.2)
-    if elong < MIN_ELONG and ('n_pieces' not in dir() or n_pieces[p.label] <= 1): continue
+    if elong < MIN_ELONG and (n_pieces is None or n_pieces[p.label] <= 1):
+        drop(p, f"elongation <{MIN_ELONG:g}", vol, n_sl, elong); continue
     seg_nb = seg[pad][ndi.binary_dilation(mm, iterations=2)]
     nb = seg_nb[seg_nb >= 1000]
     # infratentorial only when clearly cerebellar/brainstem with little cerebral cortex nearby, so
     # occipital / inferior temporal cSS next to the tentorium is not dropped from the 0-4 score
     infra = bool(np.isin(seg_nb, INFRA).mean() > 0.5 and nb.size < 0.2 * seg_nb.size)
-    if nb.size == 0 and not infra: continue
+    if nb.size == 0 and not infra:
+        drop(p, "no cortex label within 2 voxels", vol, n_sl, elong); continue
     # hemisphere = majority of the candidate's own voxels in the hemisphere map (v4 fix: v3 counted
     # own L/R labels, but cSS lies in sulcal CSF where both counts are 0, so medial candidates
     # could take the region - and the score - of the opposite hemisphere)
@@ -477,12 +500,13 @@ for p in regionprops(lab, spacing=vox):
     # round/oval and at least half surrounded by brain parenchyma - cSS lies on the surface / in CSF
     shell1 = ndi.binary_dilation(mm, structure=s3) & ~mm
     pfrac = float(tissue[pad][shell1].mean()) if shell1.any() else np.nan
-    ext_mm = float(np.sqrt(sum(((s_.stop - s_.start - 6) * v) ** 2 for s_, v in zip(pad, vox))))
+    # bounding-box diagonal of the candidate itself (v4.14 B1: was pad width - 6, too small at the volume edge)
+    ext_mm = float(np.sqrt(sum(((s_.stop - s_.start) * v) ** 2 for s_, v in zip(sl, vox))))
     cmb_like = bool(np.isfinite(pfrac) and pfrac >= 0.5 and ext_mm <= 10.0)
     # "well-defined" (consensus definition): darker than the 1-2 mm surroundings by >= MIN_EDGE_SD;
     # normal dark cortex fades gradually into its neighbourhood
     ring2 = ndi.binary_dilation(mm, structure=s3, iterations=2) & ~mm & brain[pad]
-    edge = float(np.median(z[pad][ring2]) - np.median(z[pad][mm])) if ring2.any() else np.nan
+    edge_c = float(np.median(z[pad][ring2]) - np.median(z[pad][mm])) if ring2.any() else np.nan
     idist = float(ich_dist[pad][mm].min())
     fz = fcz = np.nan
     if FL is not None:
@@ -540,11 +564,12 @@ for p in regionprops(lab, spacing=vox):
                      flair_csf_z=round(fz, 2), flair_bright=int(np.isfinite(fz) and fz > 3.0),
                      flair_ctx_z=round(fcz, 2), flair_ctx_bright=int(np.isfinite(fcz) and fcz > 3.0),
                      css_evidence=round(css_ev, 2), vein_evidence=round(vein_ev, 2),
-                     edge_contrast=round(edge, 2), _wz=float((swi.affine @ np.r_[c0, 1])[2]),
+                     edge_contrast=round(edge_c, 2), _wz=float((swi.affine @ np.r_[c0, 1])[2]),
                      infra_frac=round(float((d_infra[pad][mm] <= INFRA_MM).mean()), 2),
                      basal_frac=round(float((d_basal[pad][mm] <= BASAL_MM).mean()), 2),
                      vessel_ext_mm=round(ves_ext, 1), vessel_wm_mm=round(ves_wm, 1), vessel_run_mm=round(min(ves_run, VES_REACH_MM), 1), axis_normal=round(axn, 2),
-                     score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label))
+                     score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label,
+                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
 cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongation",
@@ -556,7 +581,8 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "parenchyma_frac", "extent_mm", "cmb_like",
         "flair_bright", "flair_ctx_z", "flair_ctx_bright", "css_evidence", "vein_evidence",
         "edge_contrast", "infra_frac", "basal_frac", "rel_height",
-        "vessel_ext_mm", "vessel_wm_mm", "vessel_run_mm", "axis_normal", "score_v3", "score_v4", "accept"]
+        "vessel_ext_mm", "vessel_wm_mm", "vessel_run_mm", "axis_normal", "score_v3", "score_v4", "accept",
+        "qc_status", "rule_version", "n_pieces"]                                   # v4.14, appended
 
 # ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason
 # height is measured within the CEREBRUM (cortex + cerebral WM), so 0 = floor of the temporal/frontal
@@ -573,33 +599,46 @@ _area = brain.sum(axis=tuple(a for a in range(3) if a != _zax)).astype(float)
 _nz = np.nonzero(_area)[0]
 _bot = _nz[0] if swi.affine[2, _zax] > 0 else _nz[-1]
 FULL_BOTTOM = bool(len(_nz) and _area[_bot] < 0.2 * _area.max())
+# v4.14: each rule has an id + the version that introduced or last changed it (rule_version column) and a
+# confidence for the excluded list. Confidence is a reading aid, not validated: "low" marks rules with
+# little real-data support or a case whose QC status is not ok (see review/ID_qc.json).
+RULE_CONF = {"E1": "high" if T1_ANAT else "medium", "E2": "medium", "E3": "medium", "E4": "high",
+             "E5": "medium", "E6": "medium", "E7": "medium", "E8": "low", "E9": "medium"}
 def exclusion(r):
-    if KEEP_ALL: return ""
+    """-> (rule_version, reason); ("", "") = kept"""
+    if KEEP_ALL: return "", ""
     if r["infratentorial"] or r["infra_frac"] >= (0.3 if T1_ANAT else 0.5):
-        return "infratentorial / tentorial interface (cerebellum, brainstem) - not cSS by definition"
+        return "E1@v4.9.2", "infratentorial / tentorial interface (cerebellum, brainstem) - not cSS by definition"
     if T1_ANAT and r["basal_frac"] >= 0.3:
-        return "basal cisterns (circle of Willis / basal veins next to brainstem, mesial temporal lobe)"
+        return "E2@v4.9.2", "basal cisterns (circle of Willis / basal veins next to brainstem, mesial temporal lobe)"
     if T1_ANAT and FULL_BOTTOM and r["rel_height"] < 0.2:
-        return "skull base (lowest 20 % of the cerebrum)"
-    if r["extent_mm"] < MIN_EXTENT_MM: return f"speck (<{MIN_EXTENT_MM:g} mm)"
+        return "E3@v4.9.2", "skull base (lowest 20 % of the cerebrum)"
+    if r["extent_mm"] < MIN_EXTENT_MM: return "E4@v4.8", f"speck (<{MIN_EXTENT_MM:g} mm)"
     tub_, tram_ = r["tube_ratio"], r["tram_frac"]
     if r["pial_dist_mm"] > 0.5 and np.isfinite(tub_) and tub_ > 0.45 and not (np.isfinite(tram_) and tram_ >= 0.2):
-        return "vein: tubular, in the middle of the sulcal CSF"
+        return "E5@v4.8", "vein: tubular, in the middle of the sulcal CSF"
     if r["vessel_wm_mm"] >= VES_EXCL_WM_MM and r["axis_normal"] >= VES_EXCL_AXIS \
             and not (np.isfinite(tram_) and tram_ >= 0.4):     # clear tram-track (cSS ~0.9) overrides
-        return "vessel: continues as a tube into the white matter, runs perpendicular to the cortex"
+        return "E6@v4.11", "vessel: continues as a tube into the white matter, runs perpendicular to the cortex"
     # v4.12 off the cortex (T1 anatomy only): cSS coats the pial surface, so it always touches the cortex.
     # A dark line lying wholly out in the sulcal CSF is a vein. Known P006 cSS: cortex_frac >= 0.55,
     # pial_dist <= -0.57; P011 false positives: median 0.16 / +1.22 mm -> thresholds with a wide margin
     if T1_ANAT and r["cortex_frac"] < OFF_CTX_FRAC and r["pial_dist_mm"] > OFF_PIAL_MM \
             and not (np.isfinite(tram_) and tram_ >= 0.2):
-        return "off the cortex: lies in the sulcal CSF without touching the cortex (vein)"
+        return "E7@v4.12", "off the cortex: lies in the sulcal CSF without touching the cortex (vein)"
     if FULL_BOTTOM and r["artifact_zone"] and r["rel_height"] < 0.4:
-        return "skull-base susceptibility artifact zone"
+        return "E8@v4.9", "skull-base susceptibility artifact zone"
     if np.isfinite(r["edge_contrast"]) and r["edge_contrast"] < MIN_EDGE_SD:
-        return "faint / ill-defined (normal dark cortex)"
-    return ""
-for r in rows: r["_excl"] = exclusion(r)
+        return "E9@v4.8", "faint / ill-defined (normal dark cortex)"
+    return "", ""
+# ---- 11b. case QC (v4.14, reported only - changes no candidate)
+QC = css_qc.case_qc(base, subj, swi, I, If, seg, brain, tissue, cortex, pial_sd, normal, rim, hemiL, vox,
+                    T1_ANAT, FULL_BOTTOM)
+for r in rows:
+    rv, r["_excl"] = exclusion(r)
+    r["qc_status"] = QC["status"]
+    r["rule_version"] = rv or RULESET
+    r["exclusion_confidence"] = ("low" if QC["status"] != "ok" else RULE_CONF[rv.split("@")[0]]) if rv else ""
 excluded = [r for r in rows if r["_excl"]]
 rows = [r for r in rows if not r["_excl"]]
 os.makedirs(f"{base}/review", exist_ok=True)
@@ -608,11 +647,21 @@ if excluded:
     xdf = pd.DataFrame(excluded).sort_values("score", ascending=False).reset_index(drop=True)
     xdf.insert(0, "excl_id", np.arange(1, len(xdf) + 1))
     xr = np.zeros(lab.max() + 1, np.int16); xr[xdf["_lab"].values] = xdf["excl_id"].values; xl = xr[lab]
-    xdf.rename(columns={"_excl": "reason"})[["excl_id", "reason"] + [c for c in cols if c not in ("cand_id", "accept")]] \
+    xdf.rename(columns={"_excl": "reason"})[["excl_id", "reason"] + [c for c in cols if c not in ("cand_id", "accept")]
+                                            + ["exclusion_confidence"]] \
         .to_csv(f"{base}/review/{subj}_excluded.csv", index=False)
 else:
     pd.DataFrame(columns=["excl_id", "reason"]).to_csv(f"{base}/review/{subj}_excluded.csv", index=False)
 nib.save(nib.Nifti1Image(xl, swi.affine), f"{base}/review/{subj}_excluded.nii.gz")
+# generation-gate drops (v4.14): not for review, but lets stress_test / check_known say why a lesion is missing
+dl = np.zeros(I.shape, np.int16)
+if dropped:
+    ddf = pd.DataFrame(dropped)
+    dr = np.zeros(lab.max() + 1, np.int16); dr[ddf["_lab"].values] = ddf["drop_id"].values; dl = dr[lab]
+    ddf.drop(columns="_lab").to_csv(f"{base}/work/{subj}_dropped.csv", index=False)
+else:
+    pd.DataFrame(columns=["drop_id", "reason"]).to_csv(f"{base}/work/{subj}_dropped.csv", index=False)
+nib.save(nib.Nifti1Image(dl, swi.affine), f"{base}/work/{subj}_dropped.nii.gz")
 keep = np.zeros(I.shape, np.int16)
 if rows:
     df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
@@ -637,10 +686,13 @@ print(f"{subj}: {n_raw} raw components -> {len(df)} candidates "
       f"[{len(excluded)} excluded: " + (", ".join(f"{v} {k.split(' (')[0].split(':')[0]}" for k, v in
       pd.Series([r['_excl'] for r in excluded]).value_counts().items()) if excluded else "none")
       + (f"; {n_before_merge - int(lab.max())} pieces joined, {n_chains} long chains kept apart"
-         if 'n_before_merge' in dir() else "") + "] "
+         if n_before_merge is not None else "") + "] "
       f"({cnt('artifact_zone')} artifact zone, {cnt('midline_zone')} midline, {cnt('vein_like')} vein-like, "
       f"{cnt('near_ich_suggest')} near ICH [{ich_src}], {cnt('infratentorial')} infratentorial)  rank={RANK}"
-      + ("  FLAIR used" if FL is not None else "") + "\n")
+      + ("  FLAIR used" if FL is not None else ""))
+print(f"{subj}: QC {QC['status']}" + (f" ({'; '.join(QC['reasons'])})" if QC["reasons"] else "")
+      + f", pial edge agreement {QC['edge_agreement_mm']} mm, {len(dropped)} components below the generation gates"
+      + " [review/" + subj + "_qc.json; reported only]\n")
 if len(df):
     print(df.head(15)[["cand_id", "hemi", "region", "volume_mm3", "darkness_z", "pial_dist_mm",
                        "tube_ratio", "surface_alignment", "tram_frac", "vein_tree_mm", "score",

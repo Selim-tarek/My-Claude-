@@ -50,14 +50,19 @@ if [ $RECON -eq 1 ] || [ -f $SUBJECTS_DIR/$S/mri/aparc.a2009s+aseg.mgz ]; then
   echo "[c] register SWI -> T1 (bbregister, boundary-based, T2*-like contrast)"
   bbregister --s $S --mov $SWI --reg $W/${S}_swi2t1.lta --t2 --init-coreg > $W/${S}_bbreg.log 2>&1
   grep -i "min cost" $W/${S}_bbreg.log | tail -1 || true
+  REGM=bbregister; COST=$(awk 'NR==1{print $1}' $W/${S}_swi2t1.lta.mincost 2>/dev/null || true)
 else
   echo "[b] SynthSeg --parc --robust on the T1"
   mri_synthseg --i $B/data/${S}_t1.nii.gz --o $W/${S}_t1synthseg.nii.gz --parc --robust --threads 8 > /dev/null
   LAB=$W/${S}_t1synthseg.nii.gz
   echo "[c] register SWI -> T1 (mri_coreg, rigid, mutual information)"
   mri_coreg --mov $SWI --ref $W/${S}_t1_brain.nii.gz --reg $W/${S}_swi2t1.lta --dof 6 > $W/${S}_coreg.log 2>&1
+  REGM=mri_coreg; COST=""
 fi
 
+# v4.14 QC: registration method + cost (bbregister mincost; mri_coreg reports none) -> review/ID_qc.json
+echo "$COST" | grep -Eq '^[0-9.eE+-]+$' || COST=null
+printf '{"method": "%s", "cost": %s}\n' "$REGM" "$COST" > $W/${S}_reg.json
 echo "[d] labels -> SWI grid (nearest neighbour)"
 mri_vol2vol --mov $SWI --targ $LAB --lta $W/${S}_swi2t1.lta --inv --interp nearest \
   --o $W/${S}_t1seg_swispace.nii.gz > /dev/null

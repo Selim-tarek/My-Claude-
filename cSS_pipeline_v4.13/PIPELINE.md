@@ -294,9 +294,9 @@ led to these steps. **Excluded candidates are never deleted.** They are listed w
 |---|---|
 | One dark line reported 2–3 times | Pieces closer than **3 mm** are merged into one candidate (this also joins the two banks of a tram-track), **but only while the merged object stays ≤ 40 mm long**; longer chains (on P006: veins chained into 10–17 cm objects) keep their pieces separate |
 | Tiny specks | Candidates smaller than **6 mm** overall are excluded (curvilinear cSS is longer) |
-| Microbleeds | Small and ≥ half surrounded by brain tissue (AJNR 2016 rule) → excluded |
+| Microbleeds | Small and ≥ half surrounded by brain tissue (AJNR 2016 rule) → flagged `cmb_like` (an exclusion until v4.9.2, now a flag only) |
 | Obvious veins | **Tubular** (tube_ratio > 0.45), **out in the middle of the sulcal CSF** (> 0.5 mm outside the pial surface) and **no tram-track** → excluded |
-| Skull-base artifact | Artifact-zone labels (orbitofrontal, temporal pole, …) in the lowest 30 % of the brain → excluded |
+| Skull-base artifact | Artifact-zone labels (orbitofrontal, temporal pole, …) in the lowest 40 % of the cerebrum (v4.9; was 30 %) → excluded |
 | Faint normal dark cortex | Less than **0.75 SD** darker than its 1–2 mm surroundings ("well-defined" in the definition) → excluded |
 
 | Cerebellum / tentorium lines (v4.9) | ≥ 30 % of the candidate within 5 mm of cerebellum or brainstem → excluded (cSS is supratentorial by definition; infratentorial siderosis is a different disease) |
@@ -474,6 +474,27 @@ What their **Discussion** adds:
 4. **Progression** is their main use case. Follow-up scans must use the same scanner and protocol.
    Not implemented yet (see the next steps in CLAUDE.md).
 
+## 5h. Case QC and bookkeeping (v4.14)
+
+Every detection run now writes `review/ID_qc.json` and prints a third summary line, e.g.
+`P007: QC low_confidence_review (SWI-only anatomy (no T1)), pial edge agreement 0.9 mm, ...`.
+
+- **Status:** `ok`, `low_confidence_review` (SWI-only anatomy, label pial boundary > 1.5 mm from the SWI
+  cortex edge, bbregister cost > 0.8, slices > 2 mm) or `insufficient_quality` (the SWI is not stored with
+  the slice axis last, or labels cover < 90 % of the brain slices). The reviewer prints a warning.
+- **The thresholds are provisional and nothing uses the status yet.** No candidate is added, removed or
+  re-ranked because of it.
+- **Regional edge agreement** (left/right × inferior/middle/superior) shows where the T1 labels fit the
+  SWI worst; check those areas in freeview (QC step 4).
+- New columns (appended): `qc_status`, `rule_version` (which rule E1-E9 excluded a row, and the version
+  that introduced it), `n_pieces` (fragments merged into the candidate), and in `ID_excluded.csv`
+  `exclusion_confidence` (high / medium / low; low whenever the case QC is not ok).
+- Components removed before feature extraction (too small, < 2 slices, not elongated, no cortex nearby)
+  are listed in `work/ID_dropped.csv` (+ `.nii.gz`). They are not shown for review; the stress test uses
+  them to say why a synthetic lesion was missed.
+- Fixed: `extent_mm` was too small for candidates on the first slice of the volume, so a lesion at the
+  edge of a partial slab could be excluded as a "speck".
+
 ## 6. Validation plan (what makes this publishable)
 
 1. **Re-run P006 with v4.** First back up the v3 review: `mkdir -p ~/css_project/review/v3 && cp ~/css_project/review/P006_* ~/css_project/review/v3/`.
@@ -539,8 +560,8 @@ What their **Discussion** adds:
    - FLAIR: median robust z of CSF within 3 mm.
 6. **Ranking score (v4, untrained).**
    - √darkness × (0.25 + on-surface) × (0.25 + sheetness) × (0.5 + alignment) × (1 + tram).
-   - Multiplied by 0.5 for an artifact zone or a long structure, 0.7 for midline, 0.8 for
-     mirror > 0.6, and 0.3 for infratentorial. (`vein_tree_mm` is recorded only: on P006 the
+   - Multiplied by 0.5 for an artifact zone or a long structure, 0.7 for midline, and 0.3 for
+     infratentorial. (`mirror_dark_frac` is recorded only; it is not in the score.) (`vein_tree_mm` is recorded only: on P006 the
      dark-tube network merged brain-wide, 255 mm for most candidates.)
    - Darkness is square-rooted because veins were darker than cSS on P006.
 7. **Scoring.**
