@@ -525,6 +525,38 @@ Every detection run now writes `review/ID_qc.json` and prints a third summary li
 - Fixed: `extent_mm` was too small for candidates on the first slice of the volume, so a lesion at the
   edge of a partial slab could be excluded as a "speck".
 
+## 5i. Surface-following veins (v4.16, recorded only)
+
+A cortical vein running **along** the cortex is the false positive the definition-based features cannot
+remove: it is near the pial surface, follows it, and is elongated, like cSS. What differs is where it
+**goes**: a vein runs on and branches, towards a larger vein or a sinus; cSS ends.
+
+**New columns in `ID_candidates.csv` and `ID_excluded.csv`** (detector, every route):
+
+| Column | Meaning | cSS | Surface vein |
+|---|---|---|---|
+| `local_cont_max_mm`, `local_cont_min_mm` | dark continuation beyond each end of the candidate (forward only, ≤ 20 mm, in cortex/CSF) | ~0 | runs on at one or both ends |
+| `terminal_ends` | ends where it stops (< 3 mm) | 2 | 0–1 |
+| `local_branch_points` | junctions with ≥ 3 arms of ≥ 3 mm in the connected vessel network | 0 | ≥ 1 if it branches |
+| `cand_geodesic_mm`, `local_net_mm` | candidate length along itself; network length | | |
+
+**Pial-surface features** (recon-all cases only):
+`python ~/css_project/scripts/surface_features.py P012` → `review/P012_surface_features.csv` (candidates
+and excluded objects). The surface-to-SWI transform comes from `subjects/P012/mri/orig.mgz` and
+`work/P012_swi2t1.lta`; the script checks it against the SWI labels and **stops if the surfaces are more than
+2 mm off** (look at the registration in freeview first). Main column so far: `surf_normal_dist_mm` (negative =
+under the pial surface, positive = out in the CSF).
+
+**None of these is used by any rule or score.** They become useful only when expert labels (`VS` = surface
+vein, section 5b) show that they separate real surface veins from real cSS, across patients.
+
+**Expert sheet:** each row now also shows coronal and sagittal views (a vein that is a line on one plane is a
+dot on another). `--vessel-overlay` adds the detector's vessel map to the minIP; it is off by default because it
+is a detector output and can bias a blinded reader.
+
+**Stress test:** `--surface-veins K` (default 2) inserts veins that follow the cortex, some branching; the
+summary lists what happened to each decoy kind (sulcal / radial / surface).
+
 ## 6. Validation plan (what makes this publishable)
 
 1. **Re-run P006 with v4.** First back up the v3 review: `mkdir -p ~/css_project/review/v3 && cp ~/css_project/review/P006_* ~/css_project/review/v3/`.

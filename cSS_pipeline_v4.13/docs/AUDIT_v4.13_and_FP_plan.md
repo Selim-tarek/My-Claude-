@@ -544,3 +544,39 @@ The phantoms remain regression tests. None of them stands in for expert-labelled
   `labels/study_meta.csv` with a write-once split. Tested in `tests/check_labels.py`; no detector change.
   Next in the revised order: a patient-grouped evaluation script that reads these tables (FP per negative
   scan, top-k sensitivity, FROC, PR-AUC, per-protocol strata, patient-bootstrap CIs).
+- **v4.16** Surface-following veins as a hard-negative class (all recorded only): `css_vessel.py` bounded local
+  vein tracking in the detector, `surface_features.py` on the FreeSurfer pial surface, PH6 phantom
+  (surface vein + branch + sagittal sinus), `make_synthetic.py --surface-veins`, coronal/sagittal panels on
+  the expert sheet. See the prototype review below and `tests/check_surfvein.py`.
+
+## Review of the uploaded prototype `geodesic_vein_features.py` (v4.16)
+
+The direction (surface projection, bounded geodesic search, local skeleton) is right, and its structure
+(KD-tree projection, mesh adjacency, bounded Dijkstra, explicit transform) was reused. As written, the core
+features would not have measured anything about veins:
+
+| Feature | Problem | Evidence |
+|---|---|---|
+| `surface_continuation_*` | Dijkstra runs on the bare pial mesh, which is continuous everywhere: every candidate reaches the 25 mm limit from both ends, so the total is ~50 mm for all | sphere mesh probe: limit reached from every seed |
+| `surface_branch_vertices` | counts mesh vertices with ≥ 6 neighbours (normal triangle-mesh valence), not vessel branches | 72 % of vertices on a test mesh |
+| `surface_vein_evidence` | hand-weighted sum of the two features above plus local continuation: an untrained score built on constant inputs | — |
+| Candidate projection | all vertices within 2.5 mm of any voxel: picks up the opposite bank and neighbouring gyri, inflating geodesic length across the fundus | design |
+| Voxel → world | `affine @ (ijk + 0.5)`: NIfTI affines map voxel centres at integer indices, so everything shifted by half a voxel | code |
+| Local skeleton length | counts only axis-aligned neighbour pairs (`np.roll`, which also wraps around the volume edge) | code |
+| Forward/backward split | fraction of skeleton voxels on each side of the centroid × total length − seed/2: not a continuation | code |
+| Transform | docstring says it derives the transform from `orig.mgz`; the code raises an error instead. No check that the surface fits the SWI | code |
+| Fallback vessel mask | global median/MAD over the whole brain incl. CSF and an 80th-percentile ridge: a different, unvalidated vessel definition used silently | code |
+| Scope | candidates only; the excluded objects (where surface veins often end up) were not measured | code |
+
+What v4.16 does instead: continuation follows **dark or tubular voxels** (and dark pial vertices), forward from
+each end only; branch points are skeleton junctions with ≥ 3 arms of ≥ 3 mm; the surface transform is built
+from FreeSurfer files and its direction chosen by agreement with the labels, with a hard stop above 2 mm;
+excluded objects are measured; no combined score.
+
+Phantom results (PH6) and their limits: vein tracking separates the constructed surface vein (≥ 19 mm
+continuation into the sinus, 1 junction) from the phantom cSS (≤ 7 mm). `surf_normal_dist_mm` separates subpial
+cSS from out-of-surface veins (as `pial_dist_mm` already did). `surf_pieces`, `surf_dark_cont_mm` and
+`surf_exit_paths` do **not** separate on the phantom; they are kept as recorded columns, not tuned on a
+phantom. Random-walk surface decoys in the stress test are finite, so they test detection/exclusion fate, not
+continuation. Real anatomy (veins draining 50-100 mm to a sinus, dense dark networks, noise) is the open
+question - the `VS` labels are what will answer it.

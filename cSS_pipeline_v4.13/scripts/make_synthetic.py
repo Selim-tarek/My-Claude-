@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Insert synthetic cSS (and optional synthetic vein decoys) into a presumed cSS-negative host -> {HOST}S.
-usage: make_synthetic.py HOST [n_lesions=8] [depth=0.6] [seed=1] [--tram 0.4] [--veins 4] [--radial 2] [--legacy]
+usage: make_synthetic.py HOST [n_lesions=8] [depth=0.6] [seed=1] [--tram 0.4] [--veins 4] [--radial 2]
+                         [--surface-veins 2] [--legacy]
 
 v3 (realistic lesions; after the P006 stress test showed v2 lesions were too big and blob-like, so
 volume / branching / elongation separated them for the wrong reason):
@@ -12,6 +13,9 @@ volume / branching / elongation separated them for the wrong reason):
     lesions; written to work/HOSTS_veins.nii.gz (Cao et al. 2026: vessel decoys reduce false positives)
   - --radial K (v4.11): K transcortical / medullary vein decoys: straight tubes starting 2 mm out in the
     CSF and running perpendicular to the cortex 10-18 mm into the white matter (same veins file)
+  - --surface-veins K (v4.16): the hardest real mimic - K veins running ALONG the cortical surface in the
+    CSF within 1.5 mm of the cortex, 25-45 mm over many slices, 60 % with a side branch (8-15 mm) leaving
+    10-20 mm along; same veins file; kinds in work/HOSTS_vein_kinds.csv (sulcal / radial / surface)
 --legacy reproduces the v2 generator (flood-filled, thicker lesions) for comparison."""
 import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
 import sys, os, numpy as np, nibabel as nib
@@ -19,8 +23,9 @@ from scipy import ndimage as ndi
 
 flag = lambda f, d: type(d)(sys.argv[sys.argv.index(f) + 1]) if f in sys.argv else d
 TRAM, NVEIN, NRAD, LEGACY = flag("--tram", 0.4), flag("--veins", 0), flag("--radial", 0), "--legacy" in sys.argv
+NSURF = flag("--surface-veins", 0)
 # positional values given after a flag (e.g. "--veins 4") must not be read as lesion arguments
-pos = [a for i, a in enumerate(sys.argv[1:], 1) if not a.startswith("--") and not sys.argv[i - 1] in ("--tram", "--veins", "--radial")]
+pos = [a for i, a in enumerate(sys.argv[1:], 1) if not a.startswith("--") and not sys.argv[i - 1] in ("--tram", "--veins", "--radial", "--surface-veins")]
 host = pos[0]; N = int(pos[1]) if len(pos) > 1 else 8
 depth = float(pos[2]) if len(pos) > 2 else 0.6; seed = int(pos[3]) if len(pos) > 3 else 1
 rng = np.random.default_rng(seed)
@@ -153,6 +158,7 @@ if NVEIN and not LEGACY:
         if (truth[m] > 0).any() or (veins[m] > 0).any(): continue
         nv += 1; veins[m] = nv
         dark = np.maximum(dark, m * float(np.clip(depth + rng.uniform(-0.1, 0.1), 0.05, 0.9)))
+n_sulc = int(veins.max())
 
 # ---- transcortical / medullary vein decoys: straight tubes perpendicular to the cortex into the WM
 if NRAD and not LEGACY:
@@ -177,6 +183,44 @@ if NRAD and not LEGACY:
         nv += 1; veins[m] = nv
         dark = np.maximum(dark, m * float(np.clip(depth + rng.uniform(-0.1, 0.1), 0.05, 0.9)))
 
+# ---- surface-following vein decoys (v4.16): direction-persistent walk that stays in the CSF next to the cortex
+kinds = {v: ("sulcal" if v <= n_sulc else "radial") for v in range(1, int(veins.max()) + 1)}
+if NSURF and not LEGACY:
+    near_ctx = brain & ~cortex & ~np.isin(seg, [2, 41]) & \
+        (ndi.distance_transform_edt(~cortex, sampling=vox) <= 1.5) & (dist > 6.0)
+    sp = np.argwhere(near_ctx); n0 = int(veins.max()); ns = vt = 0
+    def walk(start, d, L):
+        pts, pnt = [], start.astype(float)
+        for _ in range(int(L / 0.4)):
+            for t in range(25):                      # keep direction, else turn to stay next to the cortex
+                dv = d + rng.normal(scale=0.08 if t == 0 else 0.5, size=3) / vox
+                dv /= np.linalg.norm(dv * vox) + 1e-9
+                q = pnt + dv * 0.4; ii = np.round(q).astype(int)
+                if (ii >= 0).all() and (ii < np.array(I.shape)).all() and near_ctx[tuple(ii)]:
+                    break
+            else:
+                break
+            d, pnt = dv, q; pts.append(np.round(pnt).astype(int))
+        return pts, d
+    while ns < NSURF and vt < 3000 and len(sp):
+        vt += 1
+        q = sp[rng.integers(len(sp))]
+        if truth[tuple(q)] or veins[tuple(q)] or any(np.linalg.norm((q - s_) * vox) < 15 for s_ in seeds): continue
+        d0 = rng.normal(size=3); d0[2] *= rng.uniform(0.3, 1.0); d0 /= np.linalg.norm(d0 * vox) + 1e-9
+        L = rng.uniform(25, 45); pts, _ = walk(q, d0, L)
+        if len(pts) * 0.4 < 0.7 * L: continue
+        if rng.random() < 0.6:                       # side branch 10-20 mm along the vein
+            k = min(int(rng.uniform(10, 20) / 0.4), len(pts) - 2)
+            dd = np.array(pts[k + 1], float) - np.array(pts[k], float)
+            br = np.cross(dd, rng.normal(size=3)); br /= np.linalg.norm(br * vox) + 1e-9
+            bp, _ = walk(np.array(pts[k]), 0.5 * dd / (np.linalg.norm(dd * vox) + 1e-9) + br, rng.uniform(8, 15))
+            pts += bp
+        m = np.zeros(I.shape, bool); m[tuple(np.array(pts).T)] = True
+        m = (ndi.distance_transform_edt(~m, sampling=vox) <= rng.uniform(0.5, 0.8)) & brain
+        if (truth[m] > 0).any() or (veins[m] > 0).any(): continue
+        ns += 1; veins[m] = n0 + ns; kinds[n0 + ns] = "surface"
+        dark = np.maximum(dark, m * float(np.clip(depth + rng.uniform(-0.1, 0.1), 0.05, 0.9)))
+
 Is = I * (1 - dark)
 Is += (rng.normal(0, 0.35 * sd_c, I.shape) * (dark > 0.05)).astype(np.float32)
 Is[brain] = np.maximum(Is[brain], 1.0)        # keep the brain mask unchanged
@@ -186,6 +230,8 @@ out = nib.Nifti1Image(Is.astype(np.float32), img.affine, img.header); out.set_da
 nib.save(out, f"{base}/data/{host}S_swi.nii")
 nib.save(nib.Nifti1Image(truth, img.affine), f"{base}/work/{host}S_truth.nii.gz")
 nib.save(nib.Nifti1Image(veins, img.affine), f"{base}/work/{host}S_veins.nii.gz")
+import pandas as pd
+pd.DataFrame(sorted(kinds.items()), columns=["vein_id", "kind"]).to_csv(f"{base}/work/{host}S_vein_kinds.csv", index=False)
 
 lut = {}
 lutp = os.path.join(os.environ.get("FREESURFER_HOME", ""), "FreeSurferColorLUT.txt")

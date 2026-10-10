@@ -197,6 +197,21 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   study_meta.py: labels/study_meta.csv, patient-level reference, QC/protocol fields from ID_qc.json, split
   dev/test fixed once assigned (--force logged). P006/P010/P011 must stay 'dev'. tests/check_labels.py.
 
+- v4.16 surface-following veins (hard-negative class VS), all RECORDED ONLY - no rule, score or tier uses them:
+  css_vessel.py local vein tracking in detect (cand_geodesic_mm, local_cont_max/min/total_mm, terminal_ends,
+  local_net_mm, local_branch_points/_per10mm): geodesic from each candidate end through vessel or dark (>=3 mm
+  pieces) voxels, forward 60 deg cone, <=20 mm, pial band only (WM noise faked continuation; noise voxels
+  chained through gap bridging until dark pieces <3 mm were dropped). surface_features.py (recon-all only):
+  candidates + excluded projected on lh/rh.pial; transform from orig.mgz + swi2t1.lta with the direction
+  CHOSEN by agreement with the label pial boundary (stops if > 2 mm); surf_normal_dist_mm, surf_pieces,
+  surf_band_continuity, geo_length_mm, geo_euclid_ratio, surf_dark_cont_mm, surf_exit_paths. Replaces the
+  uploaded geodesic_vein_features.py prototype (its mesh "continuation" always hit the 25 mm limit and its
+  "branches" were mesh vertices of valence >= 6). PH6 phantom (PH3 + branching surface vein -> sagittal sinus):
+  vein continues >= 19 mm, cSS <= 7 mm; normal distance cSS -0.74..-0.85 mm vs vein/sinus +0.53..+1.43 mm;
+  surf_pieces/dark_cont/exit_paths do NOT separate on the phantom. make_synthetic --surface-veins K
+  (default 2 in stress_test, decoy fate per kind); finite random-walk decoys cannot test continuation.
+  expert_sheet: coronal + sagittal panels; --vessel-overlay optional (off: detector output biases readers).
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.
@@ -215,7 +230,7 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
 ## How to test
 `bash tests/run_tests.sh` — v3 phantom (radial sulci, fissure, veins) end to end, fails if synthetic
 sensitivity < 4/8; v4 phantom (check_v4.py: sensitivity, score_v4 AUC ≥0.8, ICH Dice, sulcal 3/4).
-tests/check_labels.py (v4.15 label tools) and tests/check_qc.py (both called by run_tests.sh): v4.14 QC status, column contract, dropped log, extent at the
+tests/check_surfvein.py (v4.16, PH6), tests/check_labels.py (v4.15) and tests/check_qc.py (all called by run_tests.sh): v4.14 QC status, column contract, dropped log, extent at the
 volume edge, label-shift monotonicity, transposed-orientation detection.
 `bash tests/test_shell.sh` — run_css.sh / prep_anat.sh / run_all.sh flow with stubbed FreeSurfer.
 No FreeSurfer or patient data needed.

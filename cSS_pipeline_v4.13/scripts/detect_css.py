@@ -45,6 +45,8 @@ v4.14 bookkeeping (no change to which candidates are shown or excluded, except B
                            cortex nearby) - before v4.14 they vanished without a record
   new columns (appended): candidates qc_status, rule_version, n_pieces; excluded also exclusion_confidence
   B1 fix: extent_mm was underestimated for candidates touching the first array slice/row/column
+v4.16: bounded local vein tracking columns (css_vessel.py; recorded only - no rule or score uses them):
+  cand_geodesic_mm, local_cont_max/min/total_mm, terminal_ends, local_net_mm, local_branch_points/_per10mm
 """
 import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
 import sys, os, numpy as np, nibabel as nib, pandas as pd
@@ -54,14 +56,14 @@ from skimage.measure import regionprops
 from skimage.morphology import skeletonize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from css_common import base as _base, load_lut
-import css_qc
+import css_qc, css_vessel
 
 subj   = sys.argv[1]
 z_thr  = float(sys.argv[2]) if len(sys.argv) > 2 else -2.5
 r_pct  = float(sys.argv[3]) if len(sys.argv) > 3 else 85
 RIM_MM = float(sys.argv[4]) if len(sys.argv) > 4 else 3.0
 RANK   = os.environ.get("CSS_RANK", "v4")
-RULESET = "v4.14"                        # written to every row as rule_version
+RULESET = "v4.16"                        # written to every row as rule_version
 Z_LOW, R_PCT_LOW = -2.0, 80           # hysteresis (weak) thresholds
 GROW_Z = -1.5                          # 'dark' map used for region growing at scoring
 MIN_MM3, MIN_SLICES, MIN_ELONG = 25.0, 2, 2.0   # v4: 2.0 (tram-track = two parallel plates, ~2.4;
@@ -277,6 +279,15 @@ for n, sl_ in enumerate(ndi.find_objects(_vl), 1):
         _ok[n] = np.sqrt(sum(((s_.stop - s_.start) * v) ** 2 for s_, v in zip(sl_, vox))) >= VES_MIN_MM
 VES = _ok[_vl]; del _vl, _ok
 deep_wm = _wmm & (ndi.distance_transform_edt(_wmm, sampling=vox) >= 1.5)   # WM proper, not the cortex border
+# v4.16 dark structures for local vein tracking: dark voxels in pieces >= VES_MIN_MM (isolated noise voxels
+# below z -2 would otherwise chain up through the tracker's gap bridging); includes wide dark structures
+# such as a dural sinus, which are not Hessian tubes at sigma <= 1.6 mm
+_dl, _ = ndi.label(brain & (z < Z_LOW), structure=s3)
+_ok = np.zeros(int(_dl.max()) + 1, bool)
+for n, sl_ in enumerate(ndi.find_objects(_dl), 1):
+    if sl_ is not None:
+        _ok[n] = np.sqrt(sum(((s_.stop - s_.start) * v) ** 2 for s_, v in zip(sl_, vox))) >= VES_MIN_MM
+DARKS = _ok[_dl]; del _dl, _ok
 nib.save(nib.Nifti1Image(VES.astype(np.uint8), swi.affine), f"{base}/work/{subj}_vessels.nii.gz")   # for freeview
 vl, nv = ndi.label(vnet | (lab > 0), structure=s3)
 vext = np.zeros(nv + 1, np.float32)
@@ -495,6 +506,9 @@ for p in regionprops(lab, spacing=vox):
             fe = fq - end; ok_ = (fe @ (sgn * ua)) >= np.cos(np.radians(VES_CONE_DEG)) * np.linalg.norm(fe, axis=1)
             if ok_.any(): ves_run = max(ves_run, float(np.linalg.norm(fe[ok_], axis=1).max()))
     del dcm, gl_, reach, rwm
+    # v4.16 bounded local vein tracking along the vessel map (recorded only, css_vessel.py)
+    vt = css_vessel.local_tracking(cm, VES[vb], vox, VES_REACH_MM, band=(pial_sd[vb] > -PIAL_IN_MM) & ~np.isin(seg[vb], WM + DEEP),
+                                   dark=DARKS[vb])
     mdark = mirror_dark(pts)
     # microbleed vs cSS (Charidimou, AJNR 2016;37:E43): microbleeds are small (generally 2-5 mm),
     # round/oval and at least half surrounded by brain parenchyma - cSS lies on the surface / in CSF
@@ -569,7 +583,7 @@ for p in regionprops(lab, spacing=vox):
                      basal_frac=round(float((d_basal[pad][mm] <= BASAL_MM).mean()), 2),
                      vessel_ext_mm=round(ves_ext, 1), vessel_wm_mm=round(ves_wm, 1), vessel_run_mm=round(min(ves_run, VES_REACH_MM), 1), axis_normal=round(axn, 2),
                      score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label,
-                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1))
+                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1, **vt))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
 cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongation",
@@ -582,7 +596,9 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "flair_bright", "flair_ctx_z", "flair_ctx_bright", "css_evidence", "vein_evidence",
         "edge_contrast", "infra_frac", "basal_frac", "rel_height",
         "vessel_ext_mm", "vessel_wm_mm", "vessel_run_mm", "axis_normal", "score_v3", "score_v4", "accept",
-        "qc_status", "rule_version", "n_pieces"]                                   # v4.14, appended
+        "qc_status", "rule_version", "n_pieces",                                   # v4.14, appended
+        "cand_geodesic_mm", "local_cont_max_mm", "local_cont_min_mm", "local_cont_total_mm",  # v4.16,
+        "terminal_ends", "local_net_mm", "local_branch_points", "local_branch_per10mm"]       # recorded only
 
 # ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason
 # height is measured within the CEREBRUM (cortex + cerebral WM), so 0 = floor of the temporal/frontal

@@ -128,6 +128,10 @@ grep -q "RESULT qc OK" $T/qc.log || { echo "FAIL: v4.14 QC checks"; exit 1; }
 echo "== v4.15 expert labels: excluded objects on the sheet, fine codes, missed lesions, study metadata"
 python $ROOT/tests/check_labels.py | tee $T/labels.log | grep -v "^RESULT"
 grep -q "RESULT labels OK" $T/labels.log || { echo "FAIL: v4.15 label checks"; exit 1; }
+echo "== v4.16 surface-following branching vein draining to a sinus (PH6): vein tracking + pial-surface features"
+python $ROOT/tests/phantom_surfvein.py; python $S/align_seg.py PH6 > /dev/null
+python $ROOT/tests/check_surfvein.py | tee $T/surfvein.log | grep -E "^(vein tracking|surface features)"
+grep -q "RESULT surfvein OK" $T/surfvein.log || { cat $T/surfvein.log; echo "FAIL: v4.16 surface-vein checks"; exit 1; }
 echo "== stress test on a host with T1 anatomy (PH4)"
 python $S/stress_test.py --hosts PH4 --depths 0.6 --seeds 1 --tag t1host | grep -E "anatomy|darkness"
 echo; echo "ALL TESTS PASSED  (temp dir $T)"

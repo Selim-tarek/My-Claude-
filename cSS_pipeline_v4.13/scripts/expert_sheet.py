@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Blinded picture sheet of all candidates for an expert reader -> review/ID_expert_sheet.pdf
-usage: expert_sheet.py SUBJECT [--top N] [--seed 1] [--include-excluded]
+usage: expert_sheet.py SUBJECT [--top N] [--seed 1] [--include-excluded] [--vessel-overlay]
+  v4.16: every row also shows CORONAL and SAGITTAL views through the candidate (a vein that is a line
+      on one plane is a dot on another; cSS stays a band along the cortex in all three).
+  --vessel-overlay: outline the detector's vessel map (work/ID_vessels.nii.gz) in cyan on the minIP.
+      Off by default: it is a detector output, so it can bias a blinded reader.
   --include-excluded (v4.15): the automatically EXCLUDED objects (review/ID_excluded.csv) are mixed in,
       unmarked, so the expert's calls show whether an exclusion rule removed real cSS and give
       labelled hard negatives (surface veins, artifacts, ...). Recommended for validation cases.
@@ -52,6 +56,10 @@ key.to_csv(f"{base}/review/{subj}_expert_key.csv", index=False)
 mask_of = lambda n: (C == sheet[n][1]) if sheet[n][0] == "candidate" else (X == sheet[n][1])
 
 HW = int(round(20 / vox[0]))                                   # 40 mm window
+HWV = [int(round(20 / v)) for v in vox]                        # 40 mm in each axis (orthogonal views)
+VS = None
+if "--vessel-overlay" in sys.argv and os.path.exists(f"{base}/work/{subj}_vessels.nii.gz"):
+    VS = nib.as_closest_canonical(nib.load(f"{base}/work/{subj}_vessels.nii.gz")).get_fdata() > 0
 SLAB = max(1, int(round(4 / vox[2])))
 PER_PAGE = 4
 out = f"{base}/review/{subj}_expert_sheet.pdf"
@@ -65,9 +73,11 @@ with PdfPages(out) as pdf:
         "Definition used (Charidimou et al., Neurology 2017): well-defined, homogeneous\n"
         "hypointense curvilinear signal on SWI outlining the outer surface of the cortex,\n"
         "within the adjacent subarachnoid space, or both.\n\n"
-        "Each row: SWI zoom (40 mm)  |  same with the candidate outlined in red  |\n"
-        "8 mm minIP slab (veins appear as continuous branching tubes).\n"
-        "Image orientation: neurological (patient left on the left of the image).\n\n"
+        "Each row: axial SWI (40 mm) | same, candidate outlined in red | 8 mm axial minIP\n"
+        "(veins: continuous branching tubes) | coronal | sagittal (both outlined).\n"
+        "A vein that is a line on one plane is usually a dot on another.\n"
+        "Orientation: axial/coronal neurological (patient left on image left);\n"
+        "sagittal: anterior on the right.\n\n"
         "Candidates are in RANDOM order; no scores are shown.\n"
         "Write the codes on the answer grid (last page)."), fontsize=9.5, va="top", family="monospace")
     f.text(0.06, 0.18, "Also: please mark any cSS you see that has NO number (outline it in freeview,\n"
@@ -75,8 +85,8 @@ with PdfPages(out) as pdf:
     pdf.savefig(f); plt.close(f)
     nums = sorted(sheet)
     for p0 in range(0, len(nums), PER_PAGE):
-        f, axs = plt.subplots(PER_PAGE, 3, figsize=(8.27, 11.69))
-        f.subplots_adjust(left=0.08, right=0.98, top=0.96, bottom=0.03, wspace=0.04, hspace=0.12)
+        f, axs = plt.subplots(PER_PAGE, 5, figsize=(8.27, 11.69))
+        f.subplots_adjust(left=0.07, right=0.99, top=0.96, bottom=0.03, wspace=0.05, hspace=0.12)
         for r in range(PER_PAGE):
             for a in axs[r]: a.axis("off")
             if p0 + r >= len(nums): continue
@@ -94,10 +104,25 @@ with PdfPages(out) as pdf:
                 if outline and ms.any():
                     src = m[i0:i1, j0:j1, k0:k1].any(axis=2).T if c == 2 else ms
                     a.contour(src.astype(float), levels=[0.5], colors="red", linewidths=0.9)
+                if c == 2 and VS is not None and VS[i0:i1, j0:j1, k0:k1].any():
+                    a.contour(VS[i0:i1, j0:j1, k0:k1].any(axis=2).T.astype(float), levels=[0.5],
+                              colors="cyan", linewidths=0.5)
+            # coronal (x-z) and sagittal (y-z) through the candidate centre, 40 mm windows, true aspect
+            cjj, cii = int(round(cj)), int(round(ci))
+            if not m[:, cjj, :].any(): cjj = int(np.bincount(pts[:, 1]).argmax())
+            if not m[cii, :, :].any(): cii = int(np.bincount(pts[:, 0]).argmax())
+            ka, kb = max(kc - HWV[2], 0), min(kc + HWV[2], I.shape[2])
+            ia, ib = max(int(ci) - HWV[0], 0), min(int(ci) + HWV[0], I.shape[0])
+            ja, jb = max(int(cj) - HWV[1], 0), min(int(cj) + HWV[1], I.shape[1])
+            for c, (img, msk, asp) in ((3, (I[ia:ib, cjj, ka:kb], m[ia:ib, cjj, ka:kb], vox[2] / vox[0])),
+                                       (4, (I[cii, ja:jb, ka:kb], m[cii, ja:jb, ka:kb], vox[2] / vox[1]))):
+                a = axs[r][c]; a.imshow(img.T, cmap="gray", origin="lower", vmin=lo, vmax=hi, aspect=asp)
+                if msk.any(): a.contour(msk.T.astype(float), levels=[0.5], colors="red", linewidths=0.9)
             axs[r][0].text(-0.06, 0.5, f"{n}", transform=axs[r][0].transAxes, fontsize=16, weight="bold",
                            ha="right", va="center")
             if r == 0 or p0 + r == p0:
-                for c, t in enumerate(("SWI", "outlined", "minIP 8 mm")): axs[r][c].set_title(t, fontsize=9)
+                for c, t in enumerate(("axial", "outlined", "minIP 8 mm", "coronal", "sagittal")):
+                    axs[r][c].set_title(t, fontsize=9)
         pdf.savefig(f); plt.close(f)
     # answer grid
     f = plt.figure(figsize=(8.27, 11.69)); f.text(0.08, 0.95, f"Answers - {subj}   (codes on page 1, e.g. C, VS:4)", fontsize=14, weight="bold")
