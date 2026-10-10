@@ -353,6 +353,36 @@ Make it quick for them:
 5. `feature_report.py` now uses the expert calls automatically when they exist. Use
    `--source reader` to use yours instead.
 
+### Labels for validation (v4.15)
+
+The answers are the reference standard for every later threshold and model, so collect them like this:
+
+1. **Assign the split first**, before anyone looks at the pipeline output:
+   `python ~/css_project/scripts/study_meta.py P012 --split test` (or `dev`). It cannot be changed later
+   without `--force`. Studies already used to design rules (P006, P010, P011) are `dev`.
+2. **Sheet with the excluded objects mixed in** (unmarked), so the expert's calls also check the exclusion
+   rules and give labelled hard negatives:
+   `python ~/css_project/scripts/expert_sheet.py P012 --include-excluded`
+3. **Fine-grained codes** (page 1 of the sheet), optional confidence 1-5:
+   C cSS · V vein · **VS vein along the cortical surface** · VC mid-sulcal vein · VT transcortical vein ·
+   VX vein at a sinus · TV thrombosed vein · A air-bone artifact · AM motion artifact · N normal/other ·
+   NI normal iron-rich cortex · MB microbleed · CA calcification · SAH acute cSAH · LN laminar necrosis ·
+   HI haemorrhagic infarct · IS infratentorial siderosis · H contiguous with ICH · U uncertain.
+   `python ~/css_project/scripts/expert_import.py P012 expertA --letters "1C:5 2VS:4 3VX 4A ..."`
+   Plain C / V / N / H / U still work. A blinded re-read weeks later: same command with `--session 2`.
+   Every answer goes into `labels/candidate_labels.csv`; if the expert calls an *excluded* object cSS,
+   the import warns: that exclusion rule removed real cSS.
+4. **Missed cSS**: the expert outlines every cSS that has no number (freeview on the SWI, saved as
+   `labels/P012_missed_expertA.nii.gz`), then
+   `python ~/css_project/scripts/label_missed.py P012 expertA` records, for each outline, whether it was
+   excluded (which rule), dropped before feature extraction (which gate) or never generated. Without
+   these outlines sensitivity cannot be measured.
+5. **Patient-level reference**: `study_meta.py P012 --status pos --ref-L 1 --ref-R 2 --motion 0`.
+   Protocol and QC fields are filled from `review/P012_qc.json`.
+
+The `VS` (surface vein) labels are the hard-negative set for the vein-tracking and surface features
+planned next; please label veins with the specific code whenever possible.
+
 ## 5c. Synthetic lesions (v4.10)
 
 `make_synthetic.py` inserts artificial cSS into a cSS-negative scan, so we know exactly where the

@@ -530,3 +530,17 @@ The phantoms remain regression tests. None of them stands in for expert-labelled
 - No inter-rater study of the pipeline output exists yet.
 - The tool is research software for candidate generation with mandatory human review. It is not
   clinically validated and must not be used for clinical decisions.
+
+---
+
+## Progress log
+
+- **v4.14** Stage 1 (case QC, bookkeeping, extent fix): see "Stage 1 result" in section 6.
+- **v4.15** Expert-label tooling (first item of the revised order agreed after the audit: labels before
+  thresholds). Implements the section 4 schema: `css_common.LABELS` (fine codes incl. `VS` surface vein,
+  `VX` sinus-adjacent vein, `A` air-bone artifact, `NI` normal iron cortex, each mapped to the old coarse
+  call), `expert_sheet.py --include-excluded`, `expert_import.py --session` → `labels/candidate_labels.csv`,
+  `label_missed.py` → `labels/missed_lesions.csv` (fate per missed outline), `study_meta.py` →
+  `labels/study_meta.csv` with a write-once split. Tested in `tests/check_labels.py`; no detector change.
+  Next in the revised order: a patient-grouped evaluation script that reads these tables (FP per negative
+  scan, top-k sensitivity, FROC, PR-AUC, per-protocol strata, patient-bootstrap CIs).

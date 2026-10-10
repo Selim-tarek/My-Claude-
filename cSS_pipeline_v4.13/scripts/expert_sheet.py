@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Blinded picture sheet of all candidates for an expert reader -> review/ID_expert_sheet.pdf
-usage: expert_sheet.py SUBJECT [--top N] [--seed 1]
+usage: expert_sheet.py SUBJECT [--top N] [--seed 1] [--include-excluded]
+  --include-excluded (v4.15): the automatically EXCLUDED objects (review/ID_excluded.csv) are mixed in,
+      unmarked, so the expert's calls show whether an exclusion rule removed real cSS and give
+      labelled hard negatives (surface veins, artifacts, ...). Recommended for validation cases.
 
 Each candidate gets a SHEET NUMBER in random order (the detector's rank is hidden, so the
 order cannot bias the expert) and one row of pictures: SWI zoom (40 mm), the same with the
@@ -16,7 +19,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, FP
+from css_common import base as _base, FP, LABEL_HELP
 
 subj = sys.argv[1]
 top = int(sys.argv[sys.argv.index("--top") + 1]) if "--top" in sys.argv else None
@@ -29,12 +32,24 @@ vox = swi.header.get_zooms()[:3]
 br = I > 0
 lo, hi = np.percentile(I[br], [1, 99]) if br.any() else (I.min(), I.max())
 df = pd.read_csv(f"{base}/review/{subj}_candidates.csv")
-ids = df.cand_id.astype(int).tolist()[:top]
-order = np.random.default_rng(seed).permutation(len(ids))
-sheet = {n + 1: ids[k] for n, k in enumerate(order)}          # sheet number -> cand_id
-key = df.set_index("cand_id").loc[[sheet[n] for n in sorted(sheet)], FP].reset_index()
-key.insert(0, "sheet_no", sorted(sheet))
+objs = [("candidate", int(c)) for c in df.cand_id.astype(int).tolist()[:top]]
+X = None
+if "--include-excluded" in sys.argv and os.path.exists(f"{base}/review/{subj}_excluded.csv"):
+    xdf = pd.read_csv(f"{base}/review/{subj}_excluded.csv")
+    if len(xdf):
+        X = nib.as_closest_canonical(nib.load(f"{base}/review/{subj}_excluded.nii.gz")).get_fdata().astype(int)
+        objs += [("excluded", int(e)) for e in xdf.excl_id]
+order = np.random.default_rng(seed).permutation(len(objs))
+sheet = {n + 1: objs[k] for n, k in enumerate(order)}          # sheet number -> (list, id)
+rows = []
+for n in sorted(sheet):
+    lst, i = sheet[n]
+    r = (df.set_index("cand_id") if lst == "candidate" else xdf.set_index("excl_id")).loc[i]
+    rows.append(dict(sheet_no=n, cand_id=i if lst == "candidate" else None, **{f: r[f] for f in FP},
+                     list=lst, obj_id=i))
+key = pd.DataFrame(rows, columns=["sheet_no", "cand_id"] + FP + ["list", "obj_id"])
 key.to_csv(f"{base}/review/{subj}_expert_key.csv", index=False)
+mask_of = lambda n: (C == sheet[n][1]) if sheet[n][0] == "candidate" else (X == sheet[n][1])
 
 HW = int(round(20 / vox[0]))                                   # 40 mm window
 SLAB = max(1, int(round(4 / vox[2])))
@@ -42,13 +57,11 @@ PER_PAGE = 4
 out = f"{base}/review/{subj}_expert_sheet.pdf"
 with PdfPages(out) as pdf:
     f = plt.figure(figsize=(8.27, 11.69)); f.text(0.08, 0.92, f"cSS expert reading - {subj}", fontsize=16, weight="bold")
-    f.text(0.08, 0.30, (
-        "For each numbered candidate decide:\n\n"
-        "   C  = cortical superficial siderosis\n"
-        "   V  = vein\n"
-        "   N  = normal / other (artifact, normal dark cortex, ...)\n"
-        "   H  = siderosis contiguous with a lobar ICH\n"
-        "   U  = unsure\n\n"
+    f.text(0.06, 0.86, (
+        "For each numbered candidate write one code (optionally ':1'-':5' = confidence,\n"
+        "5 = certain; e.g. 12VS:4):\n\n"
+        + "".join(f"   {c:<22s}{t}\n" for c, t in LABEL_HELP) + "\n"
+        "Single letters C / V / N / H / U are enough if you prefer.\n\n"
         "Definition used (Charidimou et al., Neurology 2017): well-defined, homogeneous\n"
         "hypointense curvilinear signal on SWI outlining the outer surface of the cortex,\n"
         "within the adjacent subarachnoid space, or both.\n\n"
@@ -56,7 +69,9 @@ with PdfPages(out) as pdf:
         "8 mm minIP slab (veins appear as continuous branching tubes).\n"
         "Image orientation: neurological (patient left on the left of the image).\n\n"
         "Candidates are in RANDOM order; no scores are shown.\n"
-        "Write the letters on the answer grid (last page)."), fontsize=11, va="bottom", family="monospace")
+        "Write the codes on the answer grid (last page)."), fontsize=9.5, va="top", family="monospace")
+    f.text(0.06, 0.18, "Also: please mark any cSS you see that has NO number (outline it in freeview,\n"
+           "or note slice and location) - it is needed to measure what the detector misses.", fontsize=10)
     pdf.savefig(f); plt.close(f)
     nums = sorted(sheet)
     for p0 in range(0, len(nums), PER_PAGE):
@@ -65,7 +80,7 @@ with PdfPages(out) as pdf:
         for r in range(PER_PAGE):
             for a in axs[r]: a.axis("off")
             if p0 + r >= len(nums): continue
-            n = nums[p0 + r]; m = C == sheet[n]
+            n = nums[p0 + r]; m = mask_of(n)
             if not m.any(): continue
             pts = np.argwhere(m); ci, cj = pts[:, 0].mean(), pts[:, 1].mean()
             kc = int(np.clip(np.bincount(pts[:, 2]).argmax(), 0, I.shape[2] - 1))
@@ -85,12 +100,13 @@ with PdfPages(out) as pdf:
                 for c, t in enumerate(("SWI", "outlined", "minIP 8 mm")): axs[r][c].set_title(t, fontsize=9)
         pdf.savefig(f); plt.close(f)
     # answer grid
-    f = plt.figure(figsize=(8.27, 11.69)); f.text(0.08, 0.95, f"Answers - {subj}   (C / V / N / H / U)", fontsize=14, weight="bold")
+    f = plt.figure(figsize=(8.27, 11.69)); f.text(0.08, 0.95, f"Answers - {subj}   (codes on page 1, e.g. C, VS:4)", fontsize=14, weight="bold")
     f.text(0.08, 0.925, "Reader: ____________________    Date: ____________", fontsize=10)
     cols = 4; rows = int(np.ceil(len(nums) / cols))
     for n in nums:
         c, r = (n - 1) // rows, (n - 1) % rows
-        f.text(0.08 + c * 0.22, 0.89 - r * (0.85 / max(rows, 1)), f"{n:>3}  ____", fontsize=10, family="monospace")
+        f.text(0.08 + c * 0.22, 0.89 - r * (0.85 / max(rows, 1)), f"{n:>3}  ______", fontsize=10, family="monospace")
     pdf.savefig(f); plt.close(f)
-print(f"{subj}: expert sheet with {len(nums)} candidates -> {out}\n"
+print(f"{subj}: expert sheet with {len(nums)} objects ({sum(1 for v in sheet.values() if v[0] == 'excluded')} "
+      f"excluded mixed in) -> {out}\n"
       f"      key (do NOT give to the expert): {base}/review/{subj}_expert_key.csv")

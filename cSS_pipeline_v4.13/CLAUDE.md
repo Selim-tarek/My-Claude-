@@ -187,6 +187,16 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   label shifts 0 / 0.8 / 1.6 / 3.2 mm (only the 3.2 mm shift crosses the 1.5 mm threshold). Not yet run on
   P006/P011.
 
+- v4.15 expert-label tooling (plan section 4; no detector change): css_common.LABELS = fine codes C, V/VS/VC/VT/VX
+  (surface / sulcal / transcortical / sinus veins), TV, A/AM, N/NI, MB, CA, SAH, LN, HI, IS, H, U, each mapped to
+  the old coarse call (cSS/Vein/Normal/Artifact/Near ICH/Unsure) so review, feature_report, mark/score are
+  unchanged; optional :1-:5 confidence. expert_sheet --include-excluded mixes excluded objects in, unmarked.
+  expert_import --session N writes labels/candidate_labels.csv (long table incl. excluded objects, defaulted
+  flag) and warns if an excluded object is called cSS. label_missed.py: reader-drawn outlines of cSS with no
+  number -> labels/missed_lesions.csv with fate shown / excluded (rule id) / dropped (gate) / not generated.
+  study_meta.py: labels/study_meta.csv, patient-level reference, QC/protocol fields from ID_qc.json, split
+  dev/test fixed once assigned (--force logged). P006/P010/P011 must stay 'dev'. tests/check_labels.py.
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.
@@ -205,7 +215,7 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
 ## How to test
 `bash tests/run_tests.sh` — v3 phantom (radial sulci, fissure, veins) end to end, fails if synthetic
 sensitivity < 4/8; v4 phantom (check_v4.py: sensitivity, score_v4 AUC ≥0.8, ICH Dice, sulcal 3/4).
-tests/check_qc.py (called by run_tests.sh): v4.14 QC status, column contract, dropped log, extent at the
+tests/check_labels.py (v4.15 label tools) and tests/check_qc.py (both called by run_tests.sh): v4.14 QC status, column contract, dropped log, extent at the
 volume edge, label-shift monotonicity, transposed-orientation detection.
 `bash tests/test_shell.sh` — run_css.sh / prep_anat.sh / run_all.sh flow with stubbed FreeSurfer.
 No FreeSurfer or patient data needed.

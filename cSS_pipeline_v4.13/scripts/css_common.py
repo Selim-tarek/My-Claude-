@@ -64,3 +64,69 @@ def save_calls(b, subj, cand, calls):
     c = cand.set_index("cand_id")
     rows = [dict(cand_id=k, call=v, **{f: c.loc[k, f] for f in FP}) for k, v in sorted(calls.items())]
     pd.DataFrame(rows, columns=["cand_id", "call"] + FP).to_csv(f"{b}/review/{subj}_calls.csv", index=False)
+
+
+# ---- v4.15 expert label vocabulary (docs/AUDIT_v4.13_and_FP_plan.md section 4)
+# sheet code -> (fine label, coarse call). The coarse call is what review_css.py / feature_report.py /
+# mark_css.py already understand, so old single letters (C V N H U) keep their meaning.
+LABELS = {
+    "C":   ("cSS", "cSS"),
+    "V":   ("vein_unspecified", "Vein"),
+    "VS":  ("vein_surface", "Vein"),            # cortical vein running ALONG the pial surface (hard negative)
+    "VC":  ("vein_sulcal", "Vein"),             # vein in the middle of the sulcal CSF
+    "VT":  ("vein_transcortical", "Vein"),      # medullary / transcortical, perpendicular to the cortex
+    "VX":  ("vein_sinus_adjacent", "Vein"),     # vein joining / next to a dural sinus
+    "TV":  ("thrombosed_vein", "Vein"),
+    "A":   ("artifact_airbone", "Artifact"),    # skull base / orbitofrontal / temporal pole susceptibility
+    "AM":  ("artifact_motion", "Artifact"),     # motion, ghosting, Gibbs, registration
+    "N":   ("normal_other", "Normal"),
+    "NI":  ("normal_iron_cortex", "Normal"),    # e.g. iron-rich motor cortex
+    "MB":  ("microbleed", "Normal"),
+    "CA":  ("calcification", "Normal"),
+    "SAH": ("acute_cSAH", "Normal"),
+    "LN":  ("laminar_necrosis", "Normal"),
+    "HI":  ("haemorrhagic_infarct", "Normal"),
+    "IS":  ("infratentorial_SS", "Normal"),
+    "H":   ("ICH_related", "Near ICH"),
+    "U":   ("uncertain", "Unsure"),
+}
+LABEL_HELP = [("C", "cortical superficial siderosis"),
+              ("V / VS / VC / VT / VX", "vein: any / along surface / mid-sulcus / transcortical / at sinus"),
+              ("TV", "thrombosed vein"),
+              ("A / AM", "artifact: air-bone susceptibility / motion, ghosting"),
+              ("N / NI", "normal or other / normal iron-rich cortex"),
+              ("MB / CA", "microbleed / calcification"),
+              ("SAH", "acute convexity SAH (FLAIR-bright sulcus)"),
+              ("LN / HI", "laminar necrosis / haemorrhagic infarct"),
+              ("IS", "infratentorial (classical) superficial siderosis"),
+              ("H", "siderosis contiguous with a lobar ICH"),
+              ("U", "uncertain")]
+
+
+def parse_answer(tok):
+    """'12VS' or '12VS:4' -> (12, code, confidence or None); raises ValueError"""
+    import re
+    m = re.fullmatch(r"(\d+)([A-Z]+)(?::([1-5]))?", tok.strip().upper())
+    if not m or m.group(2) not in LABELS:
+        raise ValueError(f"cannot read '{tok}' (e.g. 12C, 12VS, 12VS:4; codes {', '.join(LABELS)})")
+    return int(m.group(1)), m.group(2), (int(m.group(3)) if m.group(3) else None)
+
+
+def cand_uid(subj, r):
+    """stable candidate identity across detector re-runs (same fingerprint as match_calls)"""
+    return f"{subj}:{int(r['vox_i'])}:{int(r['vox_j'])}:{int(r['vox_k'])}:{float(r['volume_mm3']):g}"
+
+
+def append_rows(path, rows, key):
+    """append rows to a CSV table, replacing earlier rows with the same key columns"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    new = pd.DataFrame(rows)
+    if os.path.exists(path):
+        old = pd.read_csv(path)
+        if len(new):
+            k_old = old[key].astype(str).agg("|".join, axis=1)
+            k_new = set(new[key].astype(str).agg("|".join, axis=1))
+            old = old[~k_old.isin(k_new)]
+        new = pd.concat([old, new], ignore_index=True)
+    new.to_csv(path, index=False)
+    return new
