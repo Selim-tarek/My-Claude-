@@ -73,6 +73,7 @@ HESS_SIGMAS_MM = (0.8, 1.6)            # 3-D shape analysis scales
 # matter = medullary / transcortical vein) and runs perpendicular to the cortex is a vessel, not cSS
 VES_WM_MM = 15.0        # how deep under the cortical band the vessel map reaches
 VES_REACH_MM = 20.0     # vessel continuation is measured up to this distance (bounded: vein_tree saturated)
+OFF_CTX_FRAC, OFF_PIAL_MM = 0.30, 0.30   # v4.12 "off the cortex" exclusion (T1 anatomy only)
 VES_WM_Z = -3.0         # WM vessel voxels: this many SD darker than the white matter
 VES_MIN_MM = 3.0        # vessel pieces shorter than this are noise
 VES_CONE_DEG = 30.0     # WM continuation counts only inside this cone, straight on from the candidate
@@ -587,6 +588,12 @@ def exclusion(r):
     if r["vessel_wm_mm"] >= VES_EXCL_WM_MM and r["axis_normal"] >= VES_EXCL_AXIS \
             and not (np.isfinite(tram_) and tram_ >= 0.4):     # clear tram-track (cSS ~0.9) overrides
         return "vessel: continues as a tube into the white matter, runs perpendicular to the cortex"
+    # v4.12 off the cortex (T1 anatomy only): cSS coats the pial surface, so it always touches the cortex.
+    # A dark line lying wholly out in the sulcal CSF is a vein. Known P006 cSS: cortex_frac >= 0.55,
+    # pial_dist <= -0.57; P011 false positives: median 0.16 / +1.22 mm -> thresholds with a wide margin
+    if T1_ANAT and r["cortex_frac"] < OFF_CTX_FRAC and r["pial_dist_mm"] > OFF_PIAL_MM \
+            and not (np.isfinite(tram_) and tram_ >= 0.2):
+        return "off the cortex: lies in the sulcal CSF without touching the cortex (vein)"
     if FULL_BOTTOM and r["artifact_zone"] and r["rel_height"] < 0.4:
         return "skull-base susceptibility artifact zone"
     if np.isfinite(r["edge_contrast"]) and r["edge_contrast"] < MIN_EDGE_SD:

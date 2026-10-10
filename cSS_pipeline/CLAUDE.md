@@ -157,6 +157,12 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
 - rule_test.py: per-feature thresholds just beyond the most extreme KNOWN lesion (P006 6 foci) -> FPs
   removed on negatives (P011), synthetic lesions lost. Shortlist only (n=6).
 
+- rule_test P006 (6 known) vs P011 (26 FP): best safe rules score_v4<1.03 (22 FP, 4/34 synth lost),
+  pial_dist>-0.08 / cortex_dist>0.27 / cortex_frac<0.46 (20 FP, 6-8/34 synth), bank_frac<0.45 (14, 2/34),
+  edge<2.17 (14, 3/34). Known cSS: cortex_frac >=0.55, pial <=-0.57, mirror median .17 (FP .93), all
+  score_v4 >=1.24. v4.12 adopts a CONSERVATIVE definition rule "off the cortex": T1 only, cortex_frac<0.30
+  AND pial_dist>0.30 AND tram<0.2. score threshold not adopted (ranking, would cut synthetic).
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.

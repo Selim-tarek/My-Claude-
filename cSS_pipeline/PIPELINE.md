@@ -429,6 +429,18 @@ python ~/css_project/scripts/rule_test.py --pos P006 --old ~/css_project/review/
 - A rule is worth adopting only if it removes many false positives, loses few synthetic lesions and
   makes radiological sense. With 6 known lesions, a "safe" rule can be safe by chance.
 
+## 5f. "Off the cortex" exclusion (v4.12, chosen with rule_test.py)
+
+cSS coats the pial surface, so it always touches the cortex. A dark line lying wholly out in the
+sulcal CSF is a vein. **Excluded** when all of these hold (T1 anatomy only):
+- `cortex_frac` < 0.30 (less than 30 % of the candidate is in cortex);
+- `pial_dist_mm` > +0.30 (centre lies outside the pial surface);
+- no tram-track (`tram_frac` < 0.2).
+
+Evidence (rule_test, 6 known P006 foci vs 26 P011 false positives): known cSS have cortex_frac ≥ 0.55
+and pial_dist ≤ −0.57 mm; false positives have medians 0.16 and +1.22 mm. The thresholds sit
+well away from every known lesion, deliberately looser than the tightest "safe" cut-offs.
+
 ## 6. Validation plan (what makes this publishable)
 
 1. **Re-run P006 with v4.** First back up the v3 review: `mkdir -p ~/css_project/review/v3 && cp ~/css_project/review/P006_* ~/css_project/review/v3/`.
