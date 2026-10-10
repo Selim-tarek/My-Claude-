@@ -415,6 +415,20 @@ radial decoys are excluded.
 - Thresholds are set on phantoms, not on real patients. **Run `check_known.py` on P006** to confirm that the
   known foci are not excluded as "vessel".
 
+## 5e. Choosing the next exclusion rule from your own data (rule_test.py)
+
+Use known cSS (P006's 6 foci) and cSS-negative patients (P011) to see which single-feature rule
+would remove false positives while keeping every known lesion:
+```
+python ~/css_project/scripts/rule_test.py --pos P006 --old ~/css_project/review/v3/P006_candidates.nii.gz \
+   --ids 3,4,5,13,18,19 --neg P011 --synthetic ~/css_project/results/stress_p011_v411_features.csv
+```
+- The first table compares each feature between the known lesions and the false positives.
+- The second table lists rules whose threshold sits just beyond the most extreme known lesion, with
+  how many false positives each removes, and how many synthetic lesions it would lose.
+- A rule is worth adopting only if it removes many false positives, loses few synthetic lesions and
+  makes radiological sense. With 6 known lesions, a "safe" rule can be safe by chance.
+
 ## 6. Validation plan (what makes this publishable)
 
 1. **Re-run P006 with v4.** First back up the v3 review: `mkdir -p ~/css_project/review/v3 && cp ~/css_project/review/P006_* ~/css_project/review/v3/`.

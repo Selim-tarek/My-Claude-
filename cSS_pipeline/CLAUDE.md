@@ -148,6 +148,15 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   make_synthetic --radial K (transcortical decoys), stress_test reports missed-lesion reasons and decoy fate.
   Not yet checked on real data: run check_known on P006, stress on P011.
 
+- v4.11 on real data: P006 6/6 known kept, 70 -> 66 candidates (4 "vessel"); P011 unchanged (26, no
+  vessel exclusions); P011 stress 94/75/25 %, AUC .94/.98/.96, missed lesions 18 not detected + 3 "vein",
+  0 "vessel" (rule is safe but rarely fires). Decoys mostly not detected (31/36) -> decoy test
+  uninformative on P011. Real FPs lie ALONG the surface: axis_normal higher in synthetic cSS (AUC .82,
+  synthetic closed-sulcus artifact), vessel_wm .46, vessel_run .32. vein_tree (.23) and mirror (.12)
+  separate synthetic from real FPs, but known P006 cSS also have vein_tree 255 -> partly synthetic artifact.
+- rule_test.py: per-feature thresholds just beyond the most extreme KNOWN lesion (P006 6 foci) -> FPs
+  removed on negatives (P011), synthetic lesions lost. Shortlist only (n=6).
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.

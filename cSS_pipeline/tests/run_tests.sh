@@ -42,6 +42,8 @@ echo "== v4 phantom: tram-track / convexity cSS vs tubular & surface veins, ICH,
 python $ROOT/tests/phantom_v4.py PH3 1; python $S/align_seg.py PH3 > /dev/null
 python $S/detect_css.py PH3 | head -1
 python $ROOT/tests/check_v4.py PH3 | tail -3
+echo "== rule_test (known lesions vs a negative scan)"
+python $S/rule_test.py --pos PH3 --old $T/work/PH3_truth.nii.gz --ids 1,2,3,4,5,6 --neg PH1 | grep -q "known cSS (PH3)" || { echo "FAIL: rule_test"; exit 1; }
 python $S/score_css.py PH3 --truth > $T/score_v4.log
 grep -q "3/4" $T/score_v4.log && grep -q "sulcal (Destrieux)" $T/score_v4.log || { cat $T/score_v4.log; echo "FAIL: sulcal score on PH3 should be 3/4 (L1 + R2)"; exit 1; }
 grep -A3 "cSS multifocality" $T/score_v4.log
