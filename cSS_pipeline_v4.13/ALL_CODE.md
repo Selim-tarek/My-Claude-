@@ -1,4 +1,4 @@
-# All code — cSS pipeline v4
+# All code — cSS pipeline v4.16
 
 Generated from the files below; the files are authoritative.
 
@@ -139,14 +139,19 @@ if [ $RECON -eq 1 ] || [ -f $SUBJECTS_DIR/$S/mri/aparc.a2009s+aseg.mgz ]; then
   echo "[c] register SWI -> T1 (bbregister, boundary-based, T2*-like contrast)"
   bbregister --s $S --mov $SWI --reg $W/${S}_swi2t1.lta --t2 --init-coreg > $W/${S}_bbreg.log 2>&1
   grep -i "min cost" $W/${S}_bbreg.log | tail -1 || true
+  REGM=bbregister; COST=$(awk 'NR==1{print $1}' $W/${S}_swi2t1.lta.mincost 2>/dev/null || true)
 else
   echo "[b] SynthSeg --parc --robust on the T1"
   mri_synthseg --i $B/data/${S}_t1.nii.gz --o $W/${S}_t1synthseg.nii.gz --parc --robust --threads 8 > /dev/null
   LAB=$W/${S}_t1synthseg.nii.gz
   echo "[c] register SWI -> T1 (mri_coreg, rigid, mutual information)"
   mri_coreg --mov $SWI --ref $W/${S}_t1_brain.nii.gz --reg $W/${S}_swi2t1.lta --dof 6 > $W/${S}_coreg.log 2>&1
+  REGM=mri_coreg; COST=""
 fi
 
+# v4.14 QC: registration method + cost (bbregister mincost; mri_coreg reports none) -> review/ID_qc.json
+echo "$COST" | grep -Eq '^[0-9.eE+-]+$' || COST=null
+printf '{"method": "%s", "cost": %s}\n' "$REGM" "$COST" > $W/${S}_reg.json
 echo "[d] labels -> SWI grid (nearest neighbour)"
 mri_vol2vol --mov $SWI --targ $LAB --lta $W/${S}_swi2t1.lta --inv --interp nearest \
   --o $W/${S}_t1seg_swispace.nii.gz > /dev/null
@@ -207,6 +212,152 @@ fi
 cp $SRC/*.py $SRC/*.sh $B/scripts/ && chmod +x $B/scripts/*.sh $B/scripts/*.py
 grep -q 'css_project/scripts' ~/.zshrc || echo 'export PATH="$HOME/css_project/scripts:$PATH"' >> ~/.zshrc
 echo "installed to $B/scripts  - open a new Terminal window"
+```
+
+## scripts/agreement.py
+
+```python
+#!/usr/bin/env python3
+"""Reproducibility statistics as in van Harten et al. (NeuroImage Clin 2023;38:103447).
+usage: agreement.py --a DIR_A --b DIR_B [--col grown_volume_mm3] [--plot out.png]
+       agreement.py --vs-score DIR [--col surface_mm2] [--plot out.png]
+  DIR = a copy of the review folder after one complete scoring session, e.g.
+        cp -R ~/css_project/review ~/css_project/review_reader1_session1
+        (it must contain css_scores.csv and, for Dice, ID_css_mask.nii.gz)
+  --a/--b      two sessions of one reader (intra-observer) or two readers (inter-observer):
+               Pearson r, ICC(A,1) absolute agreement (two-way), Bland-Altman bias and 95 % limits of
+               agreement, and per-subject Dice of the cSS masks. van Harten: ICC 0.995, Pearson 0.991,
+               mean Dice 0.75 (Dice is low for small, sparse masks even when volumes agree).
+  --vs-score   size measure against the 0-4 multifocality score (their Fig. 4: wide spread inside the
+               top categories = the ceiling effect a continuous measure avoids)
+Compare sizes only between scans acquired with the same protocol (field strength, TE, voxel size)."""
+import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+import sys, os, numpy as np, pandas as pd, nibabel as nib
+
+arg = lambda f, d="": sys.argv[sys.argv.index(f) + 1] if f in sys.argv else d
+col = arg("--col", "grown_volume_mm3")
+ex = lambda p: os.path.expanduser(p)
+
+
+def icc_a1(x, y):
+    """two-way, absolute agreement, single measures (McGraw & Wong ICC(A,1))"""
+    Y = np.c_[x, y]; n, k = Y.shape
+    gm = Y.mean(); rm = Y.mean(1); cm = Y.mean(0)
+    msr = k * ((rm - gm) ** 2).sum() / (n - 1)
+    msc = n * ((cm - gm) ** 2).sum() / (k - 1)
+    mse = ((Y - rm[:, None] - cm[None, :] + gm) ** 2).sum() / ((n - 1) * (k - 1))
+    return float((msr - mse) / (msr + (k - 1) * mse + k * (msc - mse) / n))
+
+
+if arg("--vs-score"):
+    d = pd.read_csv(f"{ex(arg('--vs-score'))}/css_scores.csv")
+    if col not in d.columns: sys.exit(f"column {col} not in css_scores.csv (re-score with score_css.py v4.13)")
+    print(f"{col} by multifocality score ({len(d)} subjects):")
+    for s, g in d.groupby("multifocality_0_4"):
+        print(f"  score {s}: n={len(g)}  median {g[col].median():.1f}  range {g[col].min():.1f}-{g[col].max():.1f}")
+    if arg("--plot"):
+        import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(5, 4))
+        jit = np.random.default_rng(0).uniform(-0.12, 0.12, len(d))
+        ax.scatter(d.multifocality_0_4 + jit, d[col], s=25)
+        ax.set_xlabel("cSS multifocality score (0-4)"); ax.set_ylabel(col); ax.set_xticks(range(5))
+        fig.tight_layout(); fig.savefig(ex(arg("--plot")), dpi=150); print(f"plot -> {arg('--plot')}")
+    sys.exit(0)
+
+if not (arg("--a") and arg("--b")): sys.exit(__doc__)
+A, Bd = ex(arg("--a")), ex(arg("--b"))
+da, db = pd.read_csv(f"{A}/css_scores.csv"), pd.read_csv(f"{Bd}/css_scores.csv")
+m = da[["subject", col]].merge(db[["subject", col]], on="subject", suffixes=("_a", "_b")).dropna()
+if len(m) < 2: sys.exit(f"need >=2 subjects scored in both folders (found {len(m)})")
+x, y = m[f"{col}_a"].to_numpy(float), m[f"{col}_b"].to_numpy(float)
+diff = x - y; bias = diff.mean(); sd = diff.std(ddof=1)
+r = float(np.corrcoef(x, y)[0, 1]) if x.std() > 0 and y.std() > 0 else float("nan")
+print(f"{len(m)} subjects, {col}:  Pearson r {r:.3f}   ICC(A,1) {icc_a1(x, y):.3f}   "
+      f"Bland-Altman bias {bias:.1f}, 95 % limits {bias - 1.96 * sd:.1f} to {bias + 1.96 * sd:.1f}")
+dice = []
+for s in m.subject:
+    pa, pb = f"{A}/{s}_css_mask.nii.gz", f"{Bd}/{s}_css_mask.nii.gz"
+    if os.path.exists(pa) and os.path.exists(pb):
+        a_, b_ = nib.load(pa).get_fdata() > 0, nib.load(pb).get_fdata() > 0
+        if a_.shape == b_.shape and (a_.any() or b_.any()):
+            dice.append((s, 2 * (a_ & b_).sum() / (a_.sum() + b_.sum())))
+if dice:
+    dv = np.array([v for _, v in dice])
+    print(f"Dice of the cSS masks: mean {dv.mean():.2f} +/- {dv.std():.2f}  ("
+          + ", ".join(f"{s} {v:.2f}" for s, v in dice) + ")")
+print(m.to_string(index=False))
+if arg("--plot"):
+    import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(1, 2, figsize=(9, 4))
+    lim = [0, max(x.max(), y.max()) * 1.05]
+    ax[0].scatter(x, y); ax[0].plot(lim, lim, "k--", lw=0.8)
+    ax[0].set_xlabel(f"{col} (A)"); ax[0].set_ylabel(f"{col} (B)"); ax[0].set_title(f"r = {r:.3f}")
+    mean = (x + y) / 2; ax[1].scatter(mean, diff)
+    for v, ls in ((bias, "-"), (bias - 1.96 * sd, "--"), (bias + 1.96 * sd, "--")): ax[1].axhline(v, color="k", ls=ls, lw=0.8)
+    ax[1].set_xlabel("mean of A and B"); ax[1].set_ylabel("A - B"); ax[1].set_title("Bland-Altman")
+    fig.tight_layout(); fig.savefig(ex(arg("--plot")), dpi=150); print(f"plot -> {arg('--plot')}")
+```
+
+## scripts/align_seg.py
+
+```python
+"""Labels on the SWI grid -> work/ID_seg_swispace.nii.gz (masked to SWI coverage).
+Source, best first:
+  work/ID_t1seg_swispace.nii.gz  T1-derived labels already in SWI space (prep_anat.sh, v4)
+  synthseg/ID_seg.nii.gz         SynthSeg run on the SWI itself (v3 behaviour)"""
+import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
+import sys, os, numpy as np, nibabel as nib
+from nibabel.processing import resample_from_to
+from scipy import ndimage as ndi
+subj = sys.argv[1]
+base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project"))
+swi = nib.load(f"{base}/data/{subj}_swi.nii")
+t1p = f"{base}/work/{subj}_t1seg_swispace.nii.gz"
+src = t1p if os.path.exists(t1p) and os.path.getmtime(t1p) >= os.path.getmtime(f"{base}/data/{subj}_swi.nii") \
+    else f"{base}/synthseg/{subj}_seg.nii.gz"
+seg = nib.load(src)
+seg_swi = resample_from_to(seg, swi, order=0).get_fdata().astype(np.int32)
+n_before = (seg_swi > 0).sum()
+seg_swi[~ndi.binary_fill_holes(swi.get_fdata() > 0)] = 0
+out = nib.Nifti1Image(seg_swi, swi.affine, swi.header); out.set_data_dtype(np.int32)
+nib.save(out, f"{base}/work/{subj}_seg_swispace.nii.gz")
+print(f"{subj}: labels from {os.path.basename(src)}; labelled voxels before mask {n_before:,}, "
+      f"after mask {(seg_swi>0).sum():,}")
+```
+
+## scripts/check_known.py
+
+```python
+#!/usr/bin/env python3
+"""Safety check: are KNOWN lesions still detected after a detector change?
+usage: check_known.py SUBJECT --old OLD_candidates.nii.gz --ids 3,4,5
+For each listed lesion of an older candidate map (e.g. review/v3/P006_candidates.nii.gz) it reports
+the current candidate(s) covering it, or the exclusion reason (review/ID_excluded.csv), or
+"NOT DETECTED". Grids must match (same imported SWI)."""
+import sys, os, numpy as np, pandas as pd, nibabel as nib
+from scipy import ndimage as ndi
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import base as _base
+
+subj = sys.argv[1]; base = _base()
+arg = lambda f: sys.argv[sys.argv.index(f) + 1] if f in sys.argv else ""
+if not arg("--old") or not arg("--ids"): sys.exit(__doc__)
+old = nib.load(os.path.expanduser(arg("--old"))).get_fdata().astype(int)
+cand = nib.load(f"{base}/review/{subj}_candidates.nii.gz").get_fdata().astype(int)
+xp = f"{base}/review/{subj}_excluded.nii.gz"
+excl = nib.load(xp).get_fdata().astype(int) if os.path.exists(xp) else np.zeros_like(cand)
+xr = pd.read_csv(f"{base}/review/{subj}_excluded.csv").set_index("excl_id")["reason"] \
+    if os.path.exists(f"{base}/review/{subj}_excluded.csv") else pd.Series(dtype=str)
+if old.shape != cand.shape: sys.exit("grids differ - re-import the same SWI")
+kept = 0
+for i in [int(x) for x in arg("--ids").split(",") if x.strip()]:
+    m = ndi.binary_dilation(old == i, iterations=2)
+    c = sorted(set(np.unique(cand[m])) - {0}); x = sorted(set(np.unique(excl[m])) - {0})
+    if c: kept += 1
+    msg = (f"kept as candidate {', '.join('#' + str(v) for v in c)}" if c else "") + \
+          ("; " if c and x else "") + ("; ".join(f"EXCLUDED ({xr.get(v, '?')})" for v in x) if x else "")
+    print(f"known lesion #{i}: {msg or 'NOT DETECTED'}")
+print(f"{subj}: {kept} of {len(arg('--ids').split(','))} known lesions still shown for review")
 ```
 
 ## scripts/css_common.py
@@ -278,40 +429,442 @@ def save_calls(b, subj, cand, calls):
     c = cand.set_index("cand_id")
     rows = [dict(cand_id=k, call=v, **{f: c.loc[k, f] for f in FP}) for k, v in sorted(calls.items())]
     pd.DataFrame(rows, columns=["cand_id", "call"] + FP).to_csv(f"{b}/review/{subj}_calls.csv", index=False)
+
+
+# ---- v4.15 expert label vocabulary (docs/AUDIT_v4.13_and_FP_plan.md section 4)
+# sheet code -> (fine label, coarse call). The coarse call is what review_css.py / feature_report.py /
+# mark_css.py already understand, so old single letters (C V N H U) keep their meaning.
+LABELS = {
+    "C":   ("cSS", "cSS"),
+    "V":   ("vein_unspecified", "Vein"),
+    "VS":  ("vein_surface", "Vein"),            # cortical vein running ALONG the pial surface (hard negative)
+    "VC":  ("vein_sulcal", "Vein"),             # vein in the middle of the sulcal CSF
+    "VT":  ("vein_transcortical", "Vein"),      # medullary / transcortical, perpendicular to the cortex
+    "VX":  ("vein_sinus_adjacent", "Vein"),     # vein joining / next to a dural sinus
+    "TV":  ("thrombosed_vein", "Vein"),
+    "A":   ("artifact_airbone", "Artifact"),    # skull base / orbitofrontal / temporal pole susceptibility
+    "AM":  ("artifact_motion", "Artifact"),     # motion, ghosting, Gibbs, registration
+    "N":   ("normal_other", "Normal"),
+    "NI":  ("normal_iron_cortex", "Normal"),    # e.g. iron-rich motor cortex
+    "MB":  ("microbleed", "Normal"),
+    "CA":  ("calcification", "Normal"),
+    "SAH": ("acute_cSAH", "Normal"),
+    "LN":  ("laminar_necrosis", "Normal"),
+    "HI":  ("haemorrhagic_infarct", "Normal"),
+    "IS":  ("infratentorial_SS", "Normal"),
+    "H":   ("ICH_related", "Near ICH"),
+    "U":   ("uncertain", "Unsure"),
+}
+LABEL_HELP = [("C", "cortical superficial siderosis"),
+              ("V / VS / VC / VT / VX", "vein: any / along surface / mid-sulcus / transcortical / at sinus"),
+              ("TV", "thrombosed vein"),
+              ("A / AM", "artifact: air-bone susceptibility / motion, ghosting"),
+              ("N / NI", "normal or other / normal iron-rich cortex"),
+              ("MB / CA", "microbleed / calcification"),
+              ("SAH", "acute convexity SAH (FLAIR-bright sulcus)"),
+              ("LN / HI", "laminar necrosis / haemorrhagic infarct"),
+              ("IS", "infratentorial (classical) superficial siderosis"),
+              ("H", "siderosis contiguous with a lobar ICH"),
+              ("U", "uncertain")]
+
+
+def parse_answer(tok):
+    """'12VS' or '12VS:4' -> (12, code, confidence or None); raises ValueError"""
+    import re
+    m = re.fullmatch(r"(\d+)([A-Z]+)(?::([1-5]))?", tok.strip().upper())
+    if not m or m.group(2) not in LABELS:
+        raise ValueError(f"cannot read '{tok}' (e.g. 12C, 12VS, 12VS:4; codes {', '.join(LABELS)})")
+    return int(m.group(1)), m.group(2), (int(m.group(3)) if m.group(3) else None)
+
+
+def cand_uid(subj, r):
+    """stable candidate identity across detector re-runs (same fingerprint as match_calls)"""
+    return f"{subj}:{int(r['vox_i'])}:{int(r['vox_j'])}:{int(r['vox_k'])}:{float(r['volume_mm3']):g}"
+
+
+def append_rows(path, rows, key):
+    """append rows to a CSV table, replacing earlier rows with the same key columns"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    new = pd.DataFrame(rows)
+    if os.path.exists(path):
+        old = pd.read_csv(path)
+        if len(new):
+            k_old = old[key].astype(str).agg("|".join, axis=1)
+            k_new = set(new[key].astype(str).agg("|".join, axis=1))
+            old = old[~k_old.isin(k_new)]
+        new = pd.concat([old, new], ignore_index=True)
+    new.to_csv(path, index=False)
+    return new
 ```
 
-## scripts/align_seg.py
+## scripts/css_qc.py
 
 ```python
-"""Labels on the SWI grid -> work/ID_seg_swispace.nii.gz (masked to SWI coverage).
-Source, best first:
-  work/ID_t1seg_swispace.nii.gz  T1-derived labels already in SWI space (prep_anat.sh, v4)
-  synthseg/ID_seg.nii.gz         SynthSeg run on the SWI itself (v3 behaviour)"""
-import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
-import sys, os, numpy as np, nibabel as nib
-from nibabel.processing import resample_from_to
+"""Per-case quality control for detect_css.py (v4.14) -> review/ID_qc.json.
+
+Called by detect_css.py with the arrays it already has. Records the acquisition, orientation, coverage,
+anatomy source and how well the label (pial) boundary agrees with the cortex/CSF edge seen on the SWI,
+and sets a case status:
+  ok                     nothing below triggered
+  low_confidence_review  anatomy-based features are less trustworthy (SWI-only anatomy, poor edge
+                         agreement, high registration cost, thick slices)
+  insufficient_quality   the detector's assumptions do not hold (array axis 2 is not the slice /
+                         superior-inferior axis, or labels cover too little of the brain)
+v4.14: REPORTED ONLY. The status and the thresholds below are provisional (not validated on expert-
+labelled cases) and do not change any candidate, exclusion or score."""
+import os, json, glob, numpy as np, nibabel as nib
 from scipy import ndimage as ndi
-subj = sys.argv[1]
-base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project"))
-swi = nib.load(f"{base}/data/{subj}_swi.nii")
-t1p = f"{base}/work/{subj}_t1seg_swispace.nii.gz"
-src = t1p if os.path.exists(t1p) and os.path.getmtime(t1p) >= os.path.getmtime(f"{base}/data/{subj}_swi.nii") \
-    else f"{base}/synthseg/{subj}_seg.nii.gz"
-seg = nib.load(src)
-seg_swi = resample_from_to(seg, swi, order=0).get_fdata().astype(np.int32)
-n_before = (seg_swi > 0).sum()
-seg_swi[~ndi.binary_fill_holes(swi.get_fdata() > 0)] = 0
-out = nib.Nifti1Image(seg_swi, swi.affine, swi.header); out.set_data_dtype(np.int32)
-nib.save(out, f"{base}/work/{subj}_seg_swispace.nii.gz")
-print(f"{subj}: labels from {os.path.basename(src)}; labelled voxels before mask {n_before:,}, "
-      f"after mask {(seg_swi>0).sum():,}")
+
+EDGE_LOW_CONF_MM = 1.5     # median |label pial boundary - SWI cortex/CSF edge| above this -> low confidence
+REG_COST_LOW_CONF = 0.8    # bbregister mincost above this -> low confidence (FreeSurfer typical < ~0.6)
+LABEL_SLICE_MIN = 0.9      # fraction of brain-containing slices that also contain labels
+THICK_SLICE_MM = 2.0       # slices thicker than this -> low confidence (sub-voxel pial thresholds)
+EDGE_WIN_MM = 3.0          # search for the SWI edge within +-3 mm of the label boundary, along the normal
+
+
+def read_acq(base, subj):
+    """acquisition parameters from the dcm2niix JSON of the (non-phase) SWI series, if present"""
+    for jp in sorted(glob.glob(f"{base}/raw/{subj}/SWI/*.json")):
+        try:
+            js = json.load(open(jp))
+        except Exception:
+            continue
+        it = " ".join(js.get("ImageType", [])).upper()
+        if "PHASE" in it or " P " in f" {it} ":
+            continue
+        te = js.get("EchoTime")
+        return dict(sequence="SWI" if "SWI" in it else ("T2*-GRE" if it else "unknown"),
+                    image_type=it, manufacturer=js.get("Manufacturer", ""),
+                    field_T=js.get("MagneticFieldStrength"),
+                    TE_ms=round(te * 1000, 1) if isinstance(te, (int, float)) else None,
+                    slice_thickness_mm=js.get("SliceThickness"), acq_dim=js.get("MRAcquisitionType"))
+    return {}
+
+
+def edge_agreement(If, brain, pial_sd, normal, vox, sel, rng):
+    """Signed offset (mm) of the strongest dark->bright step (cortex -> CSF) along the outward normal,
+    searched within +-EDGE_WIN_MM of label-boundary voxels. 0 = the labels' pial boundary sits on the
+    SWI edge. Returns offsets of up to 4000 sampled boundary voxels in `sel`."""
+    pts = np.argwhere(sel)
+    if len(pts) < 50:
+        return np.array([])
+    if len(pts) > 4000:
+        pts = pts[rng.choice(len(pts), 4000, replace=False)]
+    n = np.stack([normal[a][tuple(pts.T)] for a in range(3)], 1)
+    t = np.arange(-EDGE_WIN_MM, EDGE_WIN_MM + 1e-6, 0.25, dtype=np.float32)
+    q = pts[:, None, :] + t[None, :, None] * n[:, None, :] / np.array(vox)
+    co = q.reshape(-1, 3).T
+    prof = ndi.map_coordinates(If, co, order=1, mode="nearest").reshape(q.shape[:2])
+    inb = ndi.map_coordinates(brain.astype(np.float32), co, order=0, mode="constant").reshape(q.shape[:2]) > 0
+    d = np.diff(prof, axis=1)
+    d[~(inb[:, 1:] & inb[:, :-1])] = -np.inf          # steps that leave the brain mask do not count
+    j = np.argmax(d, axis=1); ok = np.isfinite(d[np.arange(len(d)), j]) & (d[np.arange(len(d)), j] > 0)
+    return (0.5 * (t[j] + t[j + 1]))[ok]
+
+
+def case_qc(base, subj, swi, I, If, seg, brain, tissue, cortex, pial_sd, normal, rim, hemiL, vox,
+            t1_anat, full_bottom):
+    rng = np.random.default_rng(0)
+    qc = dict(subject=subj, qc_version="v4.14")
+    qc["acquisition"] = read_acq(base, subj)
+    qc["voxel_mm"] = [round(v, 3) for v in vox]
+    qc["orientation"] = "".join(nib.aff2axcodes(swi.affine))
+    si_axis = int(np.argmax(np.abs(swi.affine[2, :3])))
+    qc["si_axis"] = si_axis
+    qc["thickest_axis"] = int(np.argmax(vox))
+    # detect_css.py runs its 2-D ridge filter, slice counts and merge gap in array axis 2 and treats
+    # axis 2 as superior-inferior ("long structure"); a sagittally/coronally stored SWI breaks that
+    qc["orientation_ok"] = bool(si_axis == 2 and (vox[2] >= max(vox[0], vox[1]) - 1e-3))
+    qc["coverage_includes_skull_base"] = bool(full_bottom)
+    if os.path.exists(f"{base}/work/{subj}_a2009s_swispace.nii.gz") and t1_anat:
+        qc["anatomy"] = "T1 recon-all"
+    else:
+        qc["anatomy"] = "T1" if t1_anat else "SWI-only"
+    reg_p = f"{base}/work/{subj}_reg.json"
+    qc["registration"] = json.load(open(reg_p)) if os.path.exists(reg_p) else None
+    # label coverage: brain-containing slices (axis 2) that also contain labels; labelled share of brain
+    bs = brain.any(axis=(0, 1)); ls = (seg > 0).any(axis=(0, 1))
+    qc["label_slice_coverage"] = round(float((bs & ls).sum() / max(int(bs.sum()), 1)), 3)
+    qc["label_voxel_frac"] = round(float(((seg > 0) & brain).sum() / max(int(brain.sum()), 1)), 3)
+    # pial confidence: label boundary vs SWI cortex/CSF edge, overall and by hemisphere x height third
+    bnd = cortex & (np.abs(pial_sd) <= 0.75 * max(vox)) & ~rim
+    off = edge_agreement(If, brain, pial_sd, normal, vox, bnd, rng)
+    qc["edge_offset_median_mm"] = round(float(np.median(off)), 2) if len(off) else None
+    qc["edge_agreement_mm"] = round(float(np.median(np.abs(off))), 2) if len(off) else None
+    qc["edge_n"] = int(len(off))
+    zw = (swi.affine @ np.c_[np.argwhere(bnd), np.ones(int(bnd.sum()))].T)[2] if bnd.any() else np.array([])
+    reg = {}
+    if len(zw):
+        lo, hi = np.percentile(zw, [0, 100]); cuts = np.linspace(lo, hi, 4)
+        zmap = np.full(I.shape, -1, np.int8); zmap[bnd] = np.clip(np.searchsorted(cuts, zw, side="right") - 1, 0, 2)
+        for h, hm in (("L", hemiL), ("R", ~hemiL)):
+            for k, nm in enumerate(("inferior", "middle", "superior")):
+                o = edge_agreement(If, brain, pial_sd, normal, vox, bnd & hm & (zmap == k), rng)
+                reg[f"{h}_{nm}"] = round(float(np.median(np.abs(o))), 2) if len(o) >= 50 else None
+    qc["edge_agreement_by_region_mm"] = reg
+    # motion / ghosting proxy (informational): background noise of the un-stripped SWI vs brain signal
+    raw_p = f"{base}/work/{subj}_raw.nii.gz"
+    qc["background_ratio"] = None
+    if os.path.exists(raw_p):
+        raw = nib.load(raw_p)
+        if raw.shape[:3] == I.shape:
+            R = np.asarray(raw.dataobj, dtype=np.float32).reshape(I.shape)
+            far = ndi.distance_transform_edt(~brain, sampling=vox) > 15.0
+            if far.sum() > 1000 and brain.any():
+                qc["background_ratio"] = round(float(np.std(R[far]) / (np.median(R[brain]) + 1e-6)), 4)
+    # status (provisional thresholds, reported only)
+    why_bad, why_low = [], []
+    if not qc["orientation_ok"]:
+        why_bad.append(f"array axis 2 is not the slice / S-I axis (orientation {qc['orientation']}, voxel {qc['voxel_mm']})")
+    if qc["label_slice_coverage"] < LABEL_SLICE_MIN:
+        why_bad.append(f"labels cover {qc['label_slice_coverage']:.0%} of brain slices")
+    if qc["anatomy"] == "SWI-only":
+        why_low.append("SWI-only anatomy (no T1)")
+    if qc["edge_agreement_mm"] is None:
+        why_low.append("pial edge agreement not measurable")
+    elif qc["edge_agreement_mm"] > EDGE_LOW_CONF_MM:
+        why_low.append(f"label pial boundary {qc['edge_agreement_mm']} mm from the SWI cortex edge")
+    cost = (qc["registration"] or {}).get("cost")
+    if isinstance(cost, (int, float)) and cost > REG_COST_LOW_CONF:
+        why_low.append(f"registration cost {cost}")
+    if max(vox) > THICK_SLICE_MM:
+        why_low.append(f"thick slices ({max(vox):.1f} mm)")
+    qc["status"] = "insufficient_quality" if why_bad else ("low_confidence_review" if why_low else "ok")
+    qc["reasons"] = why_bad + why_low
+    qc["thresholds"] = dict(edge_low_conf_mm=EDGE_LOW_CONF_MM, reg_cost_low_conf=REG_COST_LOW_CONF,
+                            label_slice_min=LABEL_SLICE_MIN, thick_slice_mm=THICK_SLICE_MM,
+                            note="provisional, not validated; v4.14 reports only")
+    os.makedirs(f"{base}/review", exist_ok=True)
+    json.dump(qc, open(f"{base}/review/{subj}_qc.json", "w"), indent=2)
+    return qc
+```
+
+## scripts/css_surface.py
+
+```python
+"""FreeSurfer pial surface -> SWI space, with a registration check (v4.16; shared by surface_features.py and
+surface_overlay.py). FreeSurfer surfaces are in tkRAS. The transform is built from subjects/ID/mri/orig.mgz
+(tkRAS -> T1 scanner RAS) and work/ID_swi2t1.lta (prep_anat.sh). The LTA's direction is NOT trusted: both
+directions are tried and the one whose pial vertices lie on the label pial boundary of
+work/ID_seg_swispace.nii.gz (which mri_vol2vol made with the same LTA) is used. surface_to_swi() stops the
+script when even the better direction is more than AGREE_MM off, unless force=True."""
+import os, sys, numpy as np, nibabel as nib
+from scipy import ndimage as ndi
+from nibabel.freesurfer.io import read_geometry
+
+AGREE_MM = 2.0
+
+
+def apply(T, X):
+    return X @ T[:3, :3].T + T[:3, 3]
+
+
+def read_lta(p):
+    """4x4 RAS->RAS matrix of an LTA (type 1 RAS2RAS, or type 0 VOX2VOX converted with its volume info)"""
+    L = open(p).read().splitlines()
+    typ = int(next(l for l in L if l.strip().startswith("type")).split("=")[1].split()[0])
+    i = next(k for k, l in enumerate(L) if l.strip().split()[:3] == ["1", "4", "4"])
+    M = np.array([[float(x) for x in L[i + 1 + r].split()] for r in range(4)])
+    if typ == 1:
+        return M
+    def v2r(tag):                                     # vox2ras from "src/dst volume info" block
+        k = next(j for j, l in enumerate(L) if l.strip().startswith(tag))
+        info = {}
+        for l in L[k + 1:k + 10]:
+            if "=" in l:
+                key, val = l.split("=", 1); info[key.strip()] = val.split()
+        dims = np.array([float(x) for x in info["volume"][:3]]); vs = np.array([float(x) for x in info["voxelsize"]])
+        R = np.c_[[float(x) for x in info["xras"]], [float(x) for x in info["yras"]], [float(x) for x in info["zras"]]] * vs
+        c = np.array([float(x) for x in info["c_ras"]])
+        A = np.eye(4); A[:3, :3] = R; A[:3, 3] = c - R @ (dims / 2.0)
+        return A
+    return v2r("dst volume info") @ M @ np.linalg.inv(v2r("src volume info"))
+
+
+def surface_to_swi(base, subj, sdir, surface_xfm="", force=False):
+    """-> (T tkRAS->SWI world, source description, {option: median vertex-to-label-boundary mm}, surfs)
+    surfs = {"lh": (vertices_tkRAS, faces), "rh": ...} of the pial surfaces"""
+    swi = nib.load(f"{base}/data/{subj}_swi.nii"); vox = np.array(swi.header.get_zooms()[:3], float)
+    seg = nib.load(f"{base}/work/{subj}_seg_swispace.nii.gz").get_fdata().astype(np.int32)
+    brain = ndi.binary_fill_holes(np.asarray(swi.dataobj) > 0)
+    tissue = ndi.binary_fill_holes(brain & (seg > 0) & (seg != 24))
+    pial_sd = ndi.distance_transform_edt(~tissue, sampling=vox) - ndi.distance_transform_edt(tissue, sampling=vox)
+    inv_aff = np.linalg.inv(swi.affine)
+    agree = lambda Vw: float(np.median(np.abs(ndi.map_coordinates(pial_sd, apply(inv_aff, Vw).T, order=1, mode="nearest"))))
+    surfs = {h: read_geometry(f"{sdir}/{subj}/surf/{h}.pial") for h in ("lh", "rh")}
+    Vall = np.vstack([surfs["lh"][0], surfs["rh"][0]])[::50]
+    if surface_xfm:
+        T = np.loadtxt(surface_xfm).reshape(4, 4); src = "explicit --surface-xfm"
+        checks = {"explicit": agree(apply(T, Vall))}
+    else:
+        orig = nib.load(f"{sdir}/{subj}/mri/orig.mgz")
+        tkr2t1 = orig.header.get_vox2ras() @ np.linalg.inv(orig.header.get_vox2ras_tkr())
+        R = read_lta(f"{base}/work/{subj}_swi2t1.lta")
+        opts = {"LTA maps SWI->T1": np.linalg.inv(R) @ tkr2t1, "LTA maps T1->SWI": R @ tkr2t1}
+        checks = {k: agree(apply(Tk, Vall)) for k, Tk in opts.items()}
+        src = min(checks, key=checks.get); T = opts[src]
+    print(f"{subj}: surface -> SWI ({src}); median distance of pial vertices to the label pial boundary: "
+          + ", ".join(f"{k} {v:.2f} mm" for k, v in checks.items()))
+    if min(checks.values()) > AGREE_MM and not force:
+        sys.exit(f"{subj}: surfaces do not match the SWI labels (best {min(checks.values()):.2f} mm > {AGREE_MM} mm)"
+                 f" - check the registration / transform (or --force)")
+    return T, src, checks, surfs
+```
+
+## scripts/css_vessel.py
+
+```python
+"""Bounded local vein tracking for detect_css.py (v4.16) - RECORDED ONLY, no rule uses these values.
+
+vein_tree_mm saturated on real SWI because the dark tubular network merges brain-wide. These features
+stay local and follow the vessel map (work/ID_vessels.nii.gz, the same VES map detect_css.py builds):
+
+  cand_geodesic_mm      length of the candidate along its own voxels (two-sweep geodesic diameter)
+  local_cont_max_mm     dark continuation beyond the candidate's ends, the longer of the two ends,
+  local_cont_min_mm     ... and the shorter end. Each end is followed geodesically through vessel or dark
+                        voxels (dark: so a vein draining into a wide dural sinus continues into it),
+                        only forwards (inside a 60 deg cone around the end's outward tangent), up to
+                        VES_REACH_MM; 1-voxel gaps are bridged at a cost
+  local_cont_total_mm   sum of both ends
+  terminal_ends         ends with < 3 mm continuation (2 = stops at both ends, cSS-like; 0 = runs on)
+  local_net_mm          skeleton length of the vessel network connected to the candidate within reach
+  local_branch_points   junctions in that network with >= 3 arms of >= 3 mm (one count per junction)
+  local_branch_per10mm  junctions per 10 mm of network skeleton
+Tracking stays in the pial band (cortex + subarachnoid CSF): the target is veins running ALONG the surface.
+
+A cSS focus touching an unrelated vein inherits that vein's network: read these with the images."""
+import numpy as np
+from scipy import ndimage as ndi
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import dijkstra, connected_components
+from skimage.morphology import skeletonize
+
+CONE_DEG = 60.0          # forward cone at each end (veins curve; cSS has no forward continuation at all)
+TANGENT_MM = 3.0         # end tangent from the point this far back along the candidate
+TERMINAL_MM = 3.0        # continuation below this = the candidate ends there
+ARM_MIN_MM = 3.0         # a junction counts when >= 3 arms of at least this length meet
+GAP_COST = 1.5           # bridging a 1-voxel gap costs 1.5 x its length
+
+# neighbour offsets up to 2 voxels apart (2 = bridges a 1-voxel gap); forward half only
+_OFF = np.array([(a, b, c) for a in range(-2, 3) for b in range(-2, 3) for c in range(-2, 3)
+                 if (a, b, c) > (0, 0, 0) and max(abs(a), abs(b), abs(c)) <= 2])
+
+
+def _graph(idx, shape, vox):
+    """sparse graph over voxel coordinates idx (n x 3): 26-neighbours, plus gap-bridging edges"""
+    lin = np.ravel_multi_index(idx.T, shape); order = np.argsort(lin); sl = lin[order]
+    rows, cols, w = [], [], []
+    for o in _OFF:
+        q = idx + o
+        ok = np.all((q >= 0) & (q < np.array(shape)), axis=1)
+        ql = np.full(len(idx), -1, np.int64); ql[ok] = np.ravel_multi_index(q[ok].T, shape)
+        pos = np.clip(np.searchsorted(sl, ql), 0, len(sl) - 1)
+        hit = ok & (sl[pos] == ql)
+        d = float(np.linalg.norm(o * vox)) * (GAP_COST if np.abs(o).max() > 1 else 1.0)
+        rows.append(np.nonzero(hit)[0]); cols.append(order[pos[hit]]); w.append(np.full(hit.sum(), d))
+    r, c, ww = np.concatenate(rows), np.concatenate(cols), np.concatenate(w)
+    n = len(idx)
+    return coo_matrix((np.r_[ww, ww], (np.r_[r, c], np.r_[c, r])), shape=(n, n)).tocsr()
+
+
+def _skeleton_stats(net, vox):
+    """skeleton length (mm) and junctions with >= 3 arms of >= ARM_MIN_MM"""
+    if net.sum() < 3:
+        return 0.0, 0
+    sk = skeletonize(net) > 0
+    step = float(np.mean(vox))
+    length = float(sk.sum()) * step
+    k = np.ones((3, 3, 3), int); k[1, 1, 1] = 0
+    nb = ndi.convolve(sk.astype(int), k, mode="constant")
+    junc = sk & (nb >= 3)
+    if not junc.any():
+        return length, 0
+    jl, nj = ndi.label(junc, structure=np.ones((3, 3, 3), bool))
+    arms, na = ndi.label(sk & ~ndi.binary_dilation(junc, structure=np.ones((3, 3, 3), bool)),
+                         structure=np.ones((3, 3, 3), bool))
+    arm_len = ndi.sum(np.ones_like(arms), arms, index=np.arange(1, na + 1)) * step if na else np.array([])
+    long_arm = np.r_[False, arm_len >= ARM_MIN_MM]
+    n_valid = 0
+    for j, sl in enumerate(ndi.find_objects(jl), 1):
+        if sl is None: continue
+        big = tuple(slice(max(s.start - 2, 0), s.stop + 2) for s in sl)
+        ring = ndi.binary_dilation(jl[big] == j, structure=np.ones((3, 3, 3), bool), iterations=2)
+        touching = np.unique(arms[big][ring]); touching = touching[touching > 0]
+        n_valid += int(long_arm[touching].sum() >= 3)
+    return length, n_valid
+
+
+def local_tracking(cm, ves, vox, reach_mm, band=None, dark=None):
+    """cm: candidate mask, ves: vessel mask (same box, candidate +- reach_mm), vox: voxel size (mm),
+    band: where tracking may go (detect_css.py passes the pial band: cortex + CSF, not deep white matter -
+    continuation INTO the WM is vessel_wm_mm's job, and WM noise otherwise fakes continuation),
+    dark: dark voxels (z < -2); continuation may also run through them, so that a vein draining into a
+    dural sinus continues into it (a sinus is too wide to be a Hessian 'tube' at sigma <= 1.6 mm)"""
+    path_ok = ves | dark if dark is not None else ves.copy()
+    if band is not None:
+        ves = ves & band; path_ok &= band
+    vox = np.asarray(vox, float)
+    nan = dict(cand_geodesic_mm=np.nan, local_cont_max_mm=np.nan, local_cont_min_mm=np.nan,
+               local_cont_total_mm=np.nan, terminal_ends=np.nan, local_net_mm=np.nan,
+               local_branch_points=np.nan, local_branch_per10mm=np.nan)
+    ci = np.argwhere(cm)
+    if len(ci) < 3:
+        return nan
+    # ---- candidate geodesic diameter and its two ends (largest connected piece)
+    Gc = _graph(ci, cm.shape, vox)
+    d0 = dijkstra(Gc, indices=0)
+    comp = np.isfinite(d0)
+    if comp.sum() < 0.5 * len(ci):                      # start from a node of the biggest piece
+        _, lab = connected_components(Gc)
+        start = int(np.argmax(lab == np.bincount(lab).argmax())); d0 = dijkstra(Gc, indices=start)
+    a = int(np.nanargmax(np.where(np.isfinite(d0), d0, -1)))
+    da, pred = dijkstra(Gc, indices=a, return_predecessors=True)
+    b = int(np.nanargmax(np.where(np.isfinite(da), da, -1)))
+    L = float(da[b]); out = dict(nan, cand_geodesic_mm=round(L, 1))
+    path = [b]
+    while path[-1] != a and pred[path[-1]] >= 0:
+        path.append(int(pred[path[-1]]))
+    path = np.array(path[::-1])                         # a ... b along the candidate
+    dpath = da[path]
+    # ---- forward continuation from each end through vessel voxels only (candidate voxels excluded)
+    nodes_v = np.argwhere(path_ok & ~cm)
+    cont = []
+    m_ = min(TANGENT_MM, L / 2)
+    back_a = path[min(np.searchsorted(dpath, m_), len(path) - 1)]
+    back_b = path[max(np.searchsorted(dpath, L - m_, side="right") - 1, 0)]
+    for end, back in ((a, back_a), (b, back_b)):
+        pe = ci[end] * vox; t = pe - ci[back] * vox
+        if np.linalg.norm(t) < 1e-6 or not len(nodes_v):
+            cont.append(0.0); continue
+        t /= np.linalg.norm(t)
+        rel = nodes_v * vox - pe; dist = np.linalg.norm(rel, axis=1)
+        fwd = (dist <= reach_mm) & ((rel @ t >= np.cos(np.radians(CONE_DEG)) * dist) | (dist <= 2.0 * vox.max()))
+        if not fwd.any():
+            cont.append(0.0); continue
+        idx = np.vstack([ci[end][None], nodes_v[fwd]])
+        dd = dijkstra(_graph(idx, cm.shape, vox), indices=0, limit=reach_mm)
+        cont.append(float(np.max(dd[np.isfinite(dd)])))
+    out.update(local_cont_max_mm=round(max(cont), 1), local_cont_min_mm=round(min(cont), 1),
+               local_cont_total_mm=round(sum(cont), 1),
+               terminal_ends=int(sum(c < TERMINAL_MM for c in cont)))
+    # ---- vessel network connected to the candidate within reach: skeleton length and junctions
+    allv = np.argwhere(ves | cm)
+    if len(allv) >= 3:
+        G = _graph(allv, cm.shape, vox)
+        src = np.nonzero(cm[tuple(allv.T)])[0]
+        dn = dijkstra(G, indices=src, limit=reach_mm, min_only=True)
+        net = np.zeros(cm.shape, bool); net[tuple(allv[np.isfinite(dn)].T)] = True
+        length, nb = _skeleton_stats(net | cm, vox)
+        out.update(local_net_mm=round(length, 1), local_branch_points=int(nb),
+                   local_branch_per10mm=round(10.0 * nb / max(length, 1.0), 2))
+    return out
 ```
 
 ## scripts/detect_css.py
 
 ```python
 #!/usr/bin/env python3
-"""cSS candidate detector v4 (v4.11) - definition-driven.
+"""cSS candidate detector v4 (v4.14) - definition-driven.
 usage: detect_css.py SUBJECT [z_thr=-2.5] [ridge_pct=85] [rim_mm=3]
 env:   CSS_RANK=v3 ranks with the old v3 score (both scores are always written)
 
@@ -350,6 +903,15 @@ Candidate generation (unchanged idea from v3, tightened):
   - 2-D Sato ridge + hysteresis, per hemisphere; >=25 mm3, >=2 slices, elongation >=2.0
 Labels: work/ID_seg_swispace.nii.gz (from T1 via prep_anat.sh when available, else SWI SynthSeg).
 Lobar ICH mask: work/ID_ich.nii.gz if you drew one (freeview), else found automatically.
+v4.14 bookkeeping (no change to which candidates are shown or excluded, except B1 below):
+  review/ID_qc.json        case QC (css_qc.py): protocol, orientation, coverage, anatomy, pial-edge agreement,
+                           status ok / low_confidence_review / insufficient_quality (reported only)
+  work/ID_dropped.csv/.nii.gz  components removed by the generation gates (size, slices, elongation, no
+                           cortex nearby) - before v4.14 they vanished without a record
+  new columns (appended): candidates qc_status, rule_version, n_pieces; excluded also exclusion_confidence
+  B1 fix: extent_mm was underestimated for candidates touching the first array slice/row/column
+v4.16: bounded local vein tracking columns (css_vessel.py; recorded only - no rule or score uses them):
+  cand_geodesic_mm, local_cont_max/min/total_mm, terminal_ends, local_net_mm, local_branch_points/_per10mm
 """
 import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
 import sys, os, numpy as np, nibabel as nib, pandas as pd
@@ -359,12 +921,14 @@ from skimage.measure import regionprops
 from skimage.morphology import skeletonize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from css_common import base as _base, load_lut
+import css_qc, css_vessel
 
 subj   = sys.argv[1]
 z_thr  = float(sys.argv[2]) if len(sys.argv) > 2 else -2.5
 r_pct  = float(sys.argv[3]) if len(sys.argv) > 3 else 85
 RIM_MM = float(sys.argv[4]) if len(sys.argv) > 4 else 3.0
 RANK   = os.environ.get("CSS_RANK", "v4")
+RULESET = "v4.16"                        # written to every row as rule_version
 Z_LOW, R_PCT_LOW = -2.0, 80           # hysteresis (weak) thresholds
 GROW_Z = -1.5                          # 'dark' map used for region growing at scoring
 MIN_MM3, MIN_SLICES, MIN_ELONG = 25.0, 2, 2.0   # v4: 2.0 (tram-track = two parallel plates, ~2.4;
@@ -421,7 +985,7 @@ mm2vox = lambda mm: tuple(mm / v for v in vox)
 brain  = ndi.binary_fill_holes(I > 0)
 cortex = (seg >= 1000) | (seg == 3) | (seg == 42)
 it = max(1, int(round(2.0 / vox[0])))
-edge  = brain & ~ndi.binary_erosion(brain, structure=s2d, iterations=it)
+edge_band = brain & ~ndi.binary_erosion(brain, structure=s2d, iterations=it)
 surface = (~brain) | np.isin(seg, CSF)
 near_surface = ndi.binary_dilation(surface, structure=s2d, iterations=it)
 
@@ -455,7 +1019,7 @@ dist_mm = ndi.distance_transform_edt(brain, sampling=vox)
 rim = brain & (dist_mm < RIM_MM)
 If = Ic.copy(); If[~brain] = mu
 shell = brain & (pial_sd >= -PIAL_IN_MM) & (pial_sd <= PIAL_OUT_MM) & ~np.isin(seg, WM + DEEP)
-shell |= edge & ~np.isin(seg, WM + DEEP)
+shell |= edge_band & ~np.isin(seg, WM + DEEP)
 zone = shell & ~rim
 
 # ---- 3. curvilinear dark structures, slice by slice (candidate generation)
@@ -474,6 +1038,7 @@ hemiL = ndi.distance_transform_edt(~Lm, sampling=vox) <= ndi.distance_transform_
 dmid = np.where(hemiL, ndi.distance_transform_edt(hemiL, sampling=vox),
                 ndi.distance_transform_edt(~hemiL, sampling=vox))
 lab = np.zeros(I.shape, np.int32); n_raw = 0; nxt = 0
+n_pieces = None; n_before_merge = None     # set by the merge step
 for side in (hemiL, ~hemiL):
     wl, nw = ndi.label(weak & side, structure=s3)
     n_raw += nw
@@ -579,6 +1144,15 @@ for n, sl_ in enumerate(ndi.find_objects(_vl), 1):
         _ok[n] = np.sqrt(sum(((s_.stop - s_.start) * v) ** 2 for s_, v in zip(sl_, vox))) >= VES_MIN_MM
 VES = _ok[_vl]; del _vl, _ok
 deep_wm = _wmm & (ndi.distance_transform_edt(_wmm, sampling=vox) >= 1.5)   # WM proper, not the cortex border
+# v4.16 dark structures for local vein tracking: dark voxels in pieces >= VES_MIN_MM (isolated noise voxels
+# below z -2 would otherwise chain up through the tracker's gap bridging); includes wide dark structures
+# such as a dural sinus, which are not Hessian tubes at sigma <= 1.6 mm
+_dl, _ = ndi.label(brain & (z < Z_LOW), structure=s3)
+_ok = np.zeros(int(_dl.max()) + 1, bool)
+for n, sl_ in enumerate(ndi.find_objects(_dl), 1):
+    if sl_ is not None:
+        _ok[n] = np.sqrt(sum(((s_.stop - s_.start) * v) ** 2 for s_, v in zip(sl_, vox))) >= VES_MIN_MM
+DARKS = _ok[_dl]; del _dl, _ok
 nib.save(nib.Nifti1Image(VES.astype(np.uint8), swi.affine), f"{base}/work/{subj}_vessels.nii.gz")   # for freeview
 vl, nv = ndi.label(vnet | (lab > 0), structure=s3)
 vext = np.zeros(nv + 1, np.float32)
@@ -691,24 +1265,37 @@ def tram_track(pts):
 
 objs = ndi.find_objects(lab)
 rows = []
+# v4.14: components removed by the generation gates are logged (work/ID_dropped.csv/.nii.gz), not shown
+dropped = []
+def drop(p, why, vol, n_sl=None, elong=None):
+    c_ = np.asarray(p.centroid) / np.array(vox)              # regionprops centroid is in mm (spacing)
+    dropped.append(dict(drop_id=len(dropped) + 1, reason=why, volume_mm3=round(vol, 1),
+                        n_slices=n_sl, elongation=None if elong is None else round(elong, 1),
+                        vox_i=int(round(c_[0])), vox_j=int(round(c_[1])), vox_k=int(round(c_[2])),
+                        hemi="L" if hemiL[tuple(np.clip(np.round(c_).astype(int), 0, np.array(I.shape) - 1))] else "R",
+                        _lab=p.label))
 for p in regionprops(lab, spacing=vox):
     vol = float(p.area)                         # already mm3 because spacing is given
-    if vol < MIN_MM3: continue
+    if vol < MIN_MM3:
+        drop(p, f"volume <{MIN_MM3:g} mm3", vol); continue
     sl = objs[p.label - 1]
     pad = tuple(slice(max(s.start - 3, 0), s.stop + 3) for s in sl)
     mm = lab[pad] == p.label
     n_sl = int(mm.any(axis=(0, 1)).sum())
-    if n_sl < MIN_SLICES: continue
+    if n_sl < MIN_SLICES:
+        drop(p, f"<{MIN_SLICES} slices", vol, n_sl); continue
     elong = p.axis_major_length / max(p.axis_minor_length, 1e-3)
     # elongation rejects round microbleeds, which are single pieces; a merged candidate (two banks,
     # a bent line) can be compact overall and is not rejected for it (v4.9.2)
-    if elong < MIN_ELONG and ('n_pieces' not in dir() or n_pieces[p.label] <= 1): continue
+    if elong < MIN_ELONG and (n_pieces is None or n_pieces[p.label] <= 1):
+        drop(p, f"elongation <{MIN_ELONG:g}", vol, n_sl, elong); continue
     seg_nb = seg[pad][ndi.binary_dilation(mm, iterations=2)]
     nb = seg_nb[seg_nb >= 1000]
     # infratentorial only when clearly cerebellar/brainstem with little cerebral cortex nearby, so
     # occipital / inferior temporal cSS next to the tentorium is not dropped from the 0-4 score
     infra = bool(np.isin(seg_nb, INFRA).mean() > 0.5 and nb.size < 0.2 * seg_nb.size)
-    if nb.size == 0 and not infra: continue
+    if nb.size == 0 and not infra:
+        drop(p, "no cortex label within 2 voxels", vol, n_sl, elong); continue
     # hemisphere = majority of the candidate's own voxels in the hemisphere map (v4 fix: v3 counted
     # own L/R labels, but cSS lies in sulcal CSF where both counts are 0, so medial candidates
     # could take the region - and the score - of the opposite hemisphere)
@@ -784,17 +1371,21 @@ for p in regionprops(lab, spacing=vox):
             fe = fq - end; ok_ = (fe @ (sgn * ua)) >= np.cos(np.radians(VES_CONE_DEG)) * np.linalg.norm(fe, axis=1)
             if ok_.any(): ves_run = max(ves_run, float(np.linalg.norm(fe[ok_], axis=1).max()))
     del dcm, gl_, reach, rwm
+    # v4.16 bounded local vein tracking along the vessel map (recorded only, css_vessel.py)
+    vt = css_vessel.local_tracking(cm, VES[vb], vox, VES_REACH_MM, band=(pial_sd[vb] > -PIAL_IN_MM) & ~np.isin(seg[vb], WM + DEEP),
+                                   dark=DARKS[vb])
     mdark = mirror_dark(pts)
     # microbleed vs cSS (Charidimou, AJNR 2016;37:E43): microbleeds are small (generally 2-5 mm),
     # round/oval and at least half surrounded by brain parenchyma - cSS lies on the surface / in CSF
     shell1 = ndi.binary_dilation(mm, structure=s3) & ~mm
     pfrac = float(tissue[pad][shell1].mean()) if shell1.any() else np.nan
-    ext_mm = float(np.sqrt(sum(((s_.stop - s_.start - 6) * v) ** 2 for s_, v in zip(pad, vox))))
+    # bounding-box diagonal of the candidate itself (v4.14 B1: was pad width - 6, too small at the volume edge)
+    ext_mm = float(np.sqrt(sum(((s_.stop - s_.start) * v) ** 2 for s_, v in zip(sl, vox))))
     cmb_like = bool(np.isfinite(pfrac) and pfrac >= 0.5 and ext_mm <= 10.0)
     # "well-defined" (consensus definition): darker than the 1-2 mm surroundings by >= MIN_EDGE_SD;
     # normal dark cortex fades gradually into its neighbourhood
     ring2 = ndi.binary_dilation(mm, structure=s3, iterations=2) & ~mm & brain[pad]
-    edge = float(np.median(z[pad][ring2]) - np.median(z[pad][mm])) if ring2.any() else np.nan
+    edge_c = float(np.median(z[pad][ring2]) - np.median(z[pad][mm])) if ring2.any() else np.nan
     idist = float(ich_dist[pad][mm].min())
     fz = fcz = np.nan
     if FL is not None:
@@ -852,11 +1443,12 @@ for p in regionprops(lab, spacing=vox):
                      flair_csf_z=round(fz, 2), flair_bright=int(np.isfinite(fz) and fz > 3.0),
                      flair_ctx_z=round(fcz, 2), flair_ctx_bright=int(np.isfinite(fcz) and fcz > 3.0),
                      css_evidence=round(css_ev, 2), vein_evidence=round(vein_ev, 2),
-                     edge_contrast=round(edge, 2), _wz=float((swi.affine @ np.r_[c0, 1])[2]),
+                     edge_contrast=round(edge_c, 2), _wz=float((swi.affine @ np.r_[c0, 1])[2]),
                      infra_frac=round(float((d_infra[pad][mm] <= INFRA_MM).mean()), 2),
                      basal_frac=round(float((d_basal[pad][mm] <= BASAL_MM).mean()), 2),
                      vessel_ext_mm=round(ves_ext, 1), vessel_wm_mm=round(ves_wm, 1), vessel_run_mm=round(min(ves_run, VES_REACH_MM), 1), axis_normal=round(axn, 2),
-                     score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label))
+                     score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label,
+                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1, **vt))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
 cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongation",
@@ -868,7 +1460,10 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "parenchyma_frac", "extent_mm", "cmb_like",
         "flair_bright", "flair_ctx_z", "flair_ctx_bright", "css_evidence", "vein_evidence",
         "edge_contrast", "infra_frac", "basal_frac", "rel_height",
-        "vessel_ext_mm", "vessel_wm_mm", "vessel_run_mm", "axis_normal", "score_v3", "score_v4", "accept"]
+        "vessel_ext_mm", "vessel_wm_mm", "vessel_run_mm", "axis_normal", "score_v3", "score_v4", "accept",
+        "qc_status", "rule_version", "n_pieces",                                   # v4.14, appended
+        "cand_geodesic_mm", "local_cont_max_mm", "local_cont_min_mm", "local_cont_total_mm",  # v4.16,
+        "terminal_ends", "local_net_mm", "local_branch_points", "local_branch_per10mm"]       # recorded only
 
 # ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason
 # height is measured within the CEREBRUM (cortex + cerebral WM), so 0 = floor of the temporal/frontal
@@ -885,33 +1480,46 @@ _area = brain.sum(axis=tuple(a for a in range(3) if a != _zax)).astype(float)
 _nz = np.nonzero(_area)[0]
 _bot = _nz[0] if swi.affine[2, _zax] > 0 else _nz[-1]
 FULL_BOTTOM = bool(len(_nz) and _area[_bot] < 0.2 * _area.max())
+# v4.14: each rule has an id + the version that introduced or last changed it (rule_version column) and a
+# confidence for the excluded list. Confidence is a reading aid, not validated: "low" marks rules with
+# little real-data support or a case whose QC status is not ok (see review/ID_qc.json).
+RULE_CONF = {"E1": "high" if T1_ANAT else "medium", "E2": "medium", "E3": "medium", "E4": "high",
+             "E5": "medium", "E6": "medium", "E7": "medium", "E8": "low", "E9": "medium"}
 def exclusion(r):
-    if KEEP_ALL: return ""
+    """-> (rule_version, reason); ("", "") = kept"""
+    if KEEP_ALL: return "", ""
     if r["infratentorial"] or r["infra_frac"] >= (0.3 if T1_ANAT else 0.5):
-        return "infratentorial / tentorial interface (cerebellum, brainstem) - not cSS by definition"
+        return "E1@v4.9.2", "infratentorial / tentorial interface (cerebellum, brainstem) - not cSS by definition"
     if T1_ANAT and r["basal_frac"] >= 0.3:
-        return "basal cisterns (circle of Willis / basal veins next to brainstem, mesial temporal lobe)"
+        return "E2@v4.9.2", "basal cisterns (circle of Willis / basal veins next to brainstem, mesial temporal lobe)"
     if T1_ANAT and FULL_BOTTOM and r["rel_height"] < 0.2:
-        return "skull base (lowest 20 % of the cerebrum)"
-    if r["extent_mm"] < MIN_EXTENT_MM: return f"speck (<{MIN_EXTENT_MM:g} mm)"
+        return "E3@v4.9.2", "skull base (lowest 20 % of the cerebrum)"
+    if r["extent_mm"] < MIN_EXTENT_MM: return "E4@v4.8", f"speck (<{MIN_EXTENT_MM:g} mm)"
     tub_, tram_ = r["tube_ratio"], r["tram_frac"]
     if r["pial_dist_mm"] > 0.5 and np.isfinite(tub_) and tub_ > 0.45 and not (np.isfinite(tram_) and tram_ >= 0.2):
-        return "vein: tubular, in the middle of the sulcal CSF"
+        return "E5@v4.8", "vein: tubular, in the middle of the sulcal CSF"
     if r["vessel_wm_mm"] >= VES_EXCL_WM_MM and r["axis_normal"] >= VES_EXCL_AXIS \
             and not (np.isfinite(tram_) and tram_ >= 0.4):     # clear tram-track (cSS ~0.9) overrides
-        return "vessel: continues as a tube into the white matter, runs perpendicular to the cortex"
+        return "E6@v4.11", "vessel: continues as a tube into the white matter, runs perpendicular to the cortex"
     # v4.12 off the cortex (T1 anatomy only): cSS coats the pial surface, so it always touches the cortex.
     # A dark line lying wholly out in the sulcal CSF is a vein. Known P006 cSS: cortex_frac >= 0.55,
     # pial_dist <= -0.57; P011 false positives: median 0.16 / +1.22 mm -> thresholds with a wide margin
     if T1_ANAT and r["cortex_frac"] < OFF_CTX_FRAC and r["pial_dist_mm"] > OFF_PIAL_MM \
             and not (np.isfinite(tram_) and tram_ >= 0.2):
-        return "off the cortex: lies in the sulcal CSF without touching the cortex (vein)"
+        return "E7@v4.12", "off the cortex: lies in the sulcal CSF without touching the cortex (vein)"
     if FULL_BOTTOM and r["artifact_zone"] and r["rel_height"] < 0.4:
-        return "skull-base susceptibility artifact zone"
+        return "E8@v4.9", "skull-base susceptibility artifact zone"
     if np.isfinite(r["edge_contrast"]) and r["edge_contrast"] < MIN_EDGE_SD:
-        return "faint / ill-defined (normal dark cortex)"
-    return ""
-for r in rows: r["_excl"] = exclusion(r)
+        return "E9@v4.8", "faint / ill-defined (normal dark cortex)"
+    return "", ""
+# ---- 11b. case QC (v4.14, reported only - changes no candidate)
+QC = css_qc.case_qc(base, subj, swi, I, If, seg, brain, tissue, cortex, pial_sd, normal, rim, hemiL, vox,
+                    T1_ANAT, FULL_BOTTOM)
+for r in rows:
+    rv, r["_excl"] = exclusion(r)
+    r["qc_status"] = QC["status"]
+    r["rule_version"] = rv or RULESET
+    r["exclusion_confidence"] = ("low" if QC["status"] != "ok" else RULE_CONF[rv.split("@")[0]]) if rv else ""
 excluded = [r for r in rows if r["_excl"]]
 rows = [r for r in rows if not r["_excl"]]
 os.makedirs(f"{base}/review", exist_ok=True)
@@ -920,11 +1528,21 @@ if excluded:
     xdf = pd.DataFrame(excluded).sort_values("score", ascending=False).reset_index(drop=True)
     xdf.insert(0, "excl_id", np.arange(1, len(xdf) + 1))
     xr = np.zeros(lab.max() + 1, np.int16); xr[xdf["_lab"].values] = xdf["excl_id"].values; xl = xr[lab]
-    xdf.rename(columns={"_excl": "reason"})[["excl_id", "reason"] + [c for c in cols if c not in ("cand_id", "accept")]] \
+    xdf.rename(columns={"_excl": "reason"})[["excl_id", "reason"] + [c for c in cols if c not in ("cand_id", "accept")]
+                                            + ["exclusion_confidence"]] \
         .to_csv(f"{base}/review/{subj}_excluded.csv", index=False)
 else:
     pd.DataFrame(columns=["excl_id", "reason"]).to_csv(f"{base}/review/{subj}_excluded.csv", index=False)
 nib.save(nib.Nifti1Image(xl, swi.affine), f"{base}/review/{subj}_excluded.nii.gz")
+# generation-gate drops (v4.14): not for review, but lets stress_test / check_known say why a lesion is missing
+dl = np.zeros(I.shape, np.int16)
+if dropped:
+    ddf = pd.DataFrame(dropped)
+    dr = np.zeros(lab.max() + 1, np.int16); dr[ddf["_lab"].values] = ddf["drop_id"].values; dl = dr[lab]
+    ddf.drop(columns="_lab").to_csv(f"{base}/work/{subj}_dropped.csv", index=False)
+else:
+    pd.DataFrame(columns=["drop_id", "reason"]).to_csv(f"{base}/work/{subj}_dropped.csv", index=False)
+nib.save(nib.Nifti1Image(dl, swi.affine), f"{base}/work/{subj}_dropped.nii.gz")
 keep = np.zeros(I.shape, np.int16)
 if rows:
     df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
@@ -949,14 +1567,744 @@ print(f"{subj}: {n_raw} raw components -> {len(df)} candidates "
       f"[{len(excluded)} excluded: " + (", ".join(f"{v} {k.split(' (')[0].split(':')[0]}" for k, v in
       pd.Series([r['_excl'] for r in excluded]).value_counts().items()) if excluded else "none")
       + (f"; {n_before_merge - int(lab.max())} pieces joined, {n_chains} long chains kept apart"
-         if 'n_before_merge' in dir() else "") + "] "
+         if n_before_merge is not None else "") + "] "
       f"({cnt('artifact_zone')} artifact zone, {cnt('midline_zone')} midline, {cnt('vein_like')} vein-like, "
       f"{cnt('near_ich_suggest')} near ICH [{ich_src}], {cnt('infratentorial')} infratentorial)  rank={RANK}"
-      + ("  FLAIR used" if FL is not None else "") + "\n")
+      + ("  FLAIR used" if FL is not None else ""))
+print(f"{subj}: QC {QC['status']}" + (f" ({'; '.join(QC['reasons'])})" if QC["reasons"] else "")
+      + f", pial edge agreement {QC['edge_agreement_mm']} mm, {len(dropped)} components below the generation gates"
+      + " [review/" + subj + "_qc.json; reported only]\n")
 if len(df):
     print(df.head(15)[["cand_id", "hemi", "region", "volume_mm3", "darkness_z", "pial_dist_mm",
                        "tube_ratio", "surface_alignment", "tram_frac", "vein_tree_mm", "score",
                        "vox_i", "vox_j", "vox_k"]].to_string(index=False))
+```
+
+## scripts/eval_synthetic.py
+
+```python
+#!/usr/bin/env python3
+"""Score detector output against synthetic truth.  usage: eval_synthetic.py P005S
+Reports sensitivity, worst rank, how many NON-lesion candidates (real veins/artifacts
+of the host scan) rank above the worst lesion, and a ranking AUC."""
+import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
+import sys, os, numpy as np, nibabel as nib, pandas as pd
+from scipy import ndimage as ndi
+subj = sys.argv[1]
+base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project"))
+truth = nib.load(f"{base}/work/{subj}_truth.nii.gz").get_fdata().astype(int)
+cand  = nib.load(f"{base}/review/{subj}_candidates.nii.gz").get_fdata().astype(int)
+MIN_COVER = 0.30   # v4: a lesion counts as found only if candidates cover >=30 % of it (1-voxel
+                   # tolerance for blooming); v3 accepted any touching candidate, e.g. a vein crossing it
+n = int(truth.max()); best, lesion_c = [], set()
+for i in range(1, n + 1):
+    t = truth == i; nt = int(t.sum())
+    touch = sorted(set(np.unique(cand[ndi.binary_dilation(t, iterations=1)])) - {0})
+    cov = {c: (ndi.binary_dilation(cand == c, iterations=1) & t).sum() / nt for c in touch}
+    ids = [c for c in touch if cov[c] >= 0.05]
+    total = float((ndi.binary_dilation(np.isin(cand, ids), iterations=1) & t).sum() / nt) if ids else 0.0
+    found = total >= MIN_COVER
+    if found: best.append(ids[0]); lesion_c |= set(ids)
+    print(f"  lesion {i}: " + (f"FOUND  (candidate #{ids[0]}, coverage {total:.0%})" if found
+                               else f"MISSED (coverage {total:.0%})"))
+all_c = set(np.unique(cand)) - {0}
+non = sorted(all_c - lesion_c)
+worst = max(best) if best else 0
+above = sum(1 for c in non if c < worst)
+pairs = [(b < c) for b in best for c in non]
+auc = float(np.mean(pairs)) if pairs else (1.0 if best else 0.0)
+print(f"\n  sensitivity: {len(best)}/{n} = {100*len(best)/max(n,1):.0f}%   worst rank #{worst}")
+print(f"  non-lesion candidates ranked above the worst lesion: {above}   ranking AUC: {auc:.2f}")
+print(f"RESULT found={len(best)} total={n} worst={worst} above={above} auc={auc:.3f} ncand={len(all_c)}")
+```
+
+## scripts/expert_import.py
+
+```python
+#!/usr/bin/env python3
+"""Import an expert's answers from the blinded sheet (expert_sheet.py) as REFERENCE calls.
+usage: expert_import.py SUBJECT READER --css 3,17,40 [--vein 1,2] [--ich 9] [--unsure 5]
+       expert_import.py SUBJECT READER --letters "1V 2VS:4 3C 4N 5U ..."   (codes from the grid)
+       options: --session N (default 1; a later blinded re-read of the same sheet = 2, ...)  --score
+Codes (css_common.LABELS): C, V / VS / VC / VT / VX, TV, A / AM, N / NI, MB, CA, SAH, LN, HI, IS, H, U,
+optionally followed by :1-:5 confidence. Sheet numbers not listed are recorded as N (defaulted=1).
+Writes
+  review/ID_expert_READER.csv   candidates: cand_id, call (coarse: cSS / Vein / Normal / Artifact /
+                                Near ICH / Unsure), fingerprint, then label, confidence, defaulted (v4.15)
+  labels/candidate_labels.csv   long table, one row per study x reader x session x object, INCLUDING
+                                excluded objects when the sheet mixed them in (expert_sheet --include-excluded)
+The reader's own calls in review/ID_calls.csv are left untouched. Then scores the expert calls:
+  expert_import.py ... --score     (runs mark_css.py + score_css.py with the expert's cSS / ICH calls)"""
+import sys, os, re, datetime, subprocess, pandas as pd
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import base as _base, FP, match_calls, LABELS, parse_answer, cand_uid, append_rows
+
+if len(sys.argv) < 3: sys.exit(__doc__)
+subj, reader = sys.argv[1], sys.argv[2]
+base = _base()
+key = pd.read_csv(f"{base}/review/{subj}_expert_key.csv")
+if "list" not in key.columns:                     # key written before v4.15: candidates only
+    key["list"], key["obj_id"] = "candidate", key["cand_id"]
+arg = lambda f: sys.argv[sys.argv.index(f) + 1] if f in sys.argv else ""
+nums = lambda s: [int(x) for x in re.split(r"[,\s]+", s.strip()) if x]
+session = int(arg("--session") or 1)
+ans = {n: ("N", None, 1) for n in key.sheet_no}  # sheet_no -> (code, confidence, defaulted)
+if arg("--letters"):
+    for tok in arg("--letters").split():
+        try:
+            n, code, conf = parse_answer(tok)
+        except ValueError as e:
+            sys.exit(str(e))
+        ans[n] = (code, conf, 0)
+for flag, code in (("--css", "C"), ("--vein", "V"), ("--ich", "H"), ("--unsure", "U")):
+    for n in nums(arg(flag)): ans[n] = (code, None, 0)
+bad = [n for n in ans if n not in set(key.sheet_no)]
+if bad: sys.exit(f"sheet numbers not on the sheet: {bad}")
+
+# re-attach each sheet number to the CURRENT detector output by fingerprint (the detector may have been
+# re-run since the sheet was made); the 'call' passed to match_calls is the sheet number itself
+mapped, dropped = {}, 0
+for lst, path, idc in (("candidate", f"{base}/review/{subj}_candidates.csv", "cand_id"),
+                       ("excluded", f"{base}/review/{subj}_excluded.csv", "excl_id")):
+    k_ = key[key.list == lst]
+    if not len(k_): continue
+    cur = pd.read_csv(path) if os.path.exists(path) else pd.DataFrame(columns=[idc] + FP)
+    m, d = match_calls(cur.rename(columns={idc: "cand_id"}), k_[FP].assign(call=k_.sheet_no.values))
+    dropped += d
+    for oid, n in (m or {}).items():
+        mapped[(lst, oid)] = (int(n), cur.set_index(idc).loc[oid])
+if dropped: print(f"WARNING: {dropped} answers match no current object (detector re-run since the sheet)")
+
+ver = "v4.13 or earlier"
+cand = pd.read_csv(f"{base}/review/{subj}_candidates.csv")
+if "rule_version" in cand.columns and len(cand): ver = str(cand.rule_version.iloc[0])
+now = datetime.datetime.now().isoformat(timespec="seconds")
+rows, long_rows = [], []
+for (lst, oid), (n, r) in sorted(mapped.items(), key=lambda kv: kv[1][0]):
+    code, conf, dflt = ans[n]; label, call = LABELS[code]
+    if lst == "candidate":
+        rows.append(dict(cand_id=oid, call=call, **{f: r[f] for f in FP}, label=label, confidence=conf,
+                         defaulted=dflt))
+    long_rows.append(dict(study_id=subj, reader_id=reader, session=session, detector_version=ver,
+                          cand_uid=cand_uid(subj, r), list=lst, obj_id=oid, sheet_no=n, code=code,
+                          label=label, coarse_call=call, confidence=conf, defaulted=dflt, blinded=1,
+                          source="expert_sheet", timestamp=now))
+out = f"{base}/review/{subj}_expert_{reader}.csv"
+pd.DataFrame(rows, columns=["cand_id", "call"] + FP + ["label", "confidence", "defaulted"]).to_csv(out, index=False)
+append_rows(f"{base}/labels/candidate_labels.csv", long_rows,
+            ["study_id", "reader_id", "session", "cand_uid", "list"])
+summ = pd.Series([r["call"] for r in rows]).value_counts().to_dict()
+fine = pd.Series([r["label"] for r in long_rows]).value_counts().to_dict()
+nx = sum(1 for r in long_rows if r["list"] == "excluded")
+print(f"{subj}: expert {reader} -> {out}   {summ}")
+print(f"{subj}: {len(long_rows)} labels ({nx} on excluded objects, "
+      f"{sum(r['defaulted'] for r in long_rows)} defaulted to N) -> {base}/labels/candidate_labels.csv  {fine}")
+if nx and any(r["coarse_call"] == "cSS" for r in long_rows if r["list"] == "excluded"):
+    print(f"WARNING: the expert called {sum(1 for r in long_rows if r['list'] == 'excluded' and r['coarse_call'] == 'cSS')}"
+          f" EXCLUDED object(s) cSS - an exclusion rule removed real cSS (see labels/candidate_labels.csv)")
+if "--score" in sys.argv:
+    css = sorted(r["cand_id"] for r in rows if r["call"] == "cSS")
+    ich = sorted(r["cand_id"] for r in rows if r["call"] == "Near ICH")
+    cmd = [sys.executable, f"{base}/scripts/mark_css.py", subj, ",".join(map(str, css)) or "none"]
+    if ich: cmd += ["--ich", ",".join(map(str, ich))]
+    subprocess.run(cmd, check=True)
+```
+
+## scripts/expert_sheet.py
+
+```python
+#!/usr/bin/env python3
+"""Blinded picture sheet of all candidates for an expert reader -> review/ID_expert_sheet.pdf
+usage: expert_sheet.py SUBJECT [--top N] [--seed 1] [--include-excluded] [--vessel-overlay]
+  v4.16: every row also shows CORONAL and SAGITTAL views through the candidate (a vein that is a line
+      on one plane is a dot on another; cSS stays a band along the cortex in all three).
+  --vessel-overlay: outline the detector's vessel map (work/ID_vessels.nii.gz) in cyan on the minIP.
+      Off by default: it is a detector output, so it can bias a blinded reader.
+  --include-excluded (v4.15): the automatically EXCLUDED objects (review/ID_excluded.csv) are mixed in,
+      unmarked, so the expert's calls show whether an exclusion rule removed real cSS and give
+      labelled hard negatives (surface veins, artifacts, ...). Recommended for validation cases.
+
+Each candidate gets a SHEET NUMBER in random order (the detector's rank is hidden, so the
+order cannot bias the expert) and one row of pictures: SWI zoom (40 mm), the same with the
+candidate outlined in red, and an 8 mm minIP slab (veins = continuous tubes). No features or
+scores are printed. Page 1 explains the task; the last page is an answer grid.
+The key (sheet number -> cand_id + fingerprint) is saved separately in
+review/ID_expert_key.csv - do not give it to the expert.
+Import the answers with expert_import.py."""
+import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+import sys, os, numpy as np, nibabel as nib, pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import base as _base, FP, LABEL_HELP
+
+subj = sys.argv[1]
+top = int(sys.argv[sys.argv.index("--top") + 1]) if "--top" in sys.argv else None
+seed = int(sys.argv[sys.argv.index("--seed") + 1]) if "--seed" in sys.argv else 1
+base = _base()
+swi = nib.as_closest_canonical(nib.load(f"{base}/data/{subj}_swi.nii"))
+cnd = nib.as_closest_canonical(nib.load(f"{base}/review/{subj}_candidates.nii.gz"))
+I = swi.get_fdata().astype(np.float32); C = cnd.get_fdata().astype(int)
+vox = swi.header.get_zooms()[:3]
+br = I > 0
+lo, hi = np.percentile(I[br], [1, 99]) if br.any() else (I.min(), I.max())
+df = pd.read_csv(f"{base}/review/{subj}_candidates.csv")
+objs = [("candidate", int(c)) for c in df.cand_id.astype(int).tolist()[:top]]
+X = None
+if "--include-excluded" in sys.argv and os.path.exists(f"{base}/review/{subj}_excluded.csv"):
+    xdf = pd.read_csv(f"{base}/review/{subj}_excluded.csv")
+    if len(xdf):
+        X = nib.as_closest_canonical(nib.load(f"{base}/review/{subj}_excluded.nii.gz")).get_fdata().astype(int)
+        objs += [("excluded", int(e)) for e in xdf.excl_id]
+order = np.random.default_rng(seed).permutation(len(objs))
+sheet = {n + 1: objs[k] for n, k in enumerate(order)}          # sheet number -> (list, id)
+rows = []
+for n in sorted(sheet):
+    lst, i = sheet[n]
+    r = (df.set_index("cand_id") if lst == "candidate" else xdf.set_index("excl_id")).loc[i]
+    rows.append(dict(sheet_no=n, cand_id=i if lst == "candidate" else None, **{f: r[f] for f in FP},
+                     list=lst, obj_id=i))
+key = pd.DataFrame(rows, columns=["sheet_no", "cand_id"] + FP + ["list", "obj_id"])
+key.to_csv(f"{base}/review/{subj}_expert_key.csv", index=False)
+mask_of = lambda n: (C == sheet[n][1]) if sheet[n][0] == "candidate" else (X == sheet[n][1])
+
+HW = int(round(20 / vox[0]))                                   # 40 mm window
+HWV = [int(round(20 / v)) for v in vox]                        # 40 mm in each axis (orthogonal views)
+VS = None
+if "--vessel-overlay" in sys.argv and os.path.exists(f"{base}/work/{subj}_vessels.nii.gz"):
+    VS = nib.as_closest_canonical(nib.load(f"{base}/work/{subj}_vessels.nii.gz")).get_fdata() > 0
+SLAB = max(1, int(round(4 / vox[2])))
+PER_PAGE = 4
+out = f"{base}/review/{subj}_expert_sheet.pdf"
+with PdfPages(out) as pdf:
+    f = plt.figure(figsize=(8.27, 11.69)); f.text(0.08, 0.92, f"cSS expert reading - {subj}", fontsize=16, weight="bold")
+    f.text(0.06, 0.86, (
+        "For each numbered candidate write one code (optionally ':1'-':5' = confidence,\n"
+        "5 = certain; e.g. 12VS:4):\n\n"
+        + "".join(f"   {c:<22s}{t}\n" for c, t in LABEL_HELP) + "\n"
+        "Single letters C / V / N / H / U are enough if you prefer.\n\n"
+        "Definition used (Charidimou et al., Neurology 2017): well-defined, homogeneous\n"
+        "hypointense curvilinear signal on SWI outlining the outer surface of the cortex,\n"
+        "within the adjacent subarachnoid space, or both.\n\n"
+        "Each row: axial SWI (40 mm) | same, candidate outlined in red | 8 mm axial minIP\n"
+        "(veins: continuous branching tubes) | coronal | sagittal (both outlined).\n"
+        "A vein that is a line on one plane is usually a dot on another.\n"
+        "Orientation: axial/coronal neurological (patient left on image left);\n"
+        "sagittal: anterior on the right.\n\n"
+        "Candidates are in RANDOM order; no scores are shown.\n"
+        "Write the codes on the answer grid (last page)."), fontsize=9.5, va="top", family="monospace")
+    f.text(0.06, 0.18, "Also: please mark any cSS you see that has NO number (outline it in freeview,\n"
+           "or note slice and location) - it is needed to measure what the detector misses.", fontsize=10)
+    pdf.savefig(f); plt.close(f)
+    nums = sorted(sheet)
+    for p0 in range(0, len(nums), PER_PAGE):
+        f, axs = plt.subplots(PER_PAGE, 5, figsize=(8.27, 11.69))
+        f.subplots_adjust(left=0.07, right=0.99, top=0.96, bottom=0.03, wspace=0.05, hspace=0.12)
+        for r in range(PER_PAGE):
+            for a in axs[r]: a.axis("off")
+            if p0 + r >= len(nums): continue
+            n = nums[p0 + r]; m = mask_of(n)
+            if not m.any(): continue
+            pts = np.argwhere(m); ci, cj = pts[:, 0].mean(), pts[:, 1].mean()
+            kc = int(np.clip(np.bincount(pts[:, 2]).argmax(), 0, I.shape[2] - 1))
+            i0, i1 = int(max(ci - HW, 0)), int(min(ci + HW, I.shape[0]))
+            j0, j1 = int(max(cj - HW, 0)), int(min(cj + HW, I.shape[1]))
+            sl = I[i0:i1, j0:j1, kc].T; ms = m[i0:i1, j0:j1, kc].T
+            k0, k1 = max(kc - SLAB, 0), min(kc + SLAB + 1, I.shape[2])
+            mip = np.where(I[i0:i1, j0:j1, k0:k1] > 0, I[i0:i1, j0:j1, k0:k1], hi).min(axis=2).T
+            for c, (img, outline) in enumerate(((sl, False), (sl, True), (mip, True))):
+                a = axs[r][c]; a.imshow(img, cmap="gray", origin="lower", vmin=lo, vmax=hi)
+                if outline and ms.any():
+                    src = m[i0:i1, j0:j1, k0:k1].any(axis=2).T if c == 2 else ms
+                    a.contour(src.astype(float), levels=[0.5], colors="red", linewidths=0.9)
+                if c == 2 and VS is not None and VS[i0:i1, j0:j1, k0:k1].any():
+                    a.contour(VS[i0:i1, j0:j1, k0:k1].any(axis=2).T.astype(float), levels=[0.5],
+                              colors="cyan", linewidths=0.5)
+            # coronal (x-z) and sagittal (y-z) through the candidate centre, 40 mm windows, true aspect
+            cjj, cii = int(round(cj)), int(round(ci))
+            if not m[:, cjj, :].any(): cjj = int(np.bincount(pts[:, 1]).argmax())
+            if not m[cii, :, :].any(): cii = int(np.bincount(pts[:, 0]).argmax())
+            ka, kb = max(kc - HWV[2], 0), min(kc + HWV[2], I.shape[2])
+            ia, ib = max(int(ci) - HWV[0], 0), min(int(ci) + HWV[0], I.shape[0])
+            ja, jb = max(int(cj) - HWV[1], 0), min(int(cj) + HWV[1], I.shape[1])
+            for c, (img, msk, asp) in ((3, (I[ia:ib, cjj, ka:kb], m[ia:ib, cjj, ka:kb], vox[2] / vox[0])),
+                                       (4, (I[cii, ja:jb, ka:kb], m[cii, ja:jb, ka:kb], vox[2] / vox[1]))):
+                a = axs[r][c]; a.imshow(img.T, cmap="gray", origin="lower", vmin=lo, vmax=hi, aspect=asp)
+                if msk.any(): a.contour(msk.T.astype(float), levels=[0.5], colors="red", linewidths=0.9)
+            axs[r][0].text(-0.06, 0.5, f"{n}", transform=axs[r][0].transAxes, fontsize=16, weight="bold",
+                           ha="right", va="center")
+            if r == 0 or p0 + r == p0:
+                for c, t in enumerate(("axial", "outlined", "minIP 8 mm", "coronal", "sagittal")):
+                    axs[r][c].set_title(t, fontsize=9)
+        pdf.savefig(f); plt.close(f)
+    # answer grid
+    f = plt.figure(figsize=(8.27, 11.69)); f.text(0.08, 0.95, f"Answers - {subj}   (codes on page 1, e.g. C, VS:4)", fontsize=14, weight="bold")
+    f.text(0.08, 0.925, "Reader: ____________________    Date: ____________", fontsize=10)
+    cols = 4; rows = int(np.ceil(len(nums) / cols))
+    for n in nums:
+        c, r = (n - 1) // rows, (n - 1) % rows
+        f.text(0.08 + c * 0.22, 0.89 - r * (0.85 / max(rows, 1)), f"{n:>3}  ______", fontsize=10, family="monospace")
+    pdf.savefig(f); plt.close(f)
+print(f"{subj}: expert sheet with {len(nums)} objects ({sum(1 for v in sheet.values() if v[0] == 'excluded')} "
+      f"excluded mixed in) -> {out}\n"
+      f"      key (do NOT give to the expert): {base}/review/{subj}_expert_key.csv")
+```
+
+## scripts/export_review.py
+
+```python
+#!/usr/bin/env python3
+"""Print top-N candidates as tab-separated rows for pasting into the workbook
+('Candidate Review', column A).   usage: export_review.py P006 40 | pbcopy"""
+import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
+import sys, os, pandas as pd
+subj = sys.argv[1]; n = int(sys.argv[2]) if len(sys.argv) > 2 else 40
+base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project"))
+df = pd.read_csv(f"{base}/review/{subj}_candidates.csv").head(n)
+cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongation",
+        "surface_contact", "darkness_z", "artifact_zone", "midline_zone", "score",
+        "vox_i", "vox_j", "vox_k"]
+for _, r in df.iterrows():
+    print(subj + "\t" + "\t".join(str(r[c]) for c in cols))
+```
+
+## scripts/feature_report.py
+
+```python
+#!/usr/bin/env python3
+"""Compare candidate features between calls (cSS vs Vein/Normal/Artifact) across all reviewed subjects.
+usage: feature_report.py [--source expert|reader]
+Default: for each subject the EXPERT reference (review/ID_expert_*.csv from expert_import.py) is used
+when it exists, otherwise the reader's own calls (review/ID_calls.csv from review_css.py)."""
+import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+import sys, os, glob, numpy as np, pandas as pd
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import base as _base, load_calls, match_calls
+base = _base()
+src_pref = sys.argv[sys.argv.index("--source") + 1] if "--source" in sys.argv else "expert"
+subjects = sorted({os.path.basename(f).split("_calls.csv")[0] for f in glob.glob(f"{base}/review/*_calls.csv")} |
+                  {os.path.basename(f).split("_expert_")[0] for f in glob.glob(f"{base}/review/*_expert_*.csv")
+                   if not f.endswith("_expert_key.csv")})
+rows = []; used = {}
+for s in subjects:
+    cp = f"{base}/review/{s}_candidates.csv"
+    if not os.path.exists(cp): continue
+    d = pd.read_csv(cp); calls = {}
+    ex = sorted(f for f in glob.glob(f"{base}/review/{s}_expert_*.csv") if not f.endswith("_expert_key.csv"))
+    if ex and src_pref == "expert":
+        calls, dropped = match_calls(d, pd.read_csv(ex[0])); calls = calls or {}
+        used[s] = "expert " + os.path.basename(ex[0]).split("_expert_")[1][:-4]
+        if dropped: print(f"WARNING: {s}: {dropped} expert calls match no current candidate")
+    else:
+        calls, warn = load_calls(base, s, d)          # matched by fingerprint, not by rank
+        if warn: print("WARNING:", warn)
+        used[s] = "reader"
+    if not calls: continue
+    m = d.merge(pd.DataFrame(list(calls.items()), columns=["cand_id", "call"]), on="cand_id")
+    m["subject"] = s; rows.append(m)
+print("labels: " + ", ".join(f"{s}={u}" for s, u in used.items()))
+if not rows: sys.exit("no reviewed cases yet (run review_css.py first)")
+D = pd.concat(rows, ignore_index=True)
+D = D[D.call.isin(["cSS", "Vein", "Normal", "Artifact"])]
+print(f"{D.subject.nunique()} subject(s), {len(D)} decided candidates: {D.call.value_counts().to_dict()}\n")
+def auc(x, y):
+    x, y = np.asarray(x, float), np.asarray(y, float); x, y = x[~np.isnan(x)], y[~np.isnan(y)]
+    if not len(x) or not len(y): return float("nan")
+    return float((x[:, None] > y[None, :]).mean() + 0.5 * (x[:, None] == y[None, :]).mean())
+feats = ["darkness_z", "volume_mm3", "n_slices", "elongation", "surface_contact", "cortex_frac",
+         "cortex_dist_mm", "branch_per10mm", "surface_gradient",
+         "pial_dist_mm", "bank_frac", "tube_ratio", "surface_alignment", "tram_frac", "vein_tree_mm",
+         "mirror_dark_frac", "flair_csf_z", "parenchyma_frac", "css_evidence", "vein_evidence",
+         "score_v3", "score_v4", "score"]
+print(f"{'feature':18s} {'cSS':>8s} {'Vein':>8s} {'Normal':>8s} {'Artifact':>9s}   AUC cSS vs rest")
+for f in feats:
+    if f not in D: continue
+    med = D.groupby("call")[f].median()
+    a = auc(D[D.call == "cSS"][f], D[D.call != "cSS"][f])
+    tag = "  <- useful" if a >= 0.75 or a <= 0.25 else ""
+    print(f"{f:18s} " + " ".join(f"{med.get(k, np.nan):8.2f}" for k in ["cSS", "Vein", "Normal"]) +
+          f" {med.get('Artifact', np.nan):9.2f}   {a:5.2f}{tag}")
+print("\nAUC near 0.5 = no help; >0.75 = higher in cSS; <0.25 = lower in cSS.")
+```
+
+## scripts/label_missed.py
+
+```python
+#!/usr/bin/env python3
+"""Record cSS that the detector did NOT show (needed to measure sensitivity, not just precision).
+usage: label_missed.py SUBJECT READER [--mask path.nii.gz] [--session N]
+The reader outlines every cSS focus that has no number on the expert sheet, in freeview on the SWI,
+and saves it as labels/ID_missed_READER.nii.gz (any non-zero value; one connected blob per focus):
+  freeview -v data/ID_swi.nii review/ID_candidates.nii.gz:colormap=lut  -> File > New Volume (template:
+  the SWI) -> draw -> save as labels/ID_missed_READER.nii.gz
+For each blob this script records where it went in the pipeline:
+  shown       a current candidate covers >= 30 % of it (it was not missed; check the sheet call)
+  excluded    an excluded object covers it -> the rule id and reason (review/ID_excluded.csv)
+  dropped     removed by a generation gate -> the reason (work/ID_dropped.csv, v4.14)
+  not generated  never a dark ridge component (contrast / ridge threshold / outside the search zone)
+-> labels/missed_lesions.csv (one row per blob; earlier rows of the same study/reader/session replaced)"""
+import sys, os, datetime, numpy as np, pandas as pd, nibabel as nib
+from scipy import ndimage as ndi
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import base as _base, append_rows
+
+if len(sys.argv) < 3: sys.exit(__doc__)
+subj, reader = sys.argv[1], sys.argv[2]
+base = _base()
+arg = lambda f: sys.argv[sys.argv.index(f) + 1] if f in sys.argv else ""
+session = int(arg("--session") or 1)
+mp = os.path.expanduser(arg("--mask") or f"{base}/labels/{subj}_missed_{reader}.nii.gz")
+if not os.path.exists(mp): sys.exit(f"no mask {mp} - draw it first (see usage)")
+swi = nib.load(f"{base}/data/{subj}_swi.nii"); vox = np.array(swi.header.get_zooms()[:3], float)
+M = nib.load(mp)
+if M.shape[:3] != swi.shape[:3] or not np.allclose(M.affine, swi.affine, atol=1e-3):
+    sys.exit("mask is not on the SWI grid - draw it on data/ID_swi.nii")
+M = np.asarray(M.dataobj).reshape(swi.shape[:3]) > 0
+ld = lambda p: nib.load(p).get_fdata().astype(int) if os.path.exists(p) else np.zeros(swi.shape[:3], int)
+cand = ld(f"{base}/review/{subj}_candidates.nii.gz"); excl = ld(f"{base}/review/{subj}_excluded.nii.gz")
+drop = ld(f"{base}/work/{subj}_dropped.nii.gz")
+xt = pd.read_csv(f"{base}/review/{subj}_excluded.csv").set_index("excl_id") \
+    if os.path.exists(f"{base}/review/{subj}_excluded.csv") else pd.DataFrame()
+dt = pd.read_csv(f"{base}/work/{subj}_dropped.csv").set_index("drop_id") \
+    if os.path.exists(f"{base}/work/{subj}_dropped.csv") else pd.DataFrame()
+seg_p = f"{base}/work/{subj}_seg_swispace.nii.gz"
+seg = ld(seg_p)
+lab, n = ndi.label(M, structure=np.ones((3, 3, 3), bool))
+now = datetime.datetime.now().isoformat(timespec="seconds"); rows = []
+top = lambda a, m: int(np.bincount(a[m][a[m] > 0]).argmax())
+for i, sl in enumerate(ndi.find_objects(lab), 1):
+    m = lab == i; near = ndi.binary_dilation(m, iterations=1)       # 1-voxel tolerance for blooming
+    p = np.argwhere(m); c0 = p.mean(0)
+    ext = float(np.sqrt((((p.max(0) - p.min(0) + 1) * vox) ** 2).sum()))
+    cov = float((ndi.binary_dilation(cand > 0, iterations=1)[m]).mean())
+    r = dict(study_id=subj, reader_id=reader, session=session, lesion_no=i,
+             vox_i=int(round(c0[0])), vox_j=int(round(c0[1])), vox_k=int(round(c0[2])),
+             volume_mm3=round(float(m.sum() * vox.prod()), 1), extent_mm=round(ext, 1),
+             hemi="", region_label=0, fate="", obj_id=None, rule_version="", reason="",
+             candidate_coverage=round(cov, 2), mask=os.path.basename(mp), timestamp=now)
+    s_ = seg[near][seg[near] >= 1000]
+    if s_.size:
+        r["region_label"] = int(np.bincount(s_).argmax()); r["hemi"] = "L" if r["region_label"] < 2000 else "R"
+    if cov >= 0.3:
+        r["fate"], r["obj_id"] = "shown", top(cand, near)
+    elif (excl[near] > 0).any():
+        e = top(excl, near); r["fate"], r["obj_id"] = "excluded", e
+        if e in xt.index:
+            r["reason"] = xt.loc[e, "reason"]
+            r["rule_version"] = xt.loc[e, "rule_version"] if "rule_version" in xt.columns else ""
+    elif (drop[near] > 0).any():
+        d = top(drop, near); r["fate"], r["obj_id"] = "dropped", d
+        r["reason"] = dt.loc[d, "reason"] if d in dt.index else ""
+    else:
+        r["fate"] = "not generated"
+    rows.append(r)
+# replace this study/reader/session's earlier rows (a redrawn mask may have fewer blobs)
+path = f"{base}/labels/missed_lesions.csv"
+if os.path.exists(path):
+    old = pd.read_csv(path)
+    old = old[~((old.study_id.astype(str) == subj) & (old.reader_id.astype(str) == reader) & (old.session == session))]
+    old.to_csv(path, index=False)
+append_rows(path, rows, ["study_id", "reader_id", "session", "lesion_no"])
+f = pd.Series([r["fate"] for r in rows]).value_counts().to_dict()
+print(f"{subj}: {n} missed-lesion outline(s) from {reader} -> {path}   {f}")
+for r in rows:
+    why = " ".join(x for x in (r["rule_version"], r["reason"]) if x)
+    print(f"  #{r['lesion_no']}: {r['fate']}" + (f" ({why})" if why else "")
+          + f"  extent {r['extent_mm']} mm  vox {r['vox_i']} {r['vox_j']} {r['vox_k']}")
+if f.get("shown"):
+    print("  note: 'shown' outlines are covered by a numbered candidate - check that number's call instead")
+```
+
+## scripts/make_synthetic.py
+
+```python
+#!/usr/bin/env python3
+"""Insert synthetic cSS (and optional synthetic vein decoys) into a presumed cSS-negative host -> {HOST}S.
+usage: make_synthetic.py HOST [n_lesions=8] [depth=0.6] [seed=1] [--tram 0.4] [--veins 4] [--radial 2]
+                         [--surface-veins 2] [--legacy]
+
+v3 (realistic lesions; after the P006 stress test showed v2 lesions were too big and blob-like, so
+volume / branching / elongation separated them for the wrong reason):
+  - thin CURVILINEAR lesions: a 1-voxel path traced along the cortex-CSF boundary (no flood fill),
+    optionally thickened by 1 voxel (blooming), 5-30 mm long (log-uniform), on 2-5 consecutive slices
+  - tram-track: with probability --tram the opposite bank of the same sulcus gets a matching line
+  - darkness per lesion around `depth`, edge blur, and noise inside the lesion
+  - --veins K: K tubular decoys (radius 0.5-0.9 mm, 15-40 mm) in the sulcal CSF, as dark as the
+    lesions; written to work/HOSTS_veins.nii.gz (Cao et al. 2026: vessel decoys reduce false positives)
+  - --radial K (v4.11): K transcortical / medullary vein decoys: straight tubes starting 2 mm out in the
+    CSF and running perpendicular to the cortex 10-18 mm into the white matter (same veins file)
+  - --surface-veins K (v4.16): the hardest real mimic - K veins running ALONG the cortical surface in the
+    CSF within 1.5 mm of the cortex, 25-45 mm over many slices, 60 % with a side branch (8-15 mm) leaving
+    10-20 mm along; same veins file; kinds in work/HOSTS_vein_kinds.csv (sulcal / radial / surface)
+--legacy reproduces the v2 generator (flood-filled, thicker lesions) for comparison."""
+import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
+import sys, os, numpy as np, nibabel as nib
+from scipy import ndimage as ndi
+
+flag = lambda f, d: type(d)(sys.argv[sys.argv.index(f) + 1]) if f in sys.argv else d
+TRAM, NVEIN, NRAD, LEGACY = flag("--tram", 0.4), flag("--veins", 0), flag("--radial", 0), "--legacy" in sys.argv
+NSURF = flag("--surface-veins", 0)
+# positional values given after a flag (e.g. "--veins 4") must not be read as lesion arguments
+pos = [a for i, a in enumerate(sys.argv[1:], 1) if not a.startswith("--") and not sys.argv[i - 1] in ("--tram", "--veins", "--radial", "--surface-veins")]
+host = pos[0]; N = int(pos[1]) if len(pos) > 1 else 8
+depth = float(pos[2]) if len(pos) > 2 else 0.6; seed = int(pos[3]) if len(pos) > 3 else 1
+rng = np.random.default_rng(seed)
+base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project"))
+
+img = nib.load(f"{base}/data/{host}_swi.nii"); I = img.get_fdata().astype(np.float32)
+seg = nib.load(f"{base}/work/{host}_seg_swispace.nii.gz").get_fdata().astype(int)
+vox = np.array(img.header.get_zooms()[:3], float)
+s2 = np.ones((3, 3, 1), bool)
+brain = ndi.binary_fill_holes(I > 0)
+dist = ndi.distance_transform_edt(brain, sampling=vox)
+cortex = seg >= 1000
+CONVEX = [3, 8, 11, 15, 22, 24, 27, 28, 29, 30, 31]
+convex = cortex & np.isin(seg % 1000, CONVEX)
+sulcal = brain & ~cortex & ~np.isin(seg, [2, 41])
+boundary = convex & ndi.binary_dilation(sulcal, structure=s2) & (dist > 4.0)
+c = I[cortex & (I > 0)]; sd_c = 1.4826 * np.median(np.abs(c - np.median(c)))
+
+nz = I.shape[2]
+pts_all = np.argwhere(boundary)
+pts_all = pts_all[(pts_all[:, 2] >= 3) & (pts_all[:, 2] < nz - 6)]
+if len(pts_all) == 0: sys.exit("no admissible cortical boundary found")
+NB8 = [(dx, dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1) if dx or dy]
+
+def trace(b, start, L_mm, d0=None):
+    """1-voxel path along the boundary b (2-D), preferring to keep its direction (no branches)"""
+    path, seen, cur, d, length = [start], {start}, start, d0, 0.0
+    while length < L_mm:
+        nxt = [(cur[0] + dx, cur[1] + dy) for dx, dy in NB8
+               if 0 <= cur[0] + dx < b.shape[0] and 0 <= cur[1] + dy < b.shape[1]
+               and b[cur[0] + dx, cur[1] + dy] and (cur[0] + dx, cur[1] + dy) not in seen]
+        if not nxt: break
+        if d is None: n = nxt[rng.integers(len(nxt))]
+        else: n = max(nxt, key=lambda q: (q[0] - cur[0]) * d[0] + (q[1] - cur[1]) * d[1])
+        d = (n[0] - cur[0], n[1] - cur[1])
+        length += float(np.hypot(d[0] * vox[0], d[1] * vox[1]))
+        path.append(n); seen.add(n); cur = n
+    return path, length, d
+
+def opposite_bank(path, k):
+    """boundary voxels across the sulcal CSF from the path (1.5-6 mm away, CSF in between)"""
+    b = boundary[:, :, k]; P = np.array(path)
+    cand = np.argwhere(b)
+    if not len(cand): return None
+    dd = np.sqrt((((cand[:, None, :] - P[None, :, :]) * vox[:2]) ** 2).sum(-1)).min(1)
+    cand = cand[(dd > 1.5) & (dd < 6.0)]
+    ok = [q for q in map(tuple, cand)
+          if sulcal[(q[0] + P[np.argmin(((P - q) ** 2).sum(1))][0]) // 2,
+                    (q[1] + P[np.argmin(((P - q) ** 2).sum(1))][1]) // 2, k]]
+    return ok[rng.integers(len(ok))] if ok else None
+
+truth, seeds, tries = np.zeros(I.shape, np.int16), [], 0
+dark = np.zeros(I.shape, np.float32)
+while len(seeds) < N and tries < 8000:
+    tries += 1
+    p = pts_all[rng.integers(len(pts_all))]
+    if any(np.linalg.norm((p - q) * vox) < 25 for q in seeds): continue
+    lesion, ok = np.zeros(I.shape, bool), True
+    if LEGACY:                                   # v2: flood fill, then 1-2 dilations
+        L_mm, nsl, cur = rng.uniform(10, 30), int(rng.integers(2, 5)), p[:2]
+        for dk in range(nsl):
+            k = p[2] + dk; b = boundary[:, :, k]; cand = np.argwhere(b)
+            if k >= nz or len(cand) == 0: ok = False; break
+            d = np.linalg.norm((cand - cur) * vox[:2], axis=1); j = d.argmin()
+            if d[j] > 4: ok = False; break
+            start = tuple(cand[j]); cur = cand[j]
+            target, seen, queue = int(L_mm / vox[0]), {start}, [start]
+            while queue and len(seen) < target:
+                x, y = queue.pop(0)
+                for dx, dy in NB8:
+                    q = (x + dx, y + dy)
+                    if 0 <= q[0] < b.shape[0] and 0 <= q[1] < b.shape[1] and b[q] and q not in seen:
+                        seen.add(q); queue.append(q)
+            if len(seen) < 0.6 * target: ok = False; break
+            for q in seen: lesion[q[0], q[1], k] = True
+        if not ok: continue
+        lesion = ndi.binary_dilation(lesion, structure=s2, iterations=int(rng.integers(1, 3))) & brain
+    else:                                        # v3: thin traced line(s)
+        L_mm = float(np.exp(rng.uniform(np.log(5), np.log(30))))
+        nsl = int(rng.integers(2, 6)); cur, d0 = tuple(p[:2]), None
+        tram = rng.random() < TRAM; opp = None
+        for dk in range(nsl):
+            k = p[2] + dk; b = boundary[:, :, k]; cand = np.argwhere(b)
+            if k >= nz or not len(cand): ok = False; break
+            dd = np.linalg.norm((cand - np.array(cur)) * vox[:2], axis=1); j = dd.argmin()
+            if dd[j] > 3: ok = False; break
+            path, length, d0 = trace(b, tuple(cand[j]), L_mm, d0 if dk else None)
+            if length < 0.6 * L_mm: ok = False; break
+            for q in path: lesion[q[0], q[1], k] = True
+            cur = tuple(cand[j])
+            if tram:
+                o = opposite_bank(path, k) if opp is None else None
+                start = o if o is not None else opp
+                if start is not None:
+                    bo = boundary[:, :, k]; cand_o = np.argwhere(bo)
+                    jo = np.linalg.norm((cand_o - np.array(start)) * vox[:2], axis=1).argmin()
+                    po, _, _ = trace(bo, tuple(cand_o[jo]), L_mm)
+                    for q in po: lesion[q[0], q[1], k] = True
+                    opp = tuple(cand_o[jo])
+        if not ok: continue
+        if rng.random() < 0.5:                   # blooming: 1-voxel in-plane thickening, stays at the surface
+            lesion = ndi.binary_dilation(lesion, structure=s2) & (cortex | sulcal) & brain
+    if (truth[lesion] > 0).any() or not lesion.any(): continue
+    seeds.append(p); truth[lesion] = len(seeds)
+    d_i = float(np.clip(depth + rng.uniform(-0.1, 0.1), 0.05, 0.9))
+    w = ndi.gaussian_filter(lesion.astype(np.float32), sigma=(rng.uniform(0.4, 0.8),) * 2 + (0,))
+    dark = np.maximum(dark, np.clip(w * 2.0, 0, 1) * d_i)
+
+# ---- vein decoys: tubes running in the sulcal CSF
+veins = np.zeros(I.shape, np.int16)
+if NVEIN and not LEGACY:
+    mid = sulcal & (ndi.distance_transform_edt(sulcal, sampling=vox) >= 0.7) & (dist > 6.0)
+    in_csf = ndi.binary_dilation(sulcal, structure=np.ones((3, 3, 3), bool))   # decoys stay in sulcal CSF
+    vp = np.argwhere(mid); nv = 0; vt = 0
+    while nv < NVEIN and vt < 2000 and len(vp):
+        vt += 1
+        q = vp[rng.integers(len(vp))].astype(float)
+        if (truth[tuple(q.astype(int))] > 0) or any(np.linalg.norm((q - s) * vox) < 15 for s in seeds): continue
+        dvec = rng.normal(size=3); dvec[2] *= rng.uniform(0.2, 1.0); dvec /= np.linalg.norm(dvec * vox) + 1e-9
+        L, r, pts, pnt = rng.uniform(15, 40), rng.uniform(0.5, 0.9), [], q.copy()
+        for _ in range(int(L / 0.5)):
+            dvec += rng.normal(scale=0.05, size=3) / vox; dvec /= np.linalg.norm(dvec * vox) + 1e-9
+            pnt = pnt + dvec * 0.5
+            ii = np.round(pnt).astype(int)
+            if (ii < 0).any() or (ii >= np.array(I.shape)).any() or not in_csf[tuple(ii)]: break
+            pts.append(ii)
+        if len(pts) * 0.5 < 10: continue
+        m = np.zeros(I.shape, bool); m[tuple(np.array(pts).T)] = True
+        m = (ndi.distance_transform_edt(~m, sampling=vox) <= r) & brain
+        if (truth[m] > 0).any() or (veins[m] > 0).any(): continue
+        nv += 1; veins[m] = nv
+        dark = np.maximum(dark, m * float(np.clip(depth + rng.uniform(-0.1, 0.1), 0.05, 0.9)))
+n_sulc = int(veins.max())
+
+# ---- transcortical / medullary vein decoys: straight tubes perpendicular to the cortex into the WM
+if NRAD and not LEGACY:
+    wm = np.isin(seg, [2, 41])
+    g = np.gradient(ndi.gaussian_filter(ndi.distance_transform_edt(~wm, sampling=vox), 1.0), *vox)
+    nv, vt = int(veins.max()), 0; n0 = nv
+    while nv - n0 < NRAD and vt < 2000:
+        vt += 1
+        q = pts_all[rng.integers(len(pts_all))].astype(float)
+        if any(np.linalg.norm((q - s_) * vox) < 15 for s_ in seeds) or veins[tuple(q.astype(int))]: continue
+        u = -np.array([gg[tuple(q.astype(int))] for gg in g]); nu = np.linalg.norm(u)
+        if nu < 0.3: continue
+        u = u / nu                                         # mm direction toward the white matter
+        L, r = rng.uniform(10, 18), rng.uniform(0.5, 0.9)
+        tt = np.arange(-2.0, 3.0 + L, 0.3)                 # 2 mm outside, ~3 mm cortex, L mm into WM
+        ii = np.round(q[None, :] + tt[:, None] * u[None, :] / vox).astype(int)
+        if (ii < 0).any() or (ii >= np.array(I.shape)).any(): continue
+        if wm[tuple(ii[tt > 4.0].T)].mean() < 0.6 or not brain[tuple(ii.T)].all(): continue
+        m = np.zeros(I.shape, bool); m[tuple(ii.T)] = True
+        m = (ndi.distance_transform_edt(~m, sampling=vox) <= r) & brain
+        if (truth[m] > 0).any() or (veins[m] > 0).any(): continue
+        nv += 1; veins[m] = nv
+        dark = np.maximum(dark, m * float(np.clip(depth + rng.uniform(-0.1, 0.1), 0.05, 0.9)))
+
+# ---- surface-following vein decoys (v4.16): direction-persistent walk that stays in the CSF next to the cortex
+kinds = {v: ("sulcal" if v <= n_sulc else "radial") for v in range(1, int(veins.max()) + 1)}
+if NSURF and not LEGACY:
+    near_ctx = brain & ~cortex & ~np.isin(seg, [2, 41]) & \
+        (ndi.distance_transform_edt(~cortex, sampling=vox) <= 1.5) & (dist > 6.0)
+    sp = np.argwhere(near_ctx); n0 = int(veins.max()); ns = vt = 0
+    def walk(start, d, L):
+        pts, pnt = [], start.astype(float)
+        for _ in range(int(L / 0.4)):
+            for t in range(25):                      # keep direction, else turn to stay next to the cortex
+                dv = d + rng.normal(scale=0.08 if t == 0 else 0.5, size=3) / vox
+                dv /= np.linalg.norm(dv * vox) + 1e-9
+                q = pnt + dv * 0.4; ii = np.round(q).astype(int)
+                if (ii >= 0).all() and (ii < np.array(I.shape)).all() and near_ctx[tuple(ii)]:
+                    break
+            else:
+                break
+            d, pnt = dv, q; pts.append(np.round(pnt).astype(int))
+        return pts, d
+    while ns < NSURF and vt < 3000 and len(sp):
+        vt += 1
+        q = sp[rng.integers(len(sp))]
+        if truth[tuple(q)] or veins[tuple(q)] or any(np.linalg.norm((q - s_) * vox) < 15 for s_ in seeds): continue
+        d0 = rng.normal(size=3); d0[2] *= rng.uniform(0.3, 1.0); d0 /= np.linalg.norm(d0 * vox) + 1e-9
+        L = rng.uniform(25, 45); pts, _ = walk(q, d0, L)
+        if len(pts) * 0.4 < 0.7 * L: continue
+        if rng.random() < 0.6:                       # side branch 10-20 mm along the vein
+            k = min(int(rng.uniform(10, 20) / 0.4), len(pts) - 2)
+            dd = np.array(pts[k + 1], float) - np.array(pts[k], float)
+            br = np.cross(dd, rng.normal(size=3)); br /= np.linalg.norm(br * vox) + 1e-9
+            bp, _ = walk(np.array(pts[k]), 0.5 * dd / (np.linalg.norm(dd * vox) + 1e-9) + br, rng.uniform(8, 15))
+            pts += bp
+        m = np.zeros(I.shape, bool); m[tuple(np.array(pts).T)] = True
+        m = (ndi.distance_transform_edt(~m, sampling=vox) <= rng.uniform(0.5, 0.8)) & brain
+        if (truth[m] > 0).any() or (veins[m] > 0).any(): continue
+        ns += 1; veins[m] = n0 + ns; kinds[n0 + ns] = "surface"
+        dark = np.maximum(dark, m * float(np.clip(depth + rng.uniform(-0.1, 0.1), 0.05, 0.9)))
+
+Is = I * (1 - dark)
+Is += (rng.normal(0, 0.35 * sd_c, I.shape) * (dark > 0.05)).astype(np.float32)
+Is[brain] = np.maximum(Is[brain], 1.0)        # keep the brain mask unchanged
+Is[~brain] = I[~brain]
+
+out = nib.Nifti1Image(Is.astype(np.float32), img.affine, img.header); out.set_data_dtype(np.float32)
+nib.save(out, f"{base}/data/{host}S_swi.nii")
+nib.save(nib.Nifti1Image(truth, img.affine), f"{base}/work/{host}S_truth.nii.gz")
+nib.save(nib.Nifti1Image(veins, img.affine), f"{base}/work/{host}S_veins.nii.gz")
+import pandas as pd
+pd.DataFrame(sorted(kinds.items()), columns=["vein_id", "kind"]).to_csv(f"{base}/work/{host}S_vein_kinds.csv", index=False)
+
+lut = {}
+lutp = os.path.join(os.environ.get("FREESURFER_HOME", ""), "FreeSurferColorLUT.txt")
+if os.path.exists(lutp):
+    for line in open(lutp):
+        t = line.split()
+        if len(t) > 2 and t[0].isdigit(): lut[int(t[0])] = t[1]
+print(f"{host}S: inserted {len(seeds)} synthetic cSS lesions ({'legacy' if LEGACY else 'v3 thin'}, depth ~{depth}, "
+      f"seed {seed}){f', {int(veins.max())} vein decoys' if veins.max() else ''}")
+for i in range(1, len(seeds) + 1):
+    m = truth == i; s = seg[m][seg[m] >= 1000]
+    lab = int(np.bincount(s).argmax()) if s.size else 0
+    ks = np.unique(np.argwhere(m)[:, 2]); c0 = np.argwhere(m).mean(0).round().astype(int)
+    print(f"  lesion {i}: {lut.get(lab, lab)!s:30s} slices {ks.min()}-{ks.max()}  vox {c0[0]} {c0[1]} {c0[2]}"
+          f"  {m.sum() * np.prod(vox):.0f} mm3")
+```
+
+## scripts/mark_css.py
+
+```python
+#!/usr/bin/env python3
+"""Mark reviewed candidates and score.
+usage: mark_css.py SUBJECT 1,4,9 [--ich 3,7] [--reviewed 1-40 list]     (use 'none' when no cSS)
+--reviewed: ids the reader actually looked at (review_css.py passes this). Default: all candidates.
+--ich: candidates you judged to be siderosis/hemosiderin CONNECTED TO a lobar ICH.
+       They are excluded from the multifocality score (standard convention) but reported."""
+import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
+import sys, os, subprocess, pandas as pd
+if len(sys.argv) < 3:
+    sys.exit("usage: mark_css.py SUBJECT 1,4,9 [--ich 3,7]   (or: none)")
+subj, arg = sys.argv[1], sys.argv[2]
+ich_arg = sys.argv[sys.argv.index("--ich") + 1] if "--ich" in sys.argv else ""
+rev_arg = sys.argv[sys.argv.index("--reviewed") + 1] if "--reviewed" in sys.argv else None
+base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project"))
+csv = f"{base}/review/{subj}_candidates.csv"
+df = pd.read_csv(csv)
+parse = lambda a: [] if a.lower() in ("", "none") else [int(x) for x in a.split(",") if x.strip()]
+ids, ich = parse(arg), parse(ich_arg)
+rev = parse(rev_arg) if rev_arg is not None else df.cand_id.astype(int).tolist()
+valid = set(df.cand_id)
+bad = [i for i in ids + ich + rev if i not in valid]
+if bad: sys.exit(f"candidate ids not in list: {bad} (valid 1-{df.cand_id.max()})")
+both = sorted(set(ids) & set(ich))
+if both: sys.exit(f"ids marked both cSS and near-ICH: {both}")
+df["accept"] = df.cand_id.isin(ids).astype(int)
+df["near_ich"] = df.cand_id.isin(ich).astype(int)
+df["reviewed"] = df.cand_id.isin(set(rev) | set(ids) | set(ich)).astype(int)
+df.to_csv(csv, index=False)
+print(f"{subj}: accepted {len(ids)} of {len(df)} candidates {ids if ids else ''}"
+      + (f"; near-ICH (not scored) {ich}" if ich else ""))
+subprocess.run([sys.executable, f"{base}/scripts/score_css.py", subj], check=True)
 ```
 
 ## scripts/review_css.py
@@ -1005,6 +2353,13 @@ vox = swi.header.get_zooms()[:3]
 br = I > 0
 lo, hi = np.percentile(I[br], [1, 99]) if br.any() else (I.min(), I.max())
 df = pd.read_csv(csv)
+_qcp = f"{base}/review/{subj}_qc.json"          # v4.14 case QC (detect_css.py)
+if os.path.exists(_qcp):
+    import json as _json
+    _qc = _json.load(open(_qcp))
+    if _qc.get("status") != "ok":
+        print(f"WARNING: case QC {_qc.get('status')}: {'; '.join(_qc.get('reasons', []))} - "
+              f"anatomy-based features and exclusions are less reliable for this scan")
 ids = df.cand_id.astype(int).tolist()[:top]
 calls = {}
 if not redo:
@@ -1176,244 +2531,90 @@ subprocess.run(cmd, check=False)
 print(f"decisions saved: {calls_csv}")
 ```
 
-## scripts/check_known.py
+## scripts/rule_test.py
 
 ```python
 #!/usr/bin/env python3
-"""Safety check: are KNOWN lesions still detected after a detector change?
-usage: check_known.py SUBJECT --old OLD_candidates.nii.gz --ids 3,4,5
-For each listed lesion of an older candidate map (e.g. review/v3/P006_candidates.nii.gz) it reports
-the current candidate(s) covering it, or the exclusion reason (review/ID_excluded.csv), or
-"NOT DETECTED". Grids must match (same imported SWI)."""
+"""Which single-feature exclusion rule would remove false positives WITHOUT losing known cSS?
+usage: rule_test.py --pos P006 --old OLD_candidates.nii.gz --ids 3,4,5,13,18,19 --neg P011[,P010]
+                    [--synthetic results/stress_TAG_features.csv] [--top 12]
+  --pos/--old/--ids  known cSS: lesions of an older candidate map (as in check_known.py), matched to
+                     the CURRENT candidates of that subject
+  --neg              cSS-negative subjects: every current candidate there is a false positive
+  --synthetic        optional stress-test feature table: rules are also checked on synthetic lesions
+                     (is_lesion == 1); synthetic features are partly artifacts of the generator
+For each feature and direction the threshold is put just beyond the most extreme known lesion (plus a
+safety margin), so every known lesion is kept; the table shows how many false positives that removes.
+With only a few known lesions this is a SHORTLIST for discussion, not a validated rule."""
+import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 import sys, os, numpy as np, pandas as pd, nibabel as nib
 from scipy import ndimage as ndi
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from css_common import base as _base
 
-subj = sys.argv[1]; base = _base()
-arg = lambda f: sys.argv[sys.argv.index(f) + 1] if f in sys.argv else ""
-if not arg("--old") or not arg("--ids"): sys.exit(__doc__)
+base = _base()
+arg = lambda f, d="": sys.argv[sys.argv.index(f) + 1] if f in sys.argv else d
+if not (arg("--pos") and arg("--old") and arg("--ids") and arg("--neg")): sys.exit(__doc__)
+pos_s, top = arg("--pos"), int(arg("--top", "12"))
+FEATS = ["darkness_z", "volume_mm3", "elongation", "surface_contact", "cortex_frac", "cortex_dist_mm",
+         "surface_gradient", "pial_dist_mm", "bank_frac", "tube_ratio", "surface_alignment", "tram_frac",
+         "vein_tree_mm", "mirror_dark_frac", "edge_contrast", "parenchyma_frac", "extent_mm",
+         "vessel_ext_mm", "vessel_wm_mm", "vessel_run_mm", "axis_normal", "css_evidence", "vein_evidence",
+         "score_v4"]
+
+# known lesions -> current candidates of the positive subject
 old = nib.load(os.path.expanduser(arg("--old"))).get_fdata().astype(int)
-cand = nib.load(f"{base}/review/{subj}_candidates.nii.gz").get_fdata().astype(int)
-xp = f"{base}/review/{subj}_excluded.nii.gz"
-excl = nib.load(xp).get_fdata().astype(int) if os.path.exists(xp) else np.zeros_like(cand)
-xr = pd.read_csv(f"{base}/review/{subj}_excluded.csv").set_index("excl_id")["reason"] \
-    if os.path.exists(f"{base}/review/{subj}_excluded.csv") else pd.Series(dtype=str)
+cand = nib.load(f"{base}/review/{pos_s}_candidates.nii.gz").get_fdata().astype(int)
 if old.shape != cand.shape: sys.exit("grids differ - re-import the same SWI")
-kept = 0
+dp = pd.read_csv(f"{base}/review/{pos_s}_candidates.csv")
+known = {}
 for i in [int(x) for x in arg("--ids").split(",") if x.strip()]:
-    m = ndi.binary_dilation(old == i, iterations=2)
-    c = sorted(set(np.unique(cand[m])) - {0}); x = sorted(set(np.unique(excl[m])) - {0})
-    if c: kept += 1
-    msg = (f"kept as candidate {', '.join('#' + str(v) for v in c)}" if c else "") + \
-          ("; " if c and x else "") + ("; ".join(f"EXCLUDED ({xr.get(v, '?')})" for v in x) if x else "")
-    print(f"known lesion #{i}: {msg or 'NOT DETECTED'}")
-print(f"{subj}: {kept} of {len(arg('--ids').split(','))} known lesions still shown for review")
-```
+    v = cand[ndi.binary_dilation(old == i, iterations=2)]; v = v[v > 0]
+    if len(v): known[i] = int(np.bincount(v).argmax())          # the candidate covering it most
+    else: print(f"known lesion #{i}: not a current candidate (excluded or not detected) - not used")
+if not known: sys.exit("no known lesion is a current candidate")
+P = dp[dp.cand_id.isin(set(known.values()))]
+O = dp[~dp.cand_id.isin(set(known.values()))]          # other candidates of the positive subject
+N = pd.concat([pd.read_csv(f"{base}/review/{s}_candidates.csv").assign(subject=s)
+               for s in arg("--neg").split(",")], ignore_index=True)
+S = None
+if arg("--synthetic"):
+    S = pd.read_csv(os.path.expanduser(arg("--synthetic"))); S = S[S.is_lesion == 1]
+F = [f for f in FEATS if f in dp.columns and f in N.columns]
 
-## scripts/expert_sheet.py
+print(f"known cSS ({pos_s}): {len(P)} candidates {sorted(known.items())}  (old id: current id)")
+print(f"false positives: {len(N)} candidates of {arg('--neg')}" +
+      (f";  synthetic lesions: {len(S)}" if S is not None else "") +
+      f";  other {pos_s} candidates (unlabelled): {len(O)}\n")
+print("Feature values of the known lesions vs the false positives (median [min-max]):")
+for f in F:
+    p_, n_ = P[f].dropna(), N[f].dropna()
+    if not len(p_) or not len(n_): continue
+    print(f"  {f:18s} known {p_.median():7.2f} [{p_.min():7.2f} {p_.max():7.2f}]   "
+          f"FP {n_.median():7.2f} [{n_.min():7.2f} {n_.max():7.2f}]")
 
-```python
-#!/usr/bin/env python3
-"""Blinded picture sheet of all candidates for an expert reader -> review/ID_expert_sheet.pdf
-usage: expert_sheet.py SUBJECT [--top N] [--seed 1]
-
-Each candidate gets a SHEET NUMBER in random order (the detector's rank is hidden, so the
-order cannot bias the expert) and one row of pictures: SWI zoom (40 mm), the same with the
-candidate outlined in red, and an 8 mm minIP slab (veins = continuous tubes). No features or
-scores are printed. Page 1 explains the task; the last page is an answer grid.
-The key (sheet number -> cand_id + fingerprint) is saved separately in
-review/ID_expert_key.csv - do not give it to the expert.
-Import the answers with expert_import.py."""
-import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-import sys, os, numpy as np, nibabel as nib, pandas as pd
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, FP
-
-subj = sys.argv[1]
-top = int(sys.argv[sys.argv.index("--top") + 1]) if "--top" in sys.argv else None
-seed = int(sys.argv[sys.argv.index("--seed") + 1]) if "--seed" in sys.argv else 1
-base = _base()
-swi = nib.as_closest_canonical(nib.load(f"{base}/data/{subj}_swi.nii"))
-cnd = nib.as_closest_canonical(nib.load(f"{base}/review/{subj}_candidates.nii.gz"))
-I = swi.get_fdata().astype(np.float32); C = cnd.get_fdata().astype(int)
-vox = swi.header.get_zooms()[:3]
-br = I > 0
-lo, hi = np.percentile(I[br], [1, 99]) if br.any() else (I.min(), I.max())
-df = pd.read_csv(f"{base}/review/{subj}_candidates.csv")
-ids = df.cand_id.astype(int).tolist()[:top]
-order = np.random.default_rng(seed).permutation(len(ids))
-sheet = {n + 1: ids[k] for n, k in enumerate(order)}          # sheet number -> cand_id
-key = df.set_index("cand_id").loc[[sheet[n] for n in sorted(sheet)], FP].reset_index()
-key.insert(0, "sheet_no", sorted(sheet))
-key.to_csv(f"{base}/review/{subj}_expert_key.csv", index=False)
-
-HW = int(round(20 / vox[0]))                                   # 40 mm window
-SLAB = max(1, int(round(4 / vox[2])))
-PER_PAGE = 4
-out = f"{base}/review/{subj}_expert_sheet.pdf"
-with PdfPages(out) as pdf:
-    f = plt.figure(figsize=(8.27, 11.69)); f.text(0.08, 0.92, f"cSS expert reading - {subj}", fontsize=16, weight="bold")
-    f.text(0.08, 0.30, (
-        "For each numbered candidate decide:\n\n"
-        "   C  = cortical superficial siderosis\n"
-        "   V  = vein\n"
-        "   N  = normal / other (artifact, normal dark cortex, ...)\n"
-        "   H  = siderosis contiguous with a lobar ICH\n"
-        "   U  = unsure\n\n"
-        "Definition used (Charidimou et al., Neurology 2017): well-defined, homogeneous\n"
-        "hypointense curvilinear signal on SWI outlining the outer surface of the cortex,\n"
-        "within the adjacent subarachnoid space, or both.\n\n"
-        "Each row: SWI zoom (40 mm)  |  same with the candidate outlined in red  |\n"
-        "8 mm minIP slab (veins appear as continuous branching tubes).\n"
-        "Image orientation: neurological (patient left on the left of the image).\n\n"
-        "Candidates are in RANDOM order; no scores are shown.\n"
-        "Write the letters on the answer grid (last page)."), fontsize=11, va="bottom", family="monospace")
-    pdf.savefig(f); plt.close(f)
-    nums = sorted(sheet)
-    for p0 in range(0, len(nums), PER_PAGE):
-        f, axs = plt.subplots(PER_PAGE, 3, figsize=(8.27, 11.69))
-        f.subplots_adjust(left=0.08, right=0.98, top=0.96, bottom=0.03, wspace=0.04, hspace=0.12)
-        for r in range(PER_PAGE):
-            for a in axs[r]: a.axis("off")
-            if p0 + r >= len(nums): continue
-            n = nums[p0 + r]; m = C == sheet[n]
-            if not m.any(): continue
-            pts = np.argwhere(m); ci, cj = pts[:, 0].mean(), pts[:, 1].mean()
-            kc = int(np.clip(np.bincount(pts[:, 2]).argmax(), 0, I.shape[2] - 1))
-            i0, i1 = int(max(ci - HW, 0)), int(min(ci + HW, I.shape[0]))
-            j0, j1 = int(max(cj - HW, 0)), int(min(cj + HW, I.shape[1]))
-            sl = I[i0:i1, j0:j1, kc].T; ms = m[i0:i1, j0:j1, kc].T
-            k0, k1 = max(kc - SLAB, 0), min(kc + SLAB + 1, I.shape[2])
-            mip = np.where(I[i0:i1, j0:j1, k0:k1] > 0, I[i0:i1, j0:j1, k0:k1], hi).min(axis=2).T
-            for c, (img, outline) in enumerate(((sl, False), (sl, True), (mip, True))):
-                a = axs[r][c]; a.imshow(img, cmap="gray", origin="lower", vmin=lo, vmax=hi)
-                if outline and ms.any():
-                    src = m[i0:i1, j0:j1, k0:k1].any(axis=2).T if c == 2 else ms
-                    a.contour(src.astype(float), levels=[0.5], colors="red", linewidths=0.9)
-            axs[r][0].text(-0.06, 0.5, f"{n}", transform=axs[r][0].transAxes, fontsize=16, weight="bold",
-                           ha="right", va="center")
-            if r == 0 or p0 + r == p0:
-                for c, t in enumerate(("SWI", "outlined", "minIP 8 mm")): axs[r][c].set_title(t, fontsize=9)
-        pdf.savefig(f); plt.close(f)
-    # answer grid
-    f = plt.figure(figsize=(8.27, 11.69)); f.text(0.08, 0.95, f"Answers - {subj}   (C / V / N / H / U)", fontsize=14, weight="bold")
-    f.text(0.08, 0.925, "Reader: ____________________    Date: ____________", fontsize=10)
-    cols = 4; rows = int(np.ceil(len(nums) / cols))
-    for n in nums:
-        c, r = (n - 1) // rows, (n - 1) % rows
-        f.text(0.08 + c * 0.22, 0.89 - r * (0.85 / max(rows, 1)), f"{n:>3}  ____", fontsize=10, family="monospace")
-    pdf.savefig(f); plt.close(f)
-print(f"{subj}: expert sheet with {len(nums)} candidates -> {out}\n"
-      f"      key (do NOT give to the expert): {base}/review/{subj}_expert_key.csv")
-```
-
-## scripts/expert_import.py
-
-```python
-#!/usr/bin/env python3
-"""Import an expert's answers from the blinded sheet (expert_sheet.py) as REFERENCE calls.
-usage: expert_import.py SUBJECT READER --css 3,17,40 [--vein 1,2] [--ich 9] [--unsure 5]
-       expert_import.py SUBJECT READER --letters "1V 2V 3C 4N 5U ..."      (letters from the grid)
-Sheet numbers not listed are recorded as N (normal / other).
-Writes review/ID_expert_READER.csv (cand_id, call, fingerprint) - the reader's own calls in
-review/ID_calls.csv are left untouched. Then scores the expert calls:
-  expert_import.py ... --score     (runs mark_css.py + score_css.py with the expert's cSS / ICH calls)"""
-import sys, os, re, subprocess, pandas as pd
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, FP, match_calls
-
-if len(sys.argv) < 3: sys.exit(__doc__)
-subj, reader = sys.argv[1], sys.argv[2]
-base = _base()
-key = pd.read_csv(f"{base}/review/{subj}_expert_key.csv")
-arg = lambda f: sys.argv[sys.argv.index(f) + 1] if f in sys.argv else ""
-nums = lambda s: [int(x) for x in re.split(r"[,\s]+", s.strip()) if x]
-NAME = {"C": "cSS", "V": "Vein", "N": "Normal", "H": "Near ICH", "U": "Unsure"}
-calls = {n: "Normal" for n in key.sheet_no}
-if arg("--letters"):
-    for tok in arg("--letters").split():
-        m = re.fullmatch(r"(\d+)([CVNHU])", tok.strip().upper())
-        if not m: sys.exit(f"cannot read '{tok}' (expected e.g. 12C)")
-        calls[int(m.group(1))] = NAME[m.group(2)]
-for flag, call in (("--css", "cSS"), ("--vein", "Vein"), ("--ich", "Near ICH"), ("--unsure", "Unsure")):
-    for n in nums(arg(flag)): calls[n] = call
-bad = [n for n in calls if n not in set(key.sheet_no)]
-if bad: sys.exit(f"sheet numbers not on the sheet: {bad}")
-key["call"] = key.sheet_no.map(calls)
-# re-attach to the CURRENT candidates by fingerprint (the detector may have been re-run)
-cand = pd.read_csv(f"{base}/review/{subj}_candidates.csv")
-mapped, dropped = match_calls(cand, key[["cand_id", "call"] + FP])
-if dropped: print(f"WARNING: {dropped} answers match no current candidate (detector re-run since the sheet)")
-c = cand.set_index("cand_id")
-rows = [dict(cand_id=k, call=v, **{f: c.loc[k, f] for f in FP}) for k, v in sorted(mapped.items())]
-out = f"{base}/review/{subj}_expert_{reader}.csv"
-pd.DataFrame(rows, columns=["cand_id", "call"] + FP).to_csv(out, index=False)
-summ = pd.Series(list(mapped.values())).value_counts().to_dict()
-print(f"{subj}: expert {reader} -> {out}   {summ}")
-if "--score" in sys.argv:
-    css = sorted(k for k, v in mapped.items() if v == "cSS"); ich = sorted(k for k, v in mapped.items() if v == "Near ICH")
-    cmd = [sys.executable, f"{base}/scripts/mark_css.py", subj, ",".join(map(str, css)) or "none"]
-    if ich: cmd += ["--ich", ",".join(map(str, ich))]
-    subprocess.run(cmd, check=True)
-```
-
-## scripts/export_review.py
-
-```python
-#!/usr/bin/env python3
-"""Print top-N candidates as tab-separated rows for pasting into the workbook
-('Candidate Review', column A).   usage: export_review.py P006 40 | pbcopy"""
-import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
-import sys, os, pandas as pd
-subj = sys.argv[1]; n = int(sys.argv[2]) if len(sys.argv) > 2 else 40
-base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project"))
-df = pd.read_csv(f"{base}/review/{subj}_candidates.csv").head(n)
-cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongation",
-        "surface_contact", "darkness_z", "artifact_zone", "midline_zone", "score",
-        "vox_i", "vox_j", "vox_k"]
-for _, r in df.iterrows():
-    print(subj + "\t" + "\t".join(str(r[c]) for c in cols))
-```
-
-## scripts/mark_css.py
-
-```python
-#!/usr/bin/env python3
-"""Mark reviewed candidates and score.
-usage: mark_css.py SUBJECT 1,4,9 [--ich 3,7] [--reviewed 1-40 list]     (use 'none' when no cSS)
---reviewed: ids the reader actually looked at (review_css.py passes this). Default: all candidates.
---ich: candidates you judged to be siderosis/hemosiderin CONNECTED TO a lobar ICH.
-       They are excluded from the multifocality score (standard convention) but reported."""
-import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
-import sys, os, subprocess, pandas as pd
-if len(sys.argv) < 3:
-    sys.exit("usage: mark_css.py SUBJECT 1,4,9 [--ich 3,7]   (or: none)")
-subj, arg = sys.argv[1], sys.argv[2]
-ich_arg = sys.argv[sys.argv.index("--ich") + 1] if "--ich" in sys.argv else ""
-rev_arg = sys.argv[sys.argv.index("--reviewed") + 1] if "--reviewed" in sys.argv else None
-base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project"))
-csv = f"{base}/review/{subj}_candidates.csv"
-df = pd.read_csv(csv)
-parse = lambda a: [] if a.lower() in ("", "none") else [int(x) for x in a.split(",") if x.strip()]
-ids, ich = parse(arg), parse(ich_arg)
-rev = parse(rev_arg) if rev_arg is not None else df.cand_id.astype(int).tolist()
-valid = set(df.cand_id)
-bad = [i for i in ids + ich + rev if i not in valid]
-if bad: sys.exit(f"candidate ids not in list: {bad} (valid 1-{df.cand_id.max()})")
-both = sorted(set(ids) & set(ich))
-if both: sys.exit(f"ids marked both cSS and near-ICH: {both}")
-df["accept"] = df.cand_id.isin(ids).astype(int)
-df["near_ich"] = df.cand_id.isin(ich).astype(int)
-df["reviewed"] = df.cand_id.isin(set(rev) | set(ids) | set(ich)).astype(int)
-df.to_csv(csv, index=False)
-print(f"{subj}: accepted {len(ids)} of {len(df)} candidates {ids if ids else ''}"
-      + (f"; near-ICH (not scored) {ich}" if ich else ""))
-subprocess.run([sys.executable, f"{base}/scripts/score_css.py", subj], check=True)
+rows = []
+for f in F:
+    p_ = P[f].dropna()
+    if len(p_) < len(P) or not N[f].notna().any(): continue      # a rule must be defined for every known lesion
+    allv = pd.concat([p_, N[f].dropna()]); margin = 0.1 * (allv.max() - allv.min())
+    for op, t in ((">", p_.max() + margin), ("<", p_.min() - margin)):
+        hit = (lambda x: x > t) if op == ">" else (lambda x: x < t)
+        nrem = int(hit(N[f].dropna()).sum())
+        if nrem == 0: continue
+        rows.append(dict(rule=f"exclude if {f} {op} {t:.2f}", fp_removed=nrem,
+                         fp_pct=round(100 * nrem / len(N)),
+                         other_pos_removed=int(hit(O[f].dropna()).sum()),
+                         synthetic_lost=(f"{int(hit(S[f].dropna()).sum())}/{len(S)}" if S is not None and f in S else "-"),
+                         margin_to_known=round(margin, 2)))
+print("\nRules that keep ALL known lesions (threshold = most extreme known lesion + 10 % of the range):")
+if rows:
+    R = pd.DataFrame(rows).sort_values("fp_removed", ascending=False).head(top)
+    print(R.to_string(index=False))
+else:
+    print("  none - every feature of the false positives overlaps the known lesions")
+print("\nRead with care: few known lesions -> a rule can look safe by chance. Prefer rules that also lose "
+      "few synthetic lesions and that make sense radiologically; confirm on the next patients.")
 ```
 
 ## scripts/score_css.py
@@ -1784,395 +2985,6 @@ if result["near_ich_candidates"]:
           f"{result['near_ich_volume_mm3']} mm3")
 ```
 
-## scripts/agreement.py
-
-```python
-#!/usr/bin/env python3
-"""Reproducibility statistics as in van Harten et al. (NeuroImage Clin 2023;38:103447).
-usage: agreement.py --a DIR_A --b DIR_B [--col grown_volume_mm3] [--plot out.png]
-       agreement.py --vs-score DIR [--col surface_mm2] [--plot out.png]
-  DIR = a copy of the review folder after one complete scoring session, e.g.
-        cp -R ~/css_project/review ~/css_project/review_reader1_session1
-        (it must contain css_scores.csv and, for Dice, ID_css_mask.nii.gz)
-  --a/--b      two sessions of one reader (intra-observer) or two readers (inter-observer):
-               Pearson r, ICC(A,1) absolute agreement (two-way), Bland-Altman bias and 95 % limits of
-               agreement, and per-subject Dice of the cSS masks. van Harten: ICC 0.995, Pearson 0.991,
-               mean Dice 0.75 (Dice is low for small, sparse masks even when volumes agree).
-  --vs-score   size measure against the 0-4 multifocality score (their Fig. 4: wide spread inside the
-               top categories = the ceiling effect a continuous measure avoids)
-Compare sizes only between scans acquired with the same protocol (field strength, TE, voxel size)."""
-import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-import sys, os, numpy as np, pandas as pd, nibabel as nib
-
-arg = lambda f, d="": sys.argv[sys.argv.index(f) + 1] if f in sys.argv else d
-col = arg("--col", "grown_volume_mm3")
-ex = lambda p: os.path.expanduser(p)
-
-
-def icc_a1(x, y):
-    """two-way, absolute agreement, single measures (McGraw & Wong ICC(A,1))"""
-    Y = np.c_[x, y]; n, k = Y.shape
-    gm = Y.mean(); rm = Y.mean(1); cm = Y.mean(0)
-    msr = k * ((rm - gm) ** 2).sum() / (n - 1)
-    msc = n * ((cm - gm) ** 2).sum() / (k - 1)
-    mse = ((Y - rm[:, None] - cm[None, :] + gm) ** 2).sum() / ((n - 1) * (k - 1))
-    return float((msr - mse) / (msr + (k - 1) * mse + k * (msc - mse) / n))
-
-
-if arg("--vs-score"):
-    d = pd.read_csv(f"{ex(arg('--vs-score'))}/css_scores.csv")
-    if col not in d.columns: sys.exit(f"column {col} not in css_scores.csv (re-score with score_css.py v4.13)")
-    print(f"{col} by multifocality score ({len(d)} subjects):")
-    for s, g in d.groupby("multifocality_0_4"):
-        print(f"  score {s}: n={len(g)}  median {g[col].median():.1f}  range {g[col].min():.1f}-{g[col].max():.1f}")
-    if arg("--plot"):
-        import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
-        fig, ax = plt.subplots(figsize=(5, 4))
-        jit = np.random.default_rng(0).uniform(-0.12, 0.12, len(d))
-        ax.scatter(d.multifocality_0_4 + jit, d[col], s=25)
-        ax.set_xlabel("cSS multifocality score (0-4)"); ax.set_ylabel(col); ax.set_xticks(range(5))
-        fig.tight_layout(); fig.savefig(ex(arg("--plot")), dpi=150); print(f"plot -> {arg('--plot')}")
-    sys.exit(0)
-
-if not (arg("--a") and arg("--b")): sys.exit(__doc__)
-A, Bd = ex(arg("--a")), ex(arg("--b"))
-da, db = pd.read_csv(f"{A}/css_scores.csv"), pd.read_csv(f"{Bd}/css_scores.csv")
-m = da[["subject", col]].merge(db[["subject", col]], on="subject", suffixes=("_a", "_b")).dropna()
-if len(m) < 2: sys.exit(f"need >=2 subjects scored in both folders (found {len(m)})")
-x, y = m[f"{col}_a"].to_numpy(float), m[f"{col}_b"].to_numpy(float)
-diff = x - y; bias = diff.mean(); sd = diff.std(ddof=1)
-r = float(np.corrcoef(x, y)[0, 1]) if x.std() > 0 and y.std() > 0 else float("nan")
-print(f"{len(m)} subjects, {col}:  Pearson r {r:.3f}   ICC(A,1) {icc_a1(x, y):.3f}   "
-      f"Bland-Altman bias {bias:.1f}, 95 % limits {bias - 1.96 * sd:.1f} to {bias + 1.96 * sd:.1f}")
-dice = []
-for s in m.subject:
-    pa, pb = f"{A}/{s}_css_mask.nii.gz", f"{Bd}/{s}_css_mask.nii.gz"
-    if os.path.exists(pa) and os.path.exists(pb):
-        a_, b_ = nib.load(pa).get_fdata() > 0, nib.load(pb).get_fdata() > 0
-        if a_.shape == b_.shape and (a_.any() or b_.any()):
-            dice.append((s, 2 * (a_ & b_).sum() / (a_.sum() + b_.sum())))
-if dice:
-    dv = np.array([v for _, v in dice])
-    print(f"Dice of the cSS masks: mean {dv.mean():.2f} +/- {dv.std():.2f}  ("
-          + ", ".join(f"{s} {v:.2f}" for s, v in dice) + ")")
-print(m.to_string(index=False))
-if arg("--plot"):
-    import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(1, 2, figsize=(9, 4))
-    lim = [0, max(x.max(), y.max()) * 1.05]
-    ax[0].scatter(x, y); ax[0].plot(lim, lim, "k--", lw=0.8)
-    ax[0].set_xlabel(f"{col} (A)"); ax[0].set_ylabel(f"{col} (B)"); ax[0].set_title(f"r = {r:.3f}")
-    mean = (x + y) / 2; ax[1].scatter(mean, diff)
-    for v, ls in ((bias, "-"), (bias - 1.96 * sd, "--"), (bias + 1.96 * sd, "--")): ax[1].axhline(v, color="k", ls=ls, lw=0.8)
-    ax[1].set_xlabel("mean of A and B"); ax[1].set_ylabel("A - B"); ax[1].set_title("Bland-Altman")
-    fig.tight_layout(); fig.savefig(ex(arg("--plot")), dpi=150); print(f"plot -> {arg('--plot')}")
-```
-
-## scripts/feature_report.py
-
-```python
-#!/usr/bin/env python3
-"""Compare candidate features between calls (cSS vs Vein/Normal/Artifact) across all reviewed subjects.
-usage: feature_report.py [--source expert|reader]
-Default: for each subject the EXPERT reference (review/ID_expert_*.csv from expert_import.py) is used
-when it exists, otherwise the reader's own calls (review/ID_calls.csv from review_css.py)."""
-import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-import sys, os, glob, numpy as np, pandas as pd
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, load_calls, match_calls
-base = _base()
-src_pref = sys.argv[sys.argv.index("--source") + 1] if "--source" in sys.argv else "expert"
-subjects = sorted({os.path.basename(f).split("_calls.csv")[0] for f in glob.glob(f"{base}/review/*_calls.csv")} |
-                  {os.path.basename(f).split("_expert_")[0] for f in glob.glob(f"{base}/review/*_expert_*.csv")
-                   if not f.endswith("_expert_key.csv")})
-rows = []; used = {}
-for s in subjects:
-    cp = f"{base}/review/{s}_candidates.csv"
-    if not os.path.exists(cp): continue
-    d = pd.read_csv(cp); calls = {}
-    ex = sorted(f for f in glob.glob(f"{base}/review/{s}_expert_*.csv") if not f.endswith("_expert_key.csv"))
-    if ex and src_pref == "expert":
-        calls, dropped = match_calls(d, pd.read_csv(ex[0])); calls = calls or {}
-        used[s] = "expert " + os.path.basename(ex[0]).split("_expert_")[1][:-4]
-        if dropped: print(f"WARNING: {s}: {dropped} expert calls match no current candidate")
-    else:
-        calls, warn = load_calls(base, s, d)          # matched by fingerprint, not by rank
-        if warn: print("WARNING:", warn)
-        used[s] = "reader"
-    if not calls: continue
-    m = d.merge(pd.DataFrame(list(calls.items()), columns=["cand_id", "call"]), on="cand_id")
-    m["subject"] = s; rows.append(m)
-print("labels: " + ", ".join(f"{s}={u}" for s, u in used.items()))
-if not rows: sys.exit("no reviewed cases yet (run review_css.py first)")
-D = pd.concat(rows, ignore_index=True)
-D = D[D.call.isin(["cSS", "Vein", "Normal", "Artifact"])]
-print(f"{D.subject.nunique()} subject(s), {len(D)} decided candidates: {D.call.value_counts().to_dict()}\n")
-def auc(x, y):
-    x, y = np.asarray(x, float), np.asarray(y, float); x, y = x[~np.isnan(x)], y[~np.isnan(y)]
-    if not len(x) or not len(y): return float("nan")
-    return float((x[:, None] > y[None, :]).mean() + 0.5 * (x[:, None] == y[None, :]).mean())
-feats = ["darkness_z", "volume_mm3", "n_slices", "elongation", "surface_contact", "cortex_frac",
-         "cortex_dist_mm", "branch_per10mm", "surface_gradient",
-         "pial_dist_mm", "bank_frac", "tube_ratio", "surface_alignment", "tram_frac", "vein_tree_mm",
-         "mirror_dark_frac", "flair_csf_z", "parenchyma_frac", "css_evidence", "vein_evidence",
-         "score_v3", "score_v4", "score"]
-print(f"{'feature':18s} {'cSS':>8s} {'Vein':>8s} {'Normal':>8s} {'Artifact':>9s}   AUC cSS vs rest")
-for f in feats:
-    if f not in D: continue
-    med = D.groupby("call")[f].median()
-    a = auc(D[D.call == "cSS"][f], D[D.call != "cSS"][f])
-    tag = "  <- useful" if a >= 0.75 or a <= 0.25 else ""
-    print(f"{f:18s} " + " ".join(f"{med.get(k, np.nan):8.2f}" for k in ["cSS", "Vein", "Normal"]) +
-          f" {med.get('Artifact', np.nan):9.2f}   {a:5.2f}{tag}")
-print("\nAUC near 0.5 = no help; >0.75 = higher in cSS; <0.25 = lower in cSS.")
-```
-
-## scripts/make_synthetic.py
-
-```python
-#!/usr/bin/env python3
-"""Insert synthetic cSS (and optional synthetic vein decoys) into a presumed cSS-negative host -> {HOST}S.
-usage: make_synthetic.py HOST [n_lesions=8] [depth=0.6] [seed=1] [--tram 0.4] [--veins 4] [--radial 2] [--legacy]
-
-v3 (realistic lesions; after the P006 stress test showed v2 lesions were too big and blob-like, so
-volume / branching / elongation separated them for the wrong reason):
-  - thin CURVILINEAR lesions: a 1-voxel path traced along the cortex-CSF boundary (no flood fill),
-    optionally thickened by 1 voxel (blooming), 5-30 mm long (log-uniform), on 2-5 consecutive slices
-  - tram-track: with probability --tram the opposite bank of the same sulcus gets a matching line
-  - darkness per lesion around `depth`, edge blur, and noise inside the lesion
-  - --veins K: K tubular decoys (radius 0.5-0.9 mm, 15-40 mm) in the sulcal CSF, as dark as the
-    lesions; written to work/HOSTS_veins.nii.gz (Cao et al. 2026: vessel decoys reduce false positives)
-  - --radial K (v4.11): K transcortical / medullary vein decoys: straight tubes starting 2 mm out in the
-    CSF and running perpendicular to the cortex 10-18 mm into the white matter (same veins file)
---legacy reproduces the v2 generator (flood-filled, thicker lesions) for comparison."""
-import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
-import sys, os, numpy as np, nibabel as nib
-from scipy import ndimage as ndi
-
-flag = lambda f, d: type(d)(sys.argv[sys.argv.index(f) + 1]) if f in sys.argv else d
-TRAM, NVEIN, NRAD, LEGACY = flag("--tram", 0.4), flag("--veins", 0), flag("--radial", 0), "--legacy" in sys.argv
-# positional values given after a flag (e.g. "--veins 4") must not be read as lesion arguments
-pos = [a for i, a in enumerate(sys.argv[1:], 1) if not a.startswith("--") and not sys.argv[i - 1] in ("--tram", "--veins", "--radial")]
-host = pos[0]; N = int(pos[1]) if len(pos) > 1 else 8
-depth = float(pos[2]) if len(pos) > 2 else 0.6; seed = int(pos[3]) if len(pos) > 3 else 1
-rng = np.random.default_rng(seed)
-base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project"))
-
-img = nib.load(f"{base}/data/{host}_swi.nii"); I = img.get_fdata().astype(np.float32)
-seg = nib.load(f"{base}/work/{host}_seg_swispace.nii.gz").get_fdata().astype(int)
-vox = np.array(img.header.get_zooms()[:3], float)
-s2 = np.ones((3, 3, 1), bool)
-brain = ndi.binary_fill_holes(I > 0)
-dist = ndi.distance_transform_edt(brain, sampling=vox)
-cortex = seg >= 1000
-CONVEX = [3, 8, 11, 15, 22, 24, 27, 28, 29, 30, 31]
-convex = cortex & np.isin(seg % 1000, CONVEX)
-sulcal = brain & ~cortex & ~np.isin(seg, [2, 41])
-boundary = convex & ndi.binary_dilation(sulcal, structure=s2) & (dist > 4.0)
-c = I[cortex & (I > 0)]; sd_c = 1.4826 * np.median(np.abs(c - np.median(c)))
-
-nz = I.shape[2]
-pts_all = np.argwhere(boundary)
-pts_all = pts_all[(pts_all[:, 2] >= 3) & (pts_all[:, 2] < nz - 6)]
-if len(pts_all) == 0: sys.exit("no admissible cortical boundary found")
-NB8 = [(dx, dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1) if dx or dy]
-
-def trace(b, start, L_mm, d0=None):
-    """1-voxel path along the boundary b (2-D), preferring to keep its direction (no branches)"""
-    path, seen, cur, d, length = [start], {start}, start, d0, 0.0
-    while length < L_mm:
-        nxt = [(cur[0] + dx, cur[1] + dy) for dx, dy in NB8
-               if 0 <= cur[0] + dx < b.shape[0] and 0 <= cur[1] + dy < b.shape[1]
-               and b[cur[0] + dx, cur[1] + dy] and (cur[0] + dx, cur[1] + dy) not in seen]
-        if not nxt: break
-        if d is None: n = nxt[rng.integers(len(nxt))]
-        else: n = max(nxt, key=lambda q: (q[0] - cur[0]) * d[0] + (q[1] - cur[1]) * d[1])
-        d = (n[0] - cur[0], n[1] - cur[1])
-        length += float(np.hypot(d[0] * vox[0], d[1] * vox[1]))
-        path.append(n); seen.add(n); cur = n
-    return path, length, d
-
-def opposite_bank(path, k):
-    """boundary voxels across the sulcal CSF from the path (1.5-6 mm away, CSF in between)"""
-    b = boundary[:, :, k]; P = np.array(path)
-    cand = np.argwhere(b)
-    if not len(cand): return None
-    dd = np.sqrt((((cand[:, None, :] - P[None, :, :]) * vox[:2]) ** 2).sum(-1)).min(1)
-    cand = cand[(dd > 1.5) & (dd < 6.0)]
-    ok = [q for q in map(tuple, cand)
-          if sulcal[(q[0] + P[np.argmin(((P - q) ** 2).sum(1))][0]) // 2,
-                    (q[1] + P[np.argmin(((P - q) ** 2).sum(1))][1]) // 2, k]]
-    return ok[rng.integers(len(ok))] if ok else None
-
-truth, seeds, tries = np.zeros(I.shape, np.int16), [], 0
-dark = np.zeros(I.shape, np.float32)
-while len(seeds) < N and tries < 8000:
-    tries += 1
-    p = pts_all[rng.integers(len(pts_all))]
-    if any(np.linalg.norm((p - q) * vox) < 25 for q in seeds): continue
-    lesion, ok = np.zeros(I.shape, bool), True
-    if LEGACY:                                   # v2: flood fill, then 1-2 dilations
-        L_mm, nsl, cur = rng.uniform(10, 30), int(rng.integers(2, 5)), p[:2]
-        for dk in range(nsl):
-            k = p[2] + dk; b = boundary[:, :, k]; cand = np.argwhere(b)
-            if k >= nz or len(cand) == 0: ok = False; break
-            d = np.linalg.norm((cand - cur) * vox[:2], axis=1); j = d.argmin()
-            if d[j] > 4: ok = False; break
-            start = tuple(cand[j]); cur = cand[j]
-            target, seen, queue = int(L_mm / vox[0]), {start}, [start]
-            while queue and len(seen) < target:
-                x, y = queue.pop(0)
-                for dx, dy in NB8:
-                    q = (x + dx, y + dy)
-                    if 0 <= q[0] < b.shape[0] and 0 <= q[1] < b.shape[1] and b[q] and q not in seen:
-                        seen.add(q); queue.append(q)
-            if len(seen) < 0.6 * target: ok = False; break
-            for q in seen: lesion[q[0], q[1], k] = True
-        if not ok: continue
-        lesion = ndi.binary_dilation(lesion, structure=s2, iterations=int(rng.integers(1, 3))) & brain
-    else:                                        # v3: thin traced line(s)
-        L_mm = float(np.exp(rng.uniform(np.log(5), np.log(30))))
-        nsl = int(rng.integers(2, 6)); cur, d0 = tuple(p[:2]), None
-        tram = rng.random() < TRAM; opp = None
-        for dk in range(nsl):
-            k = p[2] + dk; b = boundary[:, :, k]; cand = np.argwhere(b)
-            if k >= nz or not len(cand): ok = False; break
-            dd = np.linalg.norm((cand - np.array(cur)) * vox[:2], axis=1); j = dd.argmin()
-            if dd[j] > 3: ok = False; break
-            path, length, d0 = trace(b, tuple(cand[j]), L_mm, d0 if dk else None)
-            if length < 0.6 * L_mm: ok = False; break
-            for q in path: lesion[q[0], q[1], k] = True
-            cur = tuple(cand[j])
-            if tram:
-                o = opposite_bank(path, k) if opp is None else None
-                start = o if o is not None else opp
-                if start is not None:
-                    bo = boundary[:, :, k]; cand_o = np.argwhere(bo)
-                    jo = np.linalg.norm((cand_o - np.array(start)) * vox[:2], axis=1).argmin()
-                    po, _, _ = trace(bo, tuple(cand_o[jo]), L_mm)
-                    for q in po: lesion[q[0], q[1], k] = True
-                    opp = tuple(cand_o[jo])
-        if not ok: continue
-        if rng.random() < 0.5:                   # blooming: 1-voxel in-plane thickening, stays at the surface
-            lesion = ndi.binary_dilation(lesion, structure=s2) & (cortex | sulcal) & brain
-    if (truth[lesion] > 0).any() or not lesion.any(): continue
-    seeds.append(p); truth[lesion] = len(seeds)
-    d_i = float(np.clip(depth + rng.uniform(-0.1, 0.1), 0.05, 0.9))
-    w = ndi.gaussian_filter(lesion.astype(np.float32), sigma=(rng.uniform(0.4, 0.8),) * 2 + (0,))
-    dark = np.maximum(dark, np.clip(w * 2.0, 0, 1) * d_i)
-
-# ---- vein decoys: tubes running in the sulcal CSF
-veins = np.zeros(I.shape, np.int16)
-if NVEIN and not LEGACY:
-    mid = sulcal & (ndi.distance_transform_edt(sulcal, sampling=vox) >= 0.7) & (dist > 6.0)
-    in_csf = ndi.binary_dilation(sulcal, structure=np.ones((3, 3, 3), bool))   # decoys stay in sulcal CSF
-    vp = np.argwhere(mid); nv = 0; vt = 0
-    while nv < NVEIN and vt < 2000 and len(vp):
-        vt += 1
-        q = vp[rng.integers(len(vp))].astype(float)
-        if (truth[tuple(q.astype(int))] > 0) or any(np.linalg.norm((q - s) * vox) < 15 for s in seeds): continue
-        dvec = rng.normal(size=3); dvec[2] *= rng.uniform(0.2, 1.0); dvec /= np.linalg.norm(dvec * vox) + 1e-9
-        L, r, pts, pnt = rng.uniform(15, 40), rng.uniform(0.5, 0.9), [], q.copy()
-        for _ in range(int(L / 0.5)):
-            dvec += rng.normal(scale=0.05, size=3) / vox; dvec /= np.linalg.norm(dvec * vox) + 1e-9
-            pnt = pnt + dvec * 0.5
-            ii = np.round(pnt).astype(int)
-            if (ii < 0).any() or (ii >= np.array(I.shape)).any() or not in_csf[tuple(ii)]: break
-            pts.append(ii)
-        if len(pts) * 0.5 < 10: continue
-        m = np.zeros(I.shape, bool); m[tuple(np.array(pts).T)] = True
-        m = (ndi.distance_transform_edt(~m, sampling=vox) <= r) & brain
-        if (truth[m] > 0).any() or (veins[m] > 0).any(): continue
-        nv += 1; veins[m] = nv
-        dark = np.maximum(dark, m * float(np.clip(depth + rng.uniform(-0.1, 0.1), 0.05, 0.9)))
-
-# ---- transcortical / medullary vein decoys: straight tubes perpendicular to the cortex into the WM
-if NRAD and not LEGACY:
-    wm = np.isin(seg, [2, 41])
-    g = np.gradient(ndi.gaussian_filter(ndi.distance_transform_edt(~wm, sampling=vox), 1.0), *vox)
-    nv, vt = int(veins.max()), 0; n0 = nv
-    while nv - n0 < NRAD and vt < 2000:
-        vt += 1
-        q = pts_all[rng.integers(len(pts_all))].astype(float)
-        if any(np.linalg.norm((q - s_) * vox) < 15 for s_ in seeds) or veins[tuple(q.astype(int))]: continue
-        u = -np.array([gg[tuple(q.astype(int))] for gg in g]); nu = np.linalg.norm(u)
-        if nu < 0.3: continue
-        u = u / nu                                         # mm direction toward the white matter
-        L, r = rng.uniform(10, 18), rng.uniform(0.5, 0.9)
-        tt = np.arange(-2.0, 3.0 + L, 0.3)                 # 2 mm outside, ~3 mm cortex, L mm into WM
-        ii = np.round(q[None, :] + tt[:, None] * u[None, :] / vox).astype(int)
-        if (ii < 0).any() or (ii >= np.array(I.shape)).any(): continue
-        if wm[tuple(ii[tt > 4.0].T)].mean() < 0.6 or not brain[tuple(ii.T)].all(): continue
-        m = np.zeros(I.shape, bool); m[tuple(ii.T)] = True
-        m = (ndi.distance_transform_edt(~m, sampling=vox) <= r) & brain
-        if (truth[m] > 0).any() or (veins[m] > 0).any(): continue
-        nv += 1; veins[m] = nv
-        dark = np.maximum(dark, m * float(np.clip(depth + rng.uniform(-0.1, 0.1), 0.05, 0.9)))
-
-Is = I * (1 - dark)
-Is += (rng.normal(0, 0.35 * sd_c, I.shape) * (dark > 0.05)).astype(np.float32)
-Is[brain] = np.maximum(Is[brain], 1.0)        # keep the brain mask unchanged
-Is[~brain] = I[~brain]
-
-out = nib.Nifti1Image(Is.astype(np.float32), img.affine, img.header); out.set_data_dtype(np.float32)
-nib.save(out, f"{base}/data/{host}S_swi.nii")
-nib.save(nib.Nifti1Image(truth, img.affine), f"{base}/work/{host}S_truth.nii.gz")
-nib.save(nib.Nifti1Image(veins, img.affine), f"{base}/work/{host}S_veins.nii.gz")
-
-lut = {}
-lutp = os.path.join(os.environ.get("FREESURFER_HOME", ""), "FreeSurferColorLUT.txt")
-if os.path.exists(lutp):
-    for line in open(lutp):
-        t = line.split()
-        if len(t) > 2 and t[0].isdigit(): lut[int(t[0])] = t[1]
-print(f"{host}S: inserted {len(seeds)} synthetic cSS lesions ({'legacy' if LEGACY else 'v3 thin'}, depth ~{depth}, "
-      f"seed {seed}){f', {int(veins.max())} vein decoys' if veins.max() else ''}")
-for i in range(1, len(seeds) + 1):
-    m = truth == i; s = seg[m][seg[m] >= 1000]
-    lab = int(np.bincount(s).argmax()) if s.size else 0
-    ks = np.unique(np.argwhere(m)[:, 2]); c0 = np.argwhere(m).mean(0).round().astype(int)
-    print(f"  lesion {i}: {lut.get(lab, lab)!s:30s} slices {ks.min()}-{ks.max()}  vox {c0[0]} {c0[1]} {c0[2]}"
-          f"  {m.sum() * np.prod(vox):.0f} mm3")
-```
-
-## scripts/eval_synthetic.py
-
-```python
-#!/usr/bin/env python3
-"""Score detector output against synthetic truth.  usage: eval_synthetic.py P005S
-Reports sensitivity, worst rank, how many NON-lesion candidates (real veins/artifacts
-of the host scan) rank above the worst lesion, and a ranking AUC."""
-import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
-import sys, os, numpy as np, nibabel as nib, pandas as pd
-from scipy import ndimage as ndi
-subj = sys.argv[1]
-base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project"))
-truth = nib.load(f"{base}/work/{subj}_truth.nii.gz").get_fdata().astype(int)
-cand  = nib.load(f"{base}/review/{subj}_candidates.nii.gz").get_fdata().astype(int)
-MIN_COVER = 0.30   # v4: a lesion counts as found only if candidates cover >=30 % of it (1-voxel
-                   # tolerance for blooming); v3 accepted any touching candidate, e.g. a vein crossing it
-n = int(truth.max()); best, lesion_c = [], set()
-for i in range(1, n + 1):
-    t = truth == i; nt = int(t.sum())
-    touch = sorted(set(np.unique(cand[ndi.binary_dilation(t, iterations=1)])) - {0})
-    cov = {c: (ndi.binary_dilation(cand == c, iterations=1) & t).sum() / nt for c in touch}
-    ids = [c for c in touch if cov[c] >= 0.05]
-    total = float((ndi.binary_dilation(np.isin(cand, ids), iterations=1) & t).sum() / nt) if ids else 0.0
-    found = total >= MIN_COVER
-    if found: best.append(ids[0]); lesion_c |= set(ids)
-    print(f"  lesion {i}: " + (f"FOUND  (candidate #{ids[0]}, coverage {total:.0%})" if found
-                               else f"MISSED (coverage {total:.0%})"))
-all_c = set(np.unique(cand)) - {0}
-non = sorted(all_c - lesion_c)
-worst = max(best) if best else 0
-above = sum(1 for c in non if c < worst)
-pairs = [(b < c) for b in best for c in non]
-auc = float(np.mean(pairs)) if pairs else (1.0 if best else 0.0)
-print(f"\n  sensitivity: {len(best)}/{n} = {100*len(best)/max(n,1):.0f}%   worst rank #{worst}")
-print(f"  non-lesion candidates ranked above the worst lesion: {above}   ranking AUC: {auc:.2f}")
-print(f"RESULT found={len(best)} total={n} worst={worst} above={above} auc={auc:.3f} ncand={len(all_c)}")
-```
-
 ## scripts/stress_test.py
 
 ```python
@@ -2193,6 +3005,7 @@ ap.add_argument("--depths", default="0.6,0.45,0.3"); ap.add_argument("--seeds", 
 ap.add_argument("--z", default="-2.5")
 ap.add_argument("--veins", default="4", help="synthetic vein decoys per synthetic scan (v3 generator)")
 ap.add_argument("--radial", default="2", help="transcortical / medullary vein decoys per synthetic scan")
+ap.add_argument("--surface-veins", default="2", help="veins running along the cortical surface, some branching (v4.16)")
 ap.add_argument("--legacy", action="store_true", help="v2 synthetic lesions (flood-filled, thicker)")
 a = ap.parse_args()
 base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project")); S = f"{base}/scripts"
@@ -2202,6 +3015,7 @@ def run(*args):
     if r.returncode: print(r.stdout[-500:], r.stderr[-1500:]); sys.exit("step failed: " + " ".join(args))
     return r.stdout
 rows = []; feats = []; decoys = {"shown": 0, "excluded": 0, "not detected": 0}; why = {}; lost = {}
+by_kind = {}                                   # decoy kind -> {"shown": n, "excluded": n, "not detected": n}
 for h in a.hosts.split(","):
     clean = run(f"{S}/{a.detector}", h, a.z, "85", "3")
     nclean = int(re.search(r"-> (\d+) candidates", clean).group(1))
@@ -2214,7 +3028,7 @@ for h in a.hosts.split(","):
     print(f"{h}: anatomy {'T1' if use_t1 else 'SWI-only'}", flush=True)
     for d in a.depths.split(","):
         for s in a.seeds.split(","):
-            run(f"{S}/make_synthetic.py", h, "8", d, s, *(["--legacy"] if a.legacy else ["--veins", a.veins, "--radial", a.radial]))
+            run(f"{S}/make_synthetic.py", h, "8", d, s, *(["--legacy"] if a.legacy else ["--veins", a.veins, "--radial", a.radial, "--surface-veins", a.surface_veins]))
             if use_t1:   # copied AFTER the synthetic SWI is written, so it counts as up to date
                 shutil.copy(t1, f"{base}/work/{h}S_t1seg_swispace.nii.gz")
             run(f"{S}/align_seg.py", h + "S")
@@ -2231,29 +3045,45 @@ for h in a.hosts.split(","):
                 les = set(np.unique(cm[ndi.binary_dilation(tr, iterations=1)])) - {0}
                 vp = f"{base}/work/{h}S_veins.nii.gz"
                 vv = set(np.unique(cm[nib.load(vp).get_fdata() > 0])) - {0} if os.path.exists(vp) else set()
+                kp = f"{base}/work/{h}S_vein_kinds.csv"
+                kinds = pd.read_csv(kp).set_index("vein_id")["kind"].to_dict() if os.path.exists(kp) else {}
+                if os.path.exists(vp):          # which decoy kind each candidate covers most
+                    vm_ = nib.load(vp).get_fdata().astype(int)
+                    cdf["decoy_kind"] = [kinds.get(int(np.bincount(vm_[cm == c][vm_[cm == c] > 0]).argmax()), "")
+                                         if (vm_[cm == c] > 0).any() else "" for c in cdf.cand_id]
                 cdf["is_lesion"] = cdf.cand_id.isin(les).astype(int); cdf["host"] = h; cdf["depth"] = float(d)
                 cdf["is_decoy_vein"] = (cdf.cand_id.isin(vv) & ~cdf.cand_id.isin(les)).astype(int)
                 # missed synthetic lesions: removed by which exclusion rule (or never detected)?
                 tl = nib.load(f"{base}/work/{h}S_truth.nii.gz").get_fdata().astype(int)
                 xm = nib.load(f"{base}/review/{h}S_excluded.nii.gz").get_fdata().astype(int)
                 xr = pd.read_csv(f"{base}/review/{h}S_excluded.csv").set_index("excl_id")["reason"]
+                # v4.14: components removed by the generation gates (size / slices / elongation / no cortex)
+                dp_ = f"{base}/work/{h}S_dropped.nii.gz"
+                dm = nib.load(dp_).get_fdata().astype(int) if os.path.exists(dp_) else np.zeros_like(xm)
+                dr_ = pd.read_csv(f"{base}/work/{h}S_dropped.csv").set_index("drop_id")["reason"] \
+                    if os.path.exists(f"{base}/work/{h}S_dropped.csv") else pd.Series(dtype=str)
                 for t_ in range(1, int(tl.max()) + 1):
                     m_ = tl == t_
                     if (cm[m_] > 0).mean() >= 0.3: continue
-                    r_ = (str(xr.get(int(np.bincount(xm[m_][xm[m_] > 0]).argmax()), "?")).split(":")[0].split(" (")[0]
-                          if (xm[m_] > 0).any() else "not detected")
+                    if (xm[m_] > 0).any():
+                        r_ = str(xr.get(int(np.bincount(xm[m_][xm[m_] > 0]).argmax()), "?")).split(":")[0].split(" (")[0]
+                    elif (dm[m_] > 0).any():
+                        r_ = "dropped: " + str(dr_.get(int(np.bincount(dm[m_][dm[m_] > 0]).argmax()), "?"))
+                    else:
+                        r_ = "not detected"
                     lost[r_] = lost.get(r_, 0) + 1
                 # what happened to each decoy vein: still shown for review, excluded (why), or never detected
                 if os.path.exists(vp):
                     vm = nib.load(vp).get_fdata().astype(int)
                     for v_ in range(1, int(vm.max()) + 1):
                         m_ = vm == v_
-                        if (cm[m_] > 0).any(): decoys["shown"] += 1
+                        k_ = by_kind.setdefault(kinds.get(v_, "?"), {"shown": 0, "excluded": 0, "not detected": 0})
+                        if (cm[m_] > 0).any(): decoys["shown"] += 1; k_["shown"] += 1
                         elif (xm[m_] > 0).any():
-                            decoys["excluded"] += 1
+                            decoys["excluded"] += 1; k_["excluded"] += 1
                             r_ = str(xr.get(int(np.bincount(xm[m_][xm[m_] > 0]).argmax()), "?")).split(":")[0].split(" (")[0]
                             why[r_] = why.get(r_, 0) + 1
-                        else: decoys["not detected"] += 1
+                        else: decoys["not detected"] += 1; k_["not detected"] += 1
                 feats.append(cdf)
             print(f"{h} depth {d} seed {s}: found {int(row['found'])}/{int(row['total'])}, "
                   f"worst #{int(row['worst'])}, non-lesions above {int(row['above'])}, AUC {row['auc']:.2f}", flush=True)
@@ -2270,6 +3100,8 @@ if lost: print(f"missed synthetic lesions: " + ", ".join(f"{v} {k}" for k, v in 
 if sum(decoys.values()):
     print(f"decoy veins: {decoys['shown']} still shown, {decoys['excluded']} excluded "
           f"({', '.join(f'{v} {k}' for k, v in why.items()) or '-'}), {decoys['not detected']} not detected")
+    for k, v in sorted(by_kind.items()):
+        print(f"  {k:8s} decoys: {v['shown']} shown, {v['excluded']} excluded, {v['not detected']} not detected")
 print(f"saved: {base}/results/stress_{a.tag}.csv")
 if feats:
     F = pd.concat(feats, ignore_index=True)
@@ -2283,537 +3115,380 @@ if feats:
     for f in ["darkness_z", "volume_mm3", "cortex_frac", "cortex_dist_mm", "branch_per10mm",
               "surface_gradient", "surface_contact", "elongation", "pial_dist_mm", "bank_frac",
               "tube_ratio", "surface_alignment", "tram_frac", "vein_tree_mm", "mirror_dark_frac",
-              "vessel_ext_mm", "vessel_wm_mm", "vessel_run_mm", "axis_normal", "score_v3", "score_v4", "score"]:
+              "vessel_ext_mm", "vessel_wm_mm", "vessel_run_mm", "axis_normal", "local_cont_max_mm",
+              "local_cont_total_mm", "terminal_ends", "local_branch_points", "score_v3", "score_v4", "score"]:
         if f in F.columns:
             L, N = F[F.is_lesion == 1][f], F[F.is_lesion == 0][f]
             V = F[F.get("is_decoy_vein", 0) == 1][f] if "is_decoy_vein" in F else N.iloc[0:0]
+            Vs = F[(F.get("is_decoy_vein", 0) == 1) & (F.get("decoy_kind", "") == "surface")][f] \
+                if "decoy_kind" in F else N.iloc[0:0]
             print(f"  {f:18s} cSS median {L.median():7.2f} | others median {N.median():7.2f} | AUC {auc(L, N):.2f}"
-                  + (f" | vs decoy veins {auc(L, V):.2f} (n={len(V)})" if len(V) else ""))
+                  + (f" | vs decoy veins {auc(L, V):.2f} (n={len(V)})" if len(V) else "")
+                  + (f" | vs surface veins {auc(L, Vs):.2f} (n={len(Vs)})" if len(Vs) else ""))
 ```
 
-## scripts/rule_test.py
+## scripts/study_meta.py
 
 ```python
 #!/usr/bin/env python3
-"""Which single-feature exclusion rule would remove false positives WITHOUT losing known cSS?
-usage: rule_test.py --pos P006 --old OLD_candidates.nii.gz --ids 3,4,5,13,18,19 --neg P011[,P010]
-                    [--synthetic results/stress_TAG_features.csv] [--top 12]
-  --pos/--old/--ids  known cSS: lesions of an older candidate map (as in check_known.py), matched to
-                     the CURRENT candidates of that subject
-  --neg              cSS-negative subjects: every current candidate there is a false positive
-  --synthetic        optional stress-test feature table: rules are also checked on synthetic lesions
-                     (is_lesion == 1); synthetic features are partly artifacts of the generator
-For each feature and direction the threshold is put just beyond the most extreme known lesion (plus a
-safety margin), so every known lesion is kept; the table shows how many false positives that removes.
-With only a few known lesions this is a SHORTLIST for discussion, not a validated rule."""
-import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-import sys, os, numpy as np, pandas as pd, nibabel as nib
-from scipy import ndimage as ndi
+"""Study-level reference and metadata -> labels/study_meta.csv (one row per study).
+usage: study_meta.py SUBJECT --status pos|neg|uncertain [--ref-L 0-2 --ref-R 0-2] [--split dev|test]
+                     [--motion 0-3] [--reader NAME] [--note TEXT] [--force]
+  --status   patient-level cSS reference (expert / consensus), NOT the pipeline's result
+  --ref-L/R  reference multifocality per hemisphere (Charidimou 0-2)
+  --split    validation split. Assigned ONCE (before the pipeline result is looked at) and never
+             changed afterwards: a study that has been used to design or tune rules stays 'dev'.
+             Changing an existing split needs --force and is logged in the note column.
+  --motion   reader's motion / artifact grade 0 none - 3 non-diagnostic
+Protocol and QC fields (vendor, field, TE, voxel size, sequence, coverage, anatomy route, QC status) are
+copied from review/ID_qc.json (written by detect_css.py v4.14+); run the detector first."""
+import sys, os, json, datetime, pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from css_common import base as _base
 
-base = _base()
-arg = lambda f, d="": sys.argv[sys.argv.index(f) + 1] if f in sys.argv else d
-if not (arg("--pos") and arg("--old") and arg("--ids") and arg("--neg")): sys.exit(__doc__)
-pos_s, top = arg("--pos"), int(arg("--top", "12"))
-FEATS = ["darkness_z", "volume_mm3", "elongation", "surface_contact", "cortex_frac", "cortex_dist_mm",
-         "surface_gradient", "pial_dist_mm", "bank_frac", "tube_ratio", "surface_alignment", "tram_frac",
-         "vein_tree_mm", "mirror_dark_frac", "edge_contrast", "parenchyma_frac", "extent_mm",
-         "vessel_ext_mm", "vessel_wm_mm", "vessel_run_mm", "axis_normal", "css_evidence", "vein_evidence",
-         "score_v4"]
+if len(sys.argv) < 2 or sys.argv[1].startswith("-"): sys.exit(__doc__)
+subj = sys.argv[1]; base = _base()
+arg = lambda f: sys.argv[sys.argv.index(f) + 1] if f in sys.argv else None
+path = f"{base}/labels/study_meta.csv"
+old = pd.read_csv(path, dtype=str) if os.path.exists(path) else pd.DataFrame(columns=["study_id"])
+prev = old[old.study_id == subj].iloc[0].to_dict() if (old.study_id == subj).any() else {}
+row = {k: v for k, v in prev.items() if isinstance(v, str)}
+row["study_id"] = subj
+st = arg("--status")
+if st is not None:
+    if st not in ("pos", "neg", "uncertain"): sys.exit("--status must be pos, neg or uncertain")
+    row["css_status"] = st
+for h in ("L", "R"):
+    v = arg(f"--ref-{h}")
+    if v is not None:
+        if v not in ("0", "1", "2"): sys.exit(f"--ref-{h} must be 0, 1 or 2")
+        row[f"ref_{h}"] = v
+if row.get("ref_L") and row.get("ref_R"):
+    row["ref_multifocality_0_4"] = str(int(row["ref_L"]) + int(row["ref_R"]))
+sp = arg("--split")
+if sp is not None:
+    if sp not in ("dev", "test"): sys.exit("--split must be dev or test")
+    if prev.get("split") and prev["split"] != sp and isinstance(prev["split"], str):
+        if "--force" not in sys.argv:
+            sys.exit(f"{subj} is already in split '{prev['split']}' - the split is fixed once assigned "
+                     f"(use --force only to correct a data-entry error)")
+        row["note"] = (str(row.get("note", "")) + f" [split {prev['split']}->{sp} forced "
+                       f"{datetime.date.today().isoformat()}]").strip()
+    row["split"] = sp
+    row.setdefault("split_assigned", datetime.date.today().isoformat())
+for f_, k_ in (("--motion", "motion_grade"), ("--reader", "reference_reader"), ("--note", "note")):
+    v = arg(f_)
+    if v is not None:
+        if f_ == "--motion" and v not in ("0", "1", "2", "3"): sys.exit("--motion must be 0-3")
+        row[k_] = v if f_ != "--note" else (str(row.get("note", "")) + " " + v).strip()
+qp = f"{base}/review/{subj}_qc.json"
+if os.path.exists(qp):
+    q = json.load(open(qp)); a = q.get("acquisition") or {}
+    row.update(vendor=a.get("manufacturer") or "", field_T=a.get("field_T") or "", TE_ms=a.get("TE_ms") or "",
+               sequence=a.get("sequence") or "", image_type=a.get("image_type") or "",
+               acq_dim=a.get("acq_dim") or "", voxel_mm="x".join(f"{v:g}" for v in q["voxel_mm"]),
+               slice_mm=max(q["voxel_mm"]), coverage_skull_base=int(q["coverage_includes_skull_base"]),
+               anatomy=q["anatomy"], recon_all=int(q["anatomy"] == "T1 recon-all"),
+               flair=int(os.path.exists(f"{base}/work/{subj}_flair_swispace.nii.gz")),
+               phase=int(os.path.exists(f"{base}/data/{subj}_phase.nii.gz")),
+               qc_status=q["status"], edge_agreement_mm=q.get("edge_agreement_mm"))
+else:
+    print(f"WARNING: {qp} not found - protocol/QC fields left empty (run detect_css.py v4.14+)")
+row["updated"] = datetime.datetime.now().isoformat(timespec="seconds")
+os.makedirs(os.path.dirname(path), exist_ok=True)
+out = pd.concat([old[old.study_id != subj], pd.DataFrame([row])], ignore_index=True)
+out.to_csv(path, index=False)
+print(f"{subj}: status {row.get('css_status', '?')}, split {row.get('split', 'unassigned')}, "
+      f"ref {row.get('ref_multifocality_0_4', '?')}/4, QC {row.get('qc_status', '?')} -> {path}")
+```
 
-# known lesions -> current candidates of the positive subject
-old = nib.load(os.path.expanduser(arg("--old"))).get_fdata().astype(int)
-cand = nib.load(f"{base}/review/{pos_s}_candidates.nii.gz").get_fdata().astype(int)
-if old.shape != cand.shape: sys.exit("grids differ - re-import the same SWI")
-dp = pd.read_csv(f"{base}/review/{pos_s}_candidates.csv")
-known = {}
-for i in [int(x) for x in arg("--ids").split(",") if x.strip()]:
-    v = cand[ndi.binary_dilation(old == i, iterations=2)]; v = v[v > 0]
-    if len(v): known[i] = int(np.bincount(v).argmax())          # the candidate covering it most
-    else: print(f"known lesion #{i}: not a current candidate (excluded or not detected) - not used")
-if not known: sys.exit("no known lesion is a current candidate")
-P = dp[dp.cand_id.isin(set(known.values()))]
-O = dp[~dp.cand_id.isin(set(known.values()))]          # other candidates of the positive subject
-N = pd.concat([pd.read_csv(f"{base}/review/{s}_candidates.csv").assign(subject=s)
-               for s in arg("--neg").split(",")], ignore_index=True)
-S = None
-if arg("--synthetic"):
-    S = pd.read_csv(os.path.expanduser(arg("--synthetic"))); S = S[S.is_lesion == 1]
-F = [f for f in FEATS if f in dp.columns and f in N.columns]
+## scripts/surface_features.py
 
-print(f"known cSS ({pos_s}): {len(P)} candidates {sorted(known.items())}  (old id: current id)")
-print(f"false positives: {len(N)} candidates of {arg('--neg')}" +
-      (f";  synthetic lesions: {len(S)}" if S is not None else "") +
-      f";  other {pos_s} candidates (unlabelled): {len(O)}\n")
-print("Feature values of the known lesions vs the false positives (median [min-max]):")
-for f in F:
-    p_, n_ = P[f].dropna(), N[f].dropna()
-    if not len(p_) or not len(n_): continue
-    print(f"  {f:18s} known {p_.median():7.2f} [{p_.min():7.2f} {p_.max():7.2f}]   "
-          f"FP {n_.median():7.2f} [{n_.min():7.2f} {n_.max():7.2f}]")
+```python
+#!/usr/bin/env python3
+"""Pial-surface (geodesic) features for candidates AND excluded objects - recon-all route only (v4.16).
+usage: surface_features.py SUBJECT [--surface-xfm tkras_to_swi.txt] [--near-mm 3] [--reach-mm 25] [--force]
+Reads subjects/ID/surf/{lh,rh}.pial, the detector output (review/ID_candidates|excluded.csv/.nii.gz) and
+work/ID_dark.nii.gz; writes review/ID_surface_features.csv (one row per object: list, obj_id, fingerprint,
+features) and review/ID_surface_features.json (transform, registration check). RECORDED ONLY: no rule,
+score or tier uses these values until expert labels show what they are worth.
+
+Surface -> SWI transform. FreeSurfer surfaces are in tkRAS. By default the transform is built from
+subjects/ID/mri/orig.mgz (tkRAS -> T1 scanner RAS) and work/ID_swi2t1.lta (prep_anat.sh). The LTA's direction
+is NOT trusted: both directions are tried and the one whose pial vertices lie on the label pial boundary of
+work/ID_seg_swispace.nii.gz (which mri_vol2vol produced with the same LTA) is used. If neither agrees
+within 2 mm the script stops (--force to run anyway). --surface-xfm: a 4x4 text affine tkRAS -> SWI world.
+
+Features (each object is projected onto its nearest pial vertices, <= --near-mm away):
+  surf_valid             1 if >= 3 voxels project onto the surface
+  surf_normal_dist_mm    median signed distance from the pial surface along the vertex normal
+                         (- inside cortex / subpial, + out in the CSF); surf_normal_iqr_mm its spread
+  surf_area_mm2          pial area covered (projected vertices + 1 ring)
+  surf_pieces            surface-connected pieces of the projection (>= 5 vertices); 2 when it lines both
+                         banks of a sulcus (they are close in space but far apart ON the surface)
+  surf_band_continuity   share of the projection in its largest surface-connected piece
+  geo_length_mm          geodesic length of that piece, measured inside it (two-sweep diameter)
+  geo_euclid_ratio       geodesic / straight-line distance between its two ends (>1 = folds with the cortex)
+  surf_dark_cont_mm      how far DARK pial surface continues beyond the projection (<= --reach-mm);
+                         vertex dark = work/ID_dark.nii.gz within 1.5 mm along its normal
+  surf_exit_paths        separate dark paths leaving the projection 3-8 mm out: 0 = isolated band,
+                         1 = runs on one way, 2 = runs through, >= 3 = branching
+This replaces the uploaded geodesic_vein_features.py prototype: there, "continuation" was measured on the
+bare mesh (always the search limit, 25 mm) and "branches" were mesh vertices with >= 6 neighbours."""
+import sys, os, json, argparse, numpy as np, nibabel as nib, pandas as pd
+from scipy import ndimage as ndi
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import dijkstra, connected_components
+from scipy.spatial import cKDTree
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import base as _base, FP
+from css_surface import apply, surface_to_swi
+
+ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+ap.add_argument("subject"); ap.add_argument("--surface-xfm", default="")
+ap.add_argument("--subjects-dir", default="")
+ap.add_argument("--near-mm", type=float, default=3.0); ap.add_argument("--reach-mm", type=float, default=25.0)
+ap.add_argument("--force", action="store_true")
+a = ap.parse_args(); subj = a.subject; base = _base()
+sdir = a.subjects_dir or os.environ.get("CSS_SUBJECTS_DIR", f"{base}/subjects")
+swi = nib.load(f"{base}/data/{subj}_swi.nii"); aff = swi.affine; inv_aff = np.linalg.inv(aff)
+T, tsrc, checks, surfs = surface_to_swi(base, subj, sdir, a.surface_xfm, a.force)
+
+dark = nib.load(f"{base}/work/{subj}_dark.nii.gz").get_fdata() > 0
+
+class Surf:
+    def __init__(self, V, F):
+        self.V = apply(T, V); self.F = F.astype(np.int64)
+        e = np.r_[F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]]; e = np.unique(np.sort(e, axis=1), axis=0)
+        w = np.linalg.norm(self.V[e[:, 0]] - self.V[e[:, 1]], axis=1); n = len(self.V)
+        self.G = coo_matrix((np.r_[w, w], (np.r_[e[:, 0], e[:, 1]], np.r_[e[:, 1], e[:, 0]])), shape=(n, n)).tocsr()
+        fn = np.cross(self.V[F[:, 1]] - self.V[F[:, 0]], self.V[F[:, 2]] - self.V[F[:, 0]])   # area-weighted
+        N = np.zeros_like(self.V)
+        for k in range(3): np.add.at(N, F[:, k], fn)
+        self.N = N / (np.linalg.norm(N, axis=1, keepdims=True) + 1e-9)
+        if np.median(np.einsum("ij,ij->i", self.V - self.V.mean(0), self.N)) < 0: self.N = -self.N   # outward
+        self.area = np.zeros(n); np.add.at(self.area, F.ravel(), np.repeat(np.linalg.norm(fn, axis=1) / 6.0, 3))
+        self.tree = cKDTree(self.V)
+        # vertex dark: work/ID_dark.nii.gz within 1.5 mm along the normal (subpial or just outside)
+        dk = np.zeros(n, bool)
+        for t in np.arange(-1.5, 1.51, 0.5):
+            ijk = np.round(apply(inv_aff, self.V + t * self.N)).astype(int)
+            ok = np.all((ijk >= 0) & (ijk < np.array(dark.shape)), axis=1)
+            dk[ok] |= dark[tuple(ijk[ok].T)]
+        self.dark = dk
+S = {"L": Surf(*surfs["lh"]), "R": Surf(*surfs["rh"])}
+
+def sub_dist(sf, nodes, src, limit=np.inf):
+    """Dijkstra inside the vertex subset `nodes` (bool) from `src` (indices into the full mesh)"""
+    idx = np.nonzero(nodes)[0]; pos = -np.ones(len(nodes), int); pos[idx] = np.arange(len(idx))
+    d = dijkstra(sf.G[idx][:, idx], indices=pos[src], limit=limit, min_only=True)
+    out = np.full(len(nodes), np.inf); out[idx] = d
+    return out
+
+def features(m, hemi):
+    pts = np.argwhere(m); Pw = apply(aff, pts.astype(float))
+    sf = S.get(hemi) or min(S.values(), key=lambda s_: np.median(s_.tree.query(Pw)[0]))
+    dd, vi = sf.tree.query(Pw)
+    ok = dd <= a.near_mm
+    r = dict(surf_valid=int(ok.sum() >= 3))
+    if not r["surf_valid"]:
+        return r
+    off = np.einsum("ij,ij->i", Pw[ok] - sf.V[vi[ok]], sf.N[vi[ok]])
+    r["surf_normal_dist_mm"] = round(float(np.median(off)), 2)
+    r["surf_normal_iqr_mm"] = round(float(np.subtract(*np.percentile(off, [75, 25]))), 2)
+    P = np.zeros(len(sf.V), bool); P[vi[ok]] = True
+    P1 = P.copy(); P1[sf.G[np.nonzero(P)[0]].indices] = True          # + 1 ring: voxel grid vs mesh spacing
+    r["surf_area_mm2"] = round(float(sf.area[P1].sum()), 1)
+    idx = np.nonzero(P1)[0]
+    nc, lab = connected_components(sf.G[idx][:, idx], directed=False)
+    sizes = np.bincount(lab)
+    r["surf_pieces"] = int((sizes >= 5).sum())
+    r["surf_band_continuity"] = round(float(sizes.max() / len(idx)), 2)
+    big = np.zeros(len(sf.V), bool); big[idx[lab == sizes.argmax()]] = True
+    d0 = sub_dist(sf, big, [int(np.nonzero(big)[0][0])])
+    e1 = int(np.argmax(np.where(np.isfinite(d0), d0, -1))); d1 = sub_dist(sf, big, [e1])
+    e2 = int(np.argmax(np.where(np.isfinite(d1), d1, -1)))
+    r["geo_length_mm"] = round(float(d1[e2]), 1)
+    eu = float(np.linalg.norm(sf.V[e1] - sf.V[e2]))
+    r["geo_euclid_ratio"] = round(float(d1[e2] / eu), 2) if eu > 1.0 else np.nan
+    # dark pial surface beyond the projection, and how many separate dark paths leave it
+    D = sf.dark | P1
+    dc = sub_dist(sf, D, np.nonzero(P1)[0], limit=a.reach_mm)
+    out = np.isfinite(dc) & ~P1
+    r["surf_dark_cont_mm"] = round(float(dc[out].max()), 1) if out.any() else 0.0
+    ring = out & (dc >= 3.0) & (dc <= 8.0)
+    if ring.any():
+        ri = np.nonzero(ring)[0]; _, rl = connected_components(sf.G[ri][:, ri], directed=False)
+        r["surf_exit_paths"] = int((np.bincount(rl) >= 3).sum())
+    else:
+        r["surf_exit_paths"] = 0
+    return r
 
 rows = []
-for f in F:
-    p_ = P[f].dropna()
-    if len(p_) < len(P) or not N[f].notna().any(): continue      # a rule must be defined for every known lesion
-    allv = pd.concat([p_, N[f].dropna()]); margin = 0.1 * (allv.max() - allv.min())
-    for op, t in ((">", p_.max() + margin), ("<", p_.min() - margin)):
-        hit = (lambda x: x > t) if op == ">" else (lambda x: x < t)
-        nrem = int(hit(N[f].dropna()).sum())
-        if nrem == 0: continue
-        rows.append(dict(rule=f"exclude if {f} {op} {t:.2f}", fp_removed=nrem,
-                         fp_pct=round(100 * nrem / len(N)),
-                         other_pos_removed=int(hit(O[f].dropna()).sum()),
-                         synthetic_lost=(f"{int(hit(S[f].dropna()).sum())}/{len(S)}" if S is not None and f in S else "-"),
-                         margin_to_known=round(margin, 2)))
-print("\nRules that keep ALL known lesions (threshold = most extreme known lesion + 10 % of the range):")
-if rows:
-    R = pd.DataFrame(rows).sort_values("fp_removed", ascending=False).head(top)
-    print(R.to_string(index=False))
+for lst, idc in (("candidate", "cand_id"), ("excluded", "excl_id")):
+    cp, mp = f"{base}/review/{subj}_{lst if lst == 'excluded' else 'candidates'}.csv", \
+        f"{base}/review/{subj}_{lst if lst == 'excluded' else 'candidates'}.nii.gz"
+    if not os.path.exists(cp): continue
+    d = pd.read_csv(cp)
+    if not len(d): continue
+    M = nib.load(mp).get_fdata().astype(int)
+    for _, rr in d.iterrows():
+        m = M == int(rr[idc])
+        if not m.any(): continue
+        rows.append(dict(list=lst, obj_id=int(rr[idc]), **{f: rr[f] for f in FP},
+                         **features(m, str(rr.get("hemi", "")))))
+cols = ["list", "obj_id"] + FP + ["surf_valid", "surf_normal_dist_mm", "surf_normal_iqr_mm", "surf_area_mm2",
+        "surf_pieces", "surf_band_continuity", "geo_length_mm", "geo_euclid_ratio", "surf_dark_cont_mm",
+        "surf_exit_paths"]
+pd.DataFrame(rows, columns=cols).to_csv(f"{base}/review/{subj}_surface_features.csv", index=False)
+json.dump(dict(subject=subj, transform_source=tsrc, label_agreement_mm=checks, tkras_to_swi=T.tolist(),
+               near_mm=a.near_mm, reach_mm=a.reach_mm, note="recorded only; not validated"),
+          open(f"{base}/review/{subj}_surface_features.json", "w"), indent=2)
+print(f"{subj}: surface features for {len(rows)} objects -> {base}/review/{subj}_surface_features.csv")
+```
+
+## scripts/surface_overlay.py
+
+```python
+#!/usr/bin/env python3
+"""Show candidates and excluded objects on the FreeSurfer surface, in freeview (recon-all route; v4.16).
+usage: surface_overlay.py SUBJECT [--color-by list|expert] [--reader NAME] [--session N]
+                          [--surface-xfm tkras_to_swi.txt] [--near-mm 3] [--force]
+  --color-by list    (default) red = shown candidate, blue = excluded by a rule
+  --color-by expert  the expert's calls from labels/candidate_labels.csv (expert_import.py): red cSS,
+                     gold uncertain, blue surface vein (VS), cyan other veins, orange artifact,
+                     grey other / normal, light green = object without a label
+Every voxel of each object is projected onto its nearest pial vertex (<= --near-mm); the surface transform is
+checked against the SWI labels exactly as in surface_features.py (stops above 2 mm unless --force).
+Where objects overlap on the surface the SAFER class is drawn: cSS before uncertain before veins before
+artifact/other - a vein can never hide a cSS call. Hidden vertices are counted per object.
+Writes, in review/:
+  ID_surf_<mode>.lh.annot / .rh.annot   categorical colours (annotation: no blending between categories)
+  ID_surf_ids.lh.mgh / .rh.mgh          object id per vertex (+cand_id, -excl_id): click a vertex in freeview
+  ID_surf_<mode>_objects.csv            per object: class, vertices, hidden vertices, Destrieux sulcus/gyrus
+                                        under it (label/?h.aparc.a2009s.annot) - a check on sulcal scoring
+and prints the freeview command. Display / QC only: nothing here changes candidates, calls or scores.
+No model probabilities or review tiers are shown - none are validated."""
+import sys, os, argparse, numpy as np, nibabel as nib, pandas as pd
+from scipy.spatial import cKDTree
+from nibabel.freesurfer.io import write_annot, read_annot
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import base as _base, FP, match_calls
+from css_surface import apply, surface_to_swi
+
+ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+ap.add_argument("subject"); ap.add_argument("--color-by", default="list", choices=["list", "expert"])
+ap.add_argument("--reader", default=""); ap.add_argument("--session", type=int, default=0)
+ap.add_argument("--surface-xfm", default=""); ap.add_argument("--subjects-dir", default="")
+ap.add_argument("--near-mm", type=float, default=3.0); ap.add_argument("--force", action="store_true")
+a = ap.parse_args(); subj = a.subject; base = _base()
+sdir = a.subjects_dir or os.environ.get("CSS_SUBJECTS_DIR", f"{base}/subjects")
+
+# classes in drawing priority (first wins where objects overlap); RGB
+if a.color_by == "list":
+    CLASSES = [("shown_candidate", (220, 30, 30)), ("excluded", (30, 90, 230))]
 else:
-    print("  none - every feature of the false positives overlaps the known lesions")
-print("\nRead with care: few known lesions -> a rule can look safe by chance. Prefer rules that also lose "
-      "few synthetic lesions and that make sense radiologically; confirm on the next patients.")
-```
+    CLASSES = [("cSS", (220, 30, 30)), ("uncertain", (230, 190, 0)), ("surface_vein", (30, 90, 230)),
+               ("other_vein", (0, 200, 220)), ("artifact", (240, 130, 0)), ("other_normal", (150, 150, 150)),
+               ("not_labelled", (150, 230, 150))]
+PRIO = {c: k for k, (c, _) in enumerate(CLASSES)}
 
-## tests/phantom.py
+def expert_class(label):
+    if label == "cSS": return "cSS"
+    if label == "uncertain": return "uncertain"
+    if label == "vein_surface": return "surface_vein"
+    if label.startswith("vein_") or label == "thrombosed_vein": return "other_vein"
+    if label.startswith("artifact"): return "artifact"
+    return "other_normal"
 
-```python
-"""Synthetic phantom brain (ellipsoid, radial sulci, midline fissure, dark veins) for tests.
-usage: phantom.py NAME SEED   (writes into $CSS_BASE)"""
-import os, numpy as np, nibabel as nib, sys
-B = os.environ["CSS_BASE"]
-from scipy import ndimage as ndi
-name, sd = sys.argv[1], int(sys.argv[2]); rng = np.random.default_rng(sd)
-sh = (220, 220, 40); vox = (0.5, 0.5, 2.0)
-aff = np.diag(list(vox) + [1.0])
-x, y, zz = np.meshgrid(*[(np.arange(n) - n/2) * v for n, v in zip(sh, vox)], indexing="ij")
-r = np.sqrt((x/50)**2 + (y/52)**2 + (zz/38)**2)          # ellipsoid "brain"
-brain = r < 1
-seg = np.zeros(sh, np.int32)
-depth_mm = (1 - r) * 50                                    # approx depth from surface
-left = x < 0; front = y > 0
-ctxcode = np.where(left, 1000, 2000) + np.where(front, 28, 22)
-seg[brain] = np.where(left, 2, 41)[brain]
-seg[brain & (depth_mm < 3)] = ctxcode[brain & (depth_mm < 3)]
-ang = np.arctan2(y, x)
-I = np.zeros(sh, np.float32)
-for a0 in np.arange(-np.pi, np.pi, np.pi/9):              # radial sulci
-    d_line = np.abs(np.sin(ang - a0)) * np.sqrt(x**2 + y**2)
-    sul = brain & (d_line < 0.8) & (depth_mm < 12) & (np.cos(ang - a0) > 0)
-    bank = brain & (d_line < 3.8) & (depth_mm < 15) & (np.cos(ang - a0) > 0) & ~sul
-    seg[bank] = ctxcode[bank]; seg[sul] = 24
-seg[np.abs(x) < 0.7] = np.where(brain[np.abs(x) < 0.7], 24, 0)   # midline fissure
-I[np.isin(seg, [2, 41])] = 230; I[seg >= 1000] = 200; I[seg == 24] = 255
-I[brain] += rng.normal(0, 12, brain.sum())
-# veins: dark tubes along some sulci, with a branch
-for a0 in np.arange(-np.pi, np.pi, np.pi/4):
-    d_line = np.abs(np.sin(ang - a0 + 0.17)) * np.sqrt(x**2 + y**2)
-    v = brain & (d_line < 0.6) & (depth_mm > 2) & (depth_mm < 9) & (np.cos(ang - a0) > 0) & (np.abs(zz) < 14)
-    I[v] = 70
-I[~brain] = 0; I[brain] = np.maximum(I[brain], 1)
-seg[~brain] = 0
-nib.save(nib.Nifti1Image(I, aff), f"{B}/data/{name}_swi.nii")
-nib.save(nib.Nifti1Image(seg, aff), f"{B}/synthseg/{name}_seg.nii.gz")
-```
+# ---- objects (candidates + excluded) and their class
+objs = []
+for lst, stem, idc in (("candidate", "candidates", "cand_id"), ("excluded", "excluded", "excl_id")):
+    cp = f"{base}/review/{subj}_{stem}.csv"
+    if not os.path.exists(cp): continue
+    d = pd.read_csv(cp)
+    if not len(d): continue
+    M = nib.load(f"{base}/review/{subj}_{stem}.nii.gz").get_fdata().astype(int)
+    labels = {}
+    if a.color_by == "expert":
+        lp = f"{base}/labels/candidate_labels.csv"
+        if not os.path.exists(lp): sys.exit(f"no {lp} - import expert answers first (expert_import.py)")
+        L = pd.read_csv(lp); L = L[L.study_id.astype(str) == subj]
+        readers = sorted(L.reader_id.astype(str).unique())
+        if not readers: sys.exit(f"{subj}: no expert labels in {lp}")
+        reader = a.reader or (readers[0] if len(readers) == 1 else sys.exit(f"several readers {readers}: --reader"))
+        if reader not in readers: sys.exit(f"{subj}: no labels from reader '{reader}' (have {readers})")
+        L = L[L.reader_id.astype(str) == reader]
+        ses = a.session or int(L.session.max()); L = L[(L.session == ses) & (L.list == lst)]
+        if len(L):
+            fp = L.cand_uid.str.split(":", expand=True).iloc[:, 1:5].astype(float)
+            fp.columns = FP
+            m, _ = match_calls(d.rename(columns={idc: "cand_id"}), fp.assign(call=L.label.values))
+            labels = m or {}
+    for _, r in d.iterrows():
+        i = int(r[idc])
+        cls = ("shown_candidate" if lst == "candidate" else "excluded") if a.color_by == "list" else \
+            (expert_class(labels[i]) if i in labels else "not_labelled")
+        objs.append(dict(list=lst, obj_id=i, sid=i if lst == "candidate" else -i, hemi=str(r.get("hemi", "")),
+                         cls=cls, label=labels.get(i, ""), mask=(M == i), **{f: r[f] for f in FP}))
+if not objs: sys.exit(f"{subj}: no candidates or excluded objects")
 
-## tests/phantom_v4.py
-
-```python
-"""Phantom brain with the structures the cSS definition separates (v4 tests).
-usage: phantom_v4.py NAME SEED        (writes into $CSS_BASE; appends test labels to the LUT)
-
-Geometry (mm, 0.8 x 0.8 x 1.2 voxels like a clinical SWI):
-  ellipsoid hemispheres, 2.5 mm cortex, 4.5 mm extra-axial CSF (SynthStrip keeps CSF), midline
-  fissure, 16 radial sulci (2 mm CSF, 14 mm deep).
-Truth  work/NAME_truth.nii.gz  (cSS, ids 1-6):
-  1-3 tram-track: subpial band on BOTH banks of a sulcus        (the classic sign)
-  4-5 convexity: subpial band following the gyral crown          (curvilinear sheet)
-  6   single bank of a sulcus
-Mimics work/NAME_veins.nii.gz (ids 1-6):
-  1-4 tubular veins in the middle of the sulcal CSF (1,2 and 3,4 are left/right mirror pairs)
-  5-6 cortical surface veins running tangentially in the CSF just outside the pial surface
-  7   transcortical / medullary vein: radial tube from the surface CSF through the cortex 14 mm into WM
-Also: a lobar ICH (dark sphere, 8 mm) in left white matter -> work/NAME_ich_truth.nii.gz
-Labels: synthseg/NAME_seg.nii.gz (aseg/DK-like) and work/NAME_a2009s_swispace.nii.gz
-(Destrieux-like: S_k = banks of sulcus k, G_k = gyrus between sulci k and k+1)."""
-import os, sys, numpy as np, nibabel as nib
-from scipy import ndimage as ndi
-
-B = os.environ["CSS_BASE"]
-name, sd = sys.argv[1], int(sys.argv[2]); rng = np.random.default_rng(sd)
-vox = (0.8, 0.8, 1.2); sh = (150, 165, 90)
-aff = np.diag(list(vox) + [1.0])
-x, y, z = np.meshgrid(*[(np.arange(n) - n / 2) * v for n, v in zip(sh, vox)], indexing="ij")
-R0 = 52.0
-r = np.sqrt((x / 52) ** 2 + (y / 58) ** 2 + (z / 44) ** 2)
-depth = (1 - r) * R0                        # ~mm below the pial surface (negative = outside)
-inside = r < 1                              # pial surface
-mask = depth > -4.5                         # brain mask incl. 4.5 mm extra-axial CSF (atrophic CAA)
-left = x < 0
-rho = np.sqrt(x ** 2 + y ** 2); ang = np.arctan2(y, x)
-
-seg = np.zeros(sh, np.int32)
-seg[mask] = 24
-seg[inside] = np.where(left, 2, 41)[inside]
-ctx = np.where(left, 1000, 2000) + np.where(y > 0, 28, 22)
-cort = inside & (depth < 2.5)
-A0 = np.arange(-np.pi, np.pi, np.pi / 8) + np.pi / 16          # 16 sulci, none on the midline
-sul_any = np.zeros(sh, bool); bank_k = np.full(sh, -1, np.int16)
-dl = np.zeros((len(A0),) + sh, np.float32)
-for k, a0 in enumerate(A0):
-    d_line = np.abs(np.sin(ang - a0)) * rho
-    front = np.cos(ang - a0) > 0
-    dl[k] = np.where(front, d_line, 99)
-    sul = inside & (dl[k] < 1.0) & (depth < 14)
-    bank = inside & (dl[k] < 3.5) & (depth < 16.5) & ~sul
-    cort |= bank; sul_any |= sul
-    bank_k[bank & (bank_k < 0)] = k
-fiss = mask & (np.abs(x) < 1.0)
-cort |= inside & (np.abs(x) < 3.5) & ~fiss
-cort &= ~sul_any & ~fiss
-seg[cort] = ctx[cort]; seg[sul_any | fiss] = 24
-seg[~mask] = 0
-
-# Destrieux-like labels on the cortex
-sector = (np.floor((ang - A0[0]) / (np.pi / 8)).astype(int)) % len(A0)
-a2 = np.zeros(sh, np.int32)
-hemi_off = np.where(left, 11100, 12100)
-a2[cort] = (hemi_off + 1 + sector)[cort]                         # G_k
-bk = cort & (bank_k >= 0)
-a2[bk] = (hemi_off + 50 + bank_k)[bk]                            # S_k
-
-I = np.zeros(sh, np.float32)
-I[np.isin(seg, [2, 41])] = 180; I[seg >= 1000] = 210; I[seg == 24] = 250
-I[mask] += rng.normal(0, 10, int(mask.sum()))
-
-def darken(m, f=0.6, blur=0.6):
-    """hemosiderin / deoxy-Hb: multiplicative darkening with blooming (gaussian edge)"""
-    w = np.clip(ndi.gaussian_filter(m.astype(np.float32), [blur / v for v in vox]) * 1.6, 0, 1)
-    I[:] = I * (1 - f * w)
-
-truth = np.zeros(sh, np.int16); veins = np.zeros(sh, np.int16)
-zc = lambda lo, hi: (z > lo) & (z < hi)
-# 1-3 tram-track: subpial 1.2 mm band on both banks (sulci 2, 6 left side; 11 right side)
-for i, (k, z0) in enumerate([(5, -6), (7, 4), (13, -10)], 1):
-    m = (dl[k] >= 1.0) & (dl[k] < 2.2) & (depth > 3) & (depth < 12) & zc(z0, z0 + 16) & cort
-    truth[m] = i
-# 4-5 convexity crown: outer 1 mm of cortex over a 14 deg arc, 18 mm high
-for i, (a, z0) in enumerate([(A0[4] + np.pi / 16, -2), (A0[12] + np.pi / 16, 6)], 4):
-    m = cort & (depth >= 0) & (depth < 1.2) & (np.abs(np.angle(np.exp(1j * (ang - a)))) < np.radians(7)) & zc(z0, z0 + 18)
-    truth[m] = i
-# 6 single bank
-k = 9; s = np.sign(np.sin(ang - A0[k]))
-m = (dl[k] >= 1.0) & (dl[k] < 2.2) & (s > 0) & (depth > 3) & (depth < 12) & zc(-4, 12) & cort
-truth[m] = 6
-# veins 1-4: tubes (r 0.7 mm) in the sulcal CSF at 5 mm depth, running 30 mm along z;
-# 1/2 and 3/4 are left-right mirror images (normal anatomy is roughly symmetric)
-# (sulcus k mirrors sulcus 7-k mod 16; sulci 5, 7, 9, 13 carry cSS)
-for i, k in enumerate([1, 6, 11, 12], 1):
-    c_xy = np.array([np.cos(A0[k]), np.sin(A0[k])])
-    # point on the sulcal plane where depth ~5 mm (search along the ray)
-    t = np.linspace(20, 60, 400); px, py = c_xy[0] * t, c_xy[1] * t
-    rr = np.sqrt((px / 52) ** 2 + (py / 58) ** 2); p = np.argmin(np.abs((1 - rr) * R0 - 5))
-    m = (np.sqrt((x - px[p]) ** 2 + (y - py[p]) ** 2) < 0.7) & zc(-14, 16) & mask
-    veins[m] = i
-# veins 5-6: cortical surface veins 1.2 mm outside the pial surface, tangential, 40 deg arc
-for i, (a, z0) in enumerate([(np.radians(60), 8), (np.radians(-120), -6)], 5):
-    m = (np.abs(depth + 1.2) < 0.7) & (np.abs(z - z0) < 0.7) & \
-        (np.abs(np.angle(np.exp(1j * (ang - a)))) < np.radians(20)) & mask
-    veins[m] = i
-# vein 7: radial (perpendicular to the cortex), gyral crown between sulci 1 and 2, from 2 mm outside
-# the pial surface to 14 mm deep; slight tilt so it is seen on several slices
-a7 = A0[1] + np.pi / 16
-u7 = np.array([np.cos(a7) * 52, np.sin(a7) * 58, 6.0]); u7 /= np.linalg.norm(u7)
-P = np.stack([x, y, z - 2.0], -1); tp = P @ u7
-dperp = np.linalg.norm(P - tp[..., None] * u7, axis=-1)
-m = (dperp < 1.0) & (depth > -2) & (depth < 14) & mask
-veins[m] = 7
-ich = (np.sqrt((x + 22) ** 2 + (y - 10) ** 2 + (z - 4) ** 2) < 8) & inside
-darken(truth > 0, 0.6); darken(veins > 0, 0.6, blur=0.4); darken(ich, 0.7, blur=0.8)
-I[~mask] = 0; I[mask] = np.maximum(I[mask], 1)
-
-os.makedirs(f"{B}/data", exist_ok=True); os.makedirs(f"{B}/work", exist_ok=True)
-os.makedirs(f"{B}/synthseg", exist_ok=True)
-nib.save(nib.Nifti1Image(I, aff), f"{B}/data/{name}_swi.nii")
-nib.save(nib.Nifti1Image(seg, aff), f"{B}/synthseg/{name}_seg.nii.gz")
-nib.save(nib.Nifti1Image(a2, aff), f"{B}/work/{name}_a2009s_swispace.nii.gz")
-nib.save(nib.Nifti1Image(truth, aff), f"{B}/work/{name}_truth.nii.gz")
-nib.save(nib.Nifti1Image(veins, aff), f"{B}/work/{name}_veins.nii.gz")
-nib.save(nib.Nifti1Image(ich.astype(np.uint8), aff), f"{B}/work/{name}_ich_truth.nii.gz")
-lutp = os.path.join(os.environ.get("FREESURFER_HOME", ""), "FreeSurferColorLUT.txt")
-if os.path.exists(lutp) and "ctx_lh_S_k00" not in open(lutp).read():
-    with open(lutp, "a") as f:
-        for h, off in (("lh", 11100), ("rh", 12100)):
-            for k in range(len(A0)):
-                f.write(f"{off + 1 + k} ctx_{h}_G_k{k:02d} 100 100 100 0\n")
-                f.write(f"{off + 50 + k} ctx_{h}_S_k{k:02d} 200 200 200 0\n")
-print(f"{name}: phantom v4  cSS lesions {int(truth.max())}  veins {int(veins.max())}  "
-      f"ICH {int(ich.sum() * np.prod(vox))} mm3")
-```
-
-## tests/phantom_infra.py
-
-```python
-"""Derive PH4 from the v4 phantom PH3: the lowest part becomes cerebellum (labels 8/47) and a dark
-curvilinear line is drawn along its surface (a normal tentorial / cerebellar-folia line).
-usage: phantom_infra.py   (needs PH3 in $CSS_BASE)"""
-import os, numpy as np, nibabel as nib
-B = os.environ["CSS_BASE"]
-img = nib.load(f"{B}/data/PH3_swi.nii"); I = img.get_fdata().astype(np.float32)
-seg = nib.load(f"{B}/synthseg/PH3_seg.nii.gz").get_fdata().astype(np.int32)
-vox = img.header.get_zooms()[:3]; sh = I.shape
-x, y, z = np.meshgrid(*[(np.arange(n) - n / 2) * v for n, v in zip(sh, vox)], indexing="ij")
-low = z < -30
-tis = (seg > 0) & (seg != 24)
-seg[low & tis] = np.where(x < 0, 8, 47)[low & tis]
-r = np.sqrt((x / 52) ** 2 + (y / 58) ** 2 + (z / 44) ** 2); depth = (1 - r) * 52
-line = low & (z > -38) & (depth > 0) & (depth < 1.2) & (np.abs(np.arctan2(y, x) - np.radians(-100)) < np.radians(12))
-I[line] *= 0.35
-nib.save(nib.Nifti1Image(I, img.affine), f"{B}/data/PH4_swi.nii")
-nib.save(nib.Nifti1Image(seg, img.affine), f"{B}/synthseg/PH4_seg.nii.gz")
-nib.save(nib.Nifti1Image(line.astype(np.uint8), img.affine), f"{B}/work/PH4_infra_line.nii.gz")
-print(f"PH4: cerebellum below z=-30 mm, dark cerebellar surface line {int(line.sum())} voxels")
-```
-
-## tests/check_v4.py
-
-```python
-"""Check v4 detector output on the phantom_v4 truth.   usage: check_v4.py NAME
-Prints each candidate's truth class and features, sensitivity, and how well score_v3 / score_v4
-and each definition feature separate true cSS from mimics. Exits 1 if a sanity check fails."""
-import os, sys, numpy as np, nibabel as nib, pandas as pd
-B = os.environ["CSS_BASE"]; name = sys.argv[1]
-ld = lambda p: nib.load(p).get_fdata().astype(int)
-truth, veins = ld(f"{B}/work/{name}_truth.nii.gz"), ld(f"{B}/work/{name}_veins.nii.gz")
-cand = ld(f"{B}/review/{name}_candidates.nii.gz")
-df = pd.read_csv(f"{B}/review/{name}_candidates.csv")
-cls = []
-for c in df.cand_id:
-    m = cand == c; t = np.bincount(truth[m], minlength=7)[1:]; v = np.bincount(veins[m], minlength=7)[1:]
-    if t.sum() >= v.sum() and t.sum() > 0.2 * m.sum(): cls.append(f"cSS{t.argmax() + 1}")
-    elif v.sum() > 0: cls.append(f"vein{v.argmax() + 1}")
-    else: cls.append("other")
-df["truth"] = cls
-F = ["darkness_z", "pial_dist_mm", "bank_frac", "tube_ratio", "surface_alignment", "tram_frac",
-     "vein_tree_mm", "mirror_dark_frac", "score_v3", "score_v4"]
-print(df[["cand_id", "truth"] + F].to_string(index=False))
-# a lesion is found when kept candidates cover >=30 % of it (merged neighbours count for both)
-found = [t for t in range(1, int(truth.max()) + 1) if (cand[truth == t] > 0).mean() >= 0.3]
-n = int(truth.max()); print(f"\nsensitivity: {len(found)}/{n}  found lesions {found}  (coverage >=30 %)")
-pos = df[df.truth.str.startswith("cSS")]; neg = df[~df.truth.str.startswith("cSS")]
-def auc(x, y):
-    x, y = np.asarray(x, float), np.asarray(y, float); x, y = x[~np.isnan(x)], y[~np.isnan(y)]
-    if not len(x) or not len(y): return float("nan")
-    return float((x[:, None] > y[None, :]).mean() + 0.5 * (x[:, None] == y[None, :]).mean())
-print("AUC cSS vs mimics (>0.5 = higher in cSS):  " +
-      "  ".join(f"{f} {auc(pos[f], neg[f]):.2f}" for f in F))
-vk = [v for v in range(1, int(veins.max()) + 1) if (cand[veins == v] > 0).mean() >= 0.3]
-print(f"veins still shown as candidates: {len(vk)}/{int(veins.max())} {vk}")
-ich = nib.load(f"{B}/work/{name}_ich_used.nii.gz").get_fdata() > 0
-icht = nib.load(f"{B}/work/{name}_ich_truth.nii.gz").get_fdata() > 0
-ich_dice = 2 * (ich & icht).sum() / max(ich.sum() + icht.sum(), 1)
-print(f"automatic ICH mask Dice vs truth: {ich_dice:.2f}")
-tc_shown = bool(veins.max() >= 7 and (cand[veins == 7] > 0).any())     # any overlap: most of it is in WM
-if veins.max() >= 7: print("transcortical vein (7) " + ("STILL SHOWN" if tc_shown else "excluded/not shown"))
-ok = len(found) >= n - 1 and not tc_shown and auc(pos.score_v4, neg.score_v4) >= 0.8 and ich_dice > 0.5
-print("RESULT v4 " + ("OK" if ok else "FAIL") +
-      f" found={len(found)} total={n} auc_v3={auc(pos.score_v3, neg.score_v3):.2f} "
-      f"auc_v4={auc(pos.score_v4, neg.score_v4):.2f} ich_dice={ich_dice:.2f}")
-sys.exit(0 if ok else 1)
-```
-
-## tests/run_tests.sh
-
-```bash
-#!/bin/bash
-# Self-test with a synthetic phantom brain - no patient data, no FreeSurfer needed.
-# usage: bash tests/run_tests.sh      (from the package root, inside the 'css' conda env)
-# Shell flow of run_css.sh / prep_anat.sh with stubbed FreeSurfer: bash tests/test_shell.sh
-set -e
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
-T=$(mktemp -d); export CSS_BASE=$T FREESURFER_HOME=$T/fs CSS_REVIEW_TEST=1
-mkdir -p $T/data $T/synthseg $T/work $T/review $T/results $T/fs $T/scripts
-cp $ROOT/scripts/*.py $T/scripts/
-printf '0 Unknown 0 0 0 0\n2 Left-Cerebral-White-Matter 245 245 245 0\n24 CSF 60 60 60 0\n41 Right-Cerebral-White-Matter 245 245 245 0\n1022 ctx-lh-postcentral 220 20 20 0\n1028 ctx-lh-superiorfrontal 20 220 160 0\n2022 ctx-rh-postcentral 220 20 20 0\n2028 ctx-rh-superiorfrontal 20 220 160 0\n' > $T/fs/FreeSurferColorLUT.txt
-S=$T/scripts
-echo "== phantoms";            python $ROOT/tests/phantom.py PH1 1; python $ROOT/tests/phantom.py PH2 2
-echo "== align";               python $S/align_seg.py PH1; python $S/align_seg.py PH2
-echo "== detect (clean)";      python $S/detect_css.py PH1 | head -1
-echo "== export";              python $S/export_review.py PH1 3
-echo "== synthetic lesions";   python $S/make_synthetic.py PH1 8 0.6 1 | head -1
-cp $T/synthseg/PH1_seg.nii.gz $T/synthseg/PH1S_seg.nii.gz; python $S/align_seg.py PH1S > /dev/null
-python $S/detect_css.py PH1S | head -1
-R=$(python $S/eval_synthetic.py PH1S | grep RESULT); echo "$R"
-FOUND=$(echo "$R" | sed -E 's/.*found=([0-9]+).*/\1/')
-[ "$FOUND" -ge 4 ] || { echo "FAIL: sensitivity too low ($FOUND/8)"; exit 1; }
-echo "== scoring with truth";  python $S/score_css.py PH1S --truth > $T/score_test.log; grep -A2 "cSS multifocality" $T/score_test.log
-echo "== interactive reviewer (headless test mode)"; python $S/review_css.py PH1S --top 8 --redo > $T/review_test.log; grep "cSS multifocality" $T/review_test.log
-echo "== calls survive a detector re-run (fingerprint matching)"
-cp $T/review/PH1S_candidates.csv $T/old_cand.csv
-python $S/detect_css.py PH1S -2.3 80 3 > /dev/null
-python - "$T" <<'PYEOF'
-import sys, pandas as pd; sys.path.insert(0, sys.argv[1] + "/scripts")
-from css_common import load_calls, FP
-b = sys.argv[1]; old = pd.read_csv(b + "/old_cand.csv"); new = pd.read_csv(b + "/review/PH1S_candidates.csv")
-raw = pd.read_csv(b + "/review/PH1S_calls.csv"); calls, warn = load_calls(b, "PH1S", new)
-for cid, call in calls.items():          # every re-attached call must sit on the same lesion as before
-    r = raw[raw.call == call]; n = new.set_index("cand_id").loc[cid]
-    assert (((r[FP[:3]] - n[FP[:3]].astype(float)) ** 2).sum(axis=1) ** .5 <= 2).any(), (cid, call)
-print(f"   {len(calls)}/{len(raw)} calls re-attached by fingerprint" + (f"; {warn}" if warn else ""))
-PYEOF
-python $S/detect_css.py PH1S > /dev/null
-echo "== feature report";      python $S/feature_report.py | head -3
-echo "== stress test (small)"; python $S/stress_test.py --hosts PH1,PH2 --depths 0.6 --seeds 1 --tag test | grep -A2 SUMMARY
-python $S/stress_test.py --hosts PH1 --depths 0.6 --seeds 1 --tag test_legacy --legacy | grep -A1 SUMMARY
-echo "== v4 phantom: tram-track / convexity cSS vs tubular & surface veins, ICH, sulcal scoring"
-python $ROOT/tests/phantom_v4.py PH3 1; python $S/align_seg.py PH3 > /dev/null
-python $S/detect_css.py PH3 | head -1
-python $ROOT/tests/check_v4.py PH3 | tail -3
-echo "== surface measure + agreement statistics (van Harten 2023)"
-python $S/score_css.py PH3 --truth | grep "cortical surface covered" || { echo "FAIL: surface measure"; exit 1; }
-cp -R $T/review $T/sessA; cp -R $T/review $T/sessB
-python $S/score_css.py PH1S --truth > /dev/null; cp $T/review/css_scores.csv $T/sessA/; cp $T/review/css_scores.csv $T/sessB/
-python $S/agreement.py --a $T/sessA --b $T/sessB | grep -q "ICC(A,1) 1.000" || { echo "FAIL: agreement on identical sessions"; exit 1; }
-echo "   identical sessions -> ICC 1.000"
-echo "== rule_test (known lesions vs a negative scan)"
-python $S/rule_test.py --pos PH3 --old $T/work/PH3_truth.nii.gz --ids 1,2,3,4,5,6 --neg PH1 | grep -q "known cSS (PH3)" || { echo "FAIL: rule_test"; exit 1; }
-python $S/score_css.py PH3 --truth > $T/score_v4.log
-grep -q "3/4" $T/score_v4.log && grep -q "sulcal (Destrieux)" $T/score_v4.log || { cat $T/score_v4.log; echo "FAIL: sulcal score on PH3 should be 3/4 (L1 + R2)"; exit 1; }
-grep -A3 "cSS multifocality" $T/score_v4.log
-echo "== reviewer with a phase image (calcium vs blood-product panel)"
-python - "$T" <<'PYEOF'
-import sys, numpy as np, nibabel as nib
-b = sys.argv[1]; r = nib.load(b + "/data/PH3_swi.nii")
-ph = np.random.default_rng(0).integers(-4096, 4096, r.shape).astype(np.int16)   # scanner-unit phase
-nib.save(nib.Nifti1Image(ph, r.affine), b + "/data/PH3_phase.nii.gz")
-PYEOF
-CSS_REVIEW_TEST=1 python $S/review_css.py PH3 --top 2 --redo > /dev/null && [ -s $T/review/PH3_review_preview.png ] && echo "   phase panel rendered"
-rm $T/data/PH3_phase.nii.gz
-python $S/score_css.py PH3 --truth > $T/score_v4.log
-echo "== ICH rule in sulci (Charidimou 2017): reader-drawn ICH -> left foci next to it excluded"
-cp $T/work/PH3_ich_truth.nii.gz $T/work/PH3_ich.nii.gz
-python $S/score_css.py PH3 --truth > $T/score_ich.log; rm $T/work/PH3_ich.nii.gz
-grep -q "2/4" $T/score_ich.log && grep -q "EXCLUDED" $T/score_ich.log || { cat $T/score_ich.log; echo "FAIL: ICH sulcal rule"; exit 1; }
-grep "ICH rule" $T/score_ich.log
-echo "== Boston v2.0 cSS count by gyri: all foci -> >=2; left only (2 adjacent gyri) -> 1"
-grep -q "Boston v2.0 cSS count: >=2" $T/score_v4.log || { cat $T/score_v4.log; echo "FAIL: Boston v2.0 >=2"; exit 1; }
-python -c "import pandas as pd,sys; p=sys.argv[1]+'/review/PH3_candidates.csv'; d=pd.read_csv(p); d.loc[d.hemi=='R','accept']=0; d.to_csv(p,index=False)" $T
-python $S/score_css.py PH3 > $T/score_b2.log
-grep -q "Boston v2.0 cSS count: 1 focus" $T/score_b2.log || { cat $T/score_b2.log; echo "FAIL: Boston v2.0 single focus"; exit 1; }
-grep "Boston" $T/score_v4.log $T/score_b2.log
-echo "== expert sheet (blinded PDF) + import of the expert's letters"
-python $S/detect_css.py PH3 > /dev/null
-python $S/expert_sheet.py PH3 | head -1
-[ -s $T/review/PH3_expert_sheet.pdf ] || { echo "FAIL: no expert sheet"; exit 1; }
-python - "$T" <<'PYEOF'
-import sys, pandas as pd, nibabel as nib, numpy as np
-b = sys.argv[1]; key = pd.read_csv(b + "/review/PH3_expert_key.csv")
-truth = nib.load(b + "/work/PH3_truth.nii.gz").get_fdata() > 0
-cand = nib.load(b + "/review/PH3_candidates.nii.gz").get_fdata().astype(int)
-letters = " ".join(f"{n}{'C' if (truth[cand == c]).mean() > 0.2 else 'V'}" for n, c in zip(key.sheet_no, key.cand_id))
-open(b + "/letters.txt", "w").write(letters)
-PYEOF
-python $S/expert_import.py PH3 expertA --letters "$(cat $T/letters.txt)" --score | grep -E "expert|multifocality"
-python - "$T" <<'PYEOF'
-import sys, pandas as pd, nibabel as nib
-b = sys.argv[1]; e = pd.read_csv(b + "/review/PH3_expert_expertA.csv")
-want = open(b + "/letters.txt").read().count("C")
-assert (e.call == "cSS").sum() == want, (e.call.value_counts(), want)   # every C mapped back to its candidate
-print("   expert calls mapped back to the right candidates")
-PYEOF
-python $S/feature_report.py | head -2
-echo "== normal anatomy: a dark line on the cerebellum must be excluded, cSS lesions kept"
-python $ROOT/tests/phantom_infra.py; python $S/align_seg.py PH4 > /dev/null
-python $S/detect_css.py PH4 | head -1
-python $S/check_known.py PH4 --old $T/work/PH3_truth.nii.gz --ids 1,2,3,4,5,6 | tail -1 | grep -q "6 of 6" \
-  || { python $S/check_known.py PH4 --old $T/work/PH3_truth.nii.gz --ids 1,2,3,4,5,6; echo "FAIL: cSS lost on PH4"; exit 1; }
-python $S/check_known.py PH4 --old $T/work/PH4_infra_line.nii.gz --ids 1 | head -1
-python $S/check_known.py PH4 --old $T/work/PH4_infra_line.nii.gz --ids 1 | head -1 | grep -q "kept" \
-  && { echo "FAIL: cerebellar line still shown as a candidate"; exit 1; }
-echo "== partial-coverage slab (bottom cut off) with T1 anatomy: skull-base rules must switch off"
-python - "$T" <<'PYEOF'
-import sys, numpy as np, nibabel as nib
-b = sys.argv[1]; img = nib.load(b + "/data/PH3_swi.nii"); I = img.get_fdata().astype(np.float32)
-seg = nib.load(b + "/work/PH3_seg_swispace.nii.gz").get_fdata().astype(np.int32)
-I[:, :, :30] = 0; seg[:, :, :30] = 0                      # slab starts in the middle of the brain
-nib.save(nib.Nifti1Image(I, img.affine), b + "/data/PH5_swi.nii")
-nib.save(nib.Nifti1Image(seg, img.affine), b + "/synthseg/PH5_seg.nii.gz")
-nib.save(nib.Nifti1Image(seg, img.affine), b + "/work/PH5_t1seg_swispace.nii.gz")   # pretend T1 labels
-PYEOF
-python $S/align_seg.py PH5 > /dev/null
-python $S/detect_css.py PH5 | head -2 | tee $T/ph5.log
-grep -q "anatomy T1" $T/ph5.log && grep -q "cut off at the bottom" $T/ph5.log || { echo "FAIL: coverage / anatomy detection"; exit 1; }
-grep -q "skull base" $T/ph5.log && { echo "FAIL: skull-base rule active on a cut-off slab"; exit 1; }
-echo "== T1 anatomy on the cerebellum phantom: position rules active, cSS kept"
-cp $T/synthseg/PH4_seg.nii.gz $T/work/PH4_t1seg_swispace.nii.gz; python $S/align_seg.py PH4 > /dev/null
-python $S/detect_css.py PH4 | head -2
-python $S/check_known.py PH4 --old $T/work/PH3_truth.nii.gz --ids 1,2,3,4,5,6 | tail -1 | grep -q "6 of 6" || { echo "FAIL: cSS lost (T1 mode)"; exit 1; }
-python $S/check_known.py PH4 --old $T/work/PH4_infra_line.nii.gz --ids 1 | head -1 | grep -q "kept" && { echo "FAIL: cerebellar line kept (T1 mode)"; exit 1; }
-echo "== stress test on a host with T1 anatomy (PH4)"
-python $S/stress_test.py --hosts PH4 --depths 0.6 --seeds 1 --tag t1host | grep -E "anatomy|darkness"
-echo; echo "ALL TESTS PASSED  (temp dir $T)"
-```
-
-## tests/test_shell.sh
-
-```bash
-#!/bin/bash
-# Shell-flow test for run_css.sh + prep_anat.sh with STUBBED FreeSurfer tools and python
-# (checks argument parsing, which tools run in which order, and the re-use / staleness logic).
-# usage: bash tests/test_shell.sh        Uses real zsh if installed, else bash as a stand-in.
-set -e
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
-T=$(mktemp -d); mkdir -p $T/bin $T/base/scripts; cp $ROOT/scripts/*.py $ROOT/scripts/*.sh $T/base/scripts/
-cat > $T/bin/fsstub <<'EOS'
-#!/bin/bash
-n=$(basename $0); echo "$n $*" >> $STUBLOG
-out=""; in=""; targ=""
-while [ $# -gt 0 ]; do case "$1" in
-  -o|--o) out=$2; shift 2;; -i|--i|--mov) [ -z "$in" ] && in=$2; shift 2;; --targ) targ=$2; shift 2;;
-  --reg) touch $2; shift 2;;
-  -s) [ "$n" = recon-all ] && mkdir -p $SUBJECTS_DIR/$2/mri && touch $SUBJECTS_DIR/$2/mri/aparc+aseg.mgz $SUBJECTS_DIR/$2/mri/aparc.a2009s+aseg.mgz; shift 2;;
-  *) [ "$n" = mri_convert ] && { [ -z "$in" ] && in=$1 || out=$1; }; shift;; esac; done
-[ -n "$out" ] && [ -n "$in" ] && cp "$in" "$out" 2>/dev/null || true
-EOS
-chmod +x $T/bin/fsstub
-for t in mri_convert mri_synthstrip mri_synthseg mri_coreg mri_vol2vol bbregister recon-all freeview; do ln -s fsstub $T/bin/$t; done
-printf '#!/bin/bash\necho "python $(basename $1) ${*:2}" >> $STUBLOG\n' > $T/bin/python; chmod +x $T/bin/python
-command -v zsh >/dev/null || { printf '#!/bin/bash\nexec bash "$@"\n' > $T/bin/zsh; chmod +x $T/bin/zsh; echo "(zsh not installed: using bash as a stand-in)"; }
-echo swi > $T/swi.nii; echo t1 > $T/t1.nii; echo fl > $T/fl.nii
-export PATH=$T/bin:$PATH STUBLOG=$T/log CSS_BASE=$T/base NOVIEW=1 SUBJECTS_DIR=/somewhere/else  # must be ignored
-SH="zsh"
-fail() { echo "FAIL: $1"; cat $T/log; exit 1; }
-seen() { grep -q "$1" $T/log || fail "expected call: $1"; }
-notseen() { ! grep -q "$1" $T/log || fail "unexpected call: $1"; }
-
-echo "== 1. SWI only"
-: > $T/log; $SH $T/base/scripts/run_css.sh P1 $T/swi.nii > /dev/null
-seen "mri_synthstrip -i $T/base/work/P1_raw"; seen "mri_synthseg --i $T/base/data/P1_swi.nii"
-seen "python align_seg.py P1"; seen "python detect_css.py P1 -2.5 85 3"; notseen mri_coreg
-echo "== 2. re-run: SynthSeg re-used"
-: > $T/log; $SH $T/base/scripts/run_css.sh P1 > /dev/null; notseen mri_synthseg; seen "detect_css.py P1"
-echo "== 3. SWI re-imported -> stale SynthSeg is redone"
-sleep 1; : > $T/log; $SH $T/base/scripts/run_css.sh P1 $T/swi.nii > /dev/null; seen "mri_synthseg --i $T/base/data/P1_swi.nii"
-echo "== 4. SWI + T1 + FLAIR (SynthSeg on T1, mri_coreg)"
-: > $T/log; $SH $T/base/scripts/run_css.sh P2 $T/swi.nii --t1 $T/t1.nii --flair $T/fl.nii > /dev/null
-seen "mri_synthseg --i $T/base/data/P2_t1.nii.gz"; seen "mri_coreg --mov $T/base/data/P2_swi.nii --ref $T/base/work/P2_t1_brain"
-seen "mri_vol2vol --mov $T/base/data/P2_swi.nii --targ $T/base/work/P2_t1synthseg.nii.gz --lta $T/base/work/P2_swi2t1.lta --inv --interp nearest"
-seen "mri_coreg --mov $T/base/work/P2_flair_brain.nii.gz --ref $T/base/data/P2_swi.nii"
-seen "mri_vol2vol --mov $T/base/work/P2_flair_brain.nii.gz --targ $T/base/data/P2_swi.nii"
-notseen "mri_synthseg --i $T/base/data/P2_swi.nii"; notseen recon-all; notseen bbregister
-echo "== 5. --recon (recon-all, bbregister, Destrieux)"
-: > $T/log; $SH $T/base/scripts/run_css.sh P3 $T/swi.nii --t1 $T/t1.nii --recon > /dev/null
-seen "recon-all -s P3"; seen "bbregister --s P3 --mov $T/base/data/P3_swi.nii --reg $T/base/work/P3_swi2t1.lta --t2 --init-coreg"
-seen "aparc.a2009s+aseg.mgz --lta $T/base/work/P3_swi2t1.lta --inv --interp nearest --o $T/base/work/P3_a2009s_swispace"
-echo "== 6. recon-all already done -> re-used without --recon"
-: > $T/log; $SH $T/base/scripts/prep_anat.sh P3 --t1 $T/t1.nii > /dev/null; notseen "recon-all"; seen bbregister
-echo "== 6b. --phase is imported for the reviewer"
-echo ph > $T/ph.nii; : > $T/log; $SH $T/base/scripts/run_css.sh P4 $T/swi.nii --phase $T/ph.nii > /dev/null
-seen "mri_convert $T/ph.nii $T/base/data/P4_phase.nii.gz"
-echo "== 7. batch run_all.sh reaches detection for every subject"
-: > $T/log; $SH $T/base/scripts/run_all.sh P1 P2 > /dev/null || true   # stub python prints no summary
-[ $(grep -c "detect_css.py" $T/log) -eq 2 ] || fail "run_all.sh did not run detection for both subjects"
-echo "SHELL TESTS PASSED"
+# ---- surfaces in SWI space (checked transform), projection, safer-class-wins drawing
+T, tsrc, checks, surfs = surface_to_swi(base, subj, sdir, a.surface_xfm, a.force)
+swi = nib.load(f"{base}/data/{subj}_swi.nii"); aff = swi.affine
+out = {}
+for h, H in (("lh", "L"), ("rh", "R")):
+    V, F = surfs[h]; Vw = apply(T, V); tree = cKDTree(Vw)
+    nb = [[] for _ in range(len(V))]
+    for e0, e1 in np.r_[F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]]:
+        nb[e0].append(e1); nb[e1].append(e0)
+    a2p = f"{sdir}/{subj}/label/{h}.aparc.a2009s.annot"
+    a2 = read_annot(a2p) if os.path.exists(a2p) else None
+    out[h] = dict(n=len(V), best=np.full(len(V), len(CLASSES)), sid=np.zeros(len(V), np.float32), tree=tree,
+                  nb=nb, a2=a2)
+for o in objs:
+    pts = apply(aff, np.argwhere(o["mask"]).astype(float))
+    hs = ["lh"] if o["hemi"] == "L" else ["rh"] if o["hemi"] == "R" else ["lh", "rh"]
+    best_h = min(hs, key=lambda h_: np.median(out[h_]["tree"].query(pts)[0]))
+    dd, vi = out[best_h]["tree"].query(pts)
+    core = np.unique(vi[dd <= a.near_mm])
+    ring = np.unique(np.r_[core, [n for v in core for n in out[best_h]["nb"][v]]]).astype(int) if len(core) else core
+    o.update(hemi_surf=best_h, core=core, ring=ring, mean_dist_mm=round(float(np.median(dd)), 2))
+    # draw: a vertex keeps the safest (lowest-priority-number) class claiming it
+    S = out[best_h]; p = PRIO[o["cls"]]; win = p < S["best"][ring]
+    S["best"][ring[win]] = p; S["sid"][ring[win]] = o["sid"]
+rows = []
+for o in objs:
+    S = out[o["hemi_surf"]]
+    sulc = gyr = ""
+    if S["a2"] is not None and len(o["core"]):
+        names = np.array([n.decode() if isinstance(n, bytes) else n for n in S["a2"][2]])
+        li = S["a2"][0][o["core"]]; nm = names[li[li >= 0]].astype(str)        # -1 = vertex without a label
+        s_ = nm[np.char.startswith(nm, "S_") | (np.char.find(nm, "Lat_Fis") >= 0)]
+        g_ = nm[np.char.startswith(nm.astype(str), "G_")]
+        sulc = pd.Series(s_).mode().iloc[0] if len(s_) else ""; gyr = pd.Series(g_).mode().iloc[0] if len(g_) else ""
+    rows.append(dict(list=o["list"], obj_id=o["obj_id"], **{f: o[f] for f in FP}, hemi=o["hemi_surf"][0].upper(),
+                     cls=o["cls"], expert_label=o["label"], n_vertices=len(o["core"]),
+                     n_hidden=int((S["best"][o["core"]] < PRIO[o["cls"]]).sum()) if len(o["core"]) else 0,
+                     median_dist_to_pial_mm=o["mean_dist_mm"], sulcus=sulc, gyrus=gyr))
+# ---- write annotation (categorical), id overlay, table; print the freeview command
+ctab = np.array([[*rgb, 0, 0] for _, rgb in CLASSES], np.int32)
+ctab[:, 4] = ctab[:, 0] + ctab[:, 1] * 256 + ctab[:, 2] * 65536
+mode = a.color_by; files = {}
+for h, S in out.items():
+    lab = np.where(S["best"] < len(CLASSES), S["best"], -1).astype(np.int32)
+    ap_ = f"{base}/review/{subj}_surf_{mode}.{h}.annot"; ip_ = f"{base}/review/{subj}_surf_ids.{h}.mgh"
+    write_annot(ap_, lab, ctab, [c for c, _ in CLASSES], fill_ctab=False)
+    nib.save(nib.MGHImage(S["sid"].reshape(-1, 1, 1), np.eye(4)), ip_)
+    files[h] = (ap_, ip_)
+tab = pd.DataFrame(rows); tab.to_csv(f"{base}/review/{subj}_surf_{mode}_objects.csv", index=False)
+hid = tab[(tab.n_hidden > 0)]
+print(f"{subj}: {len(tab)} objects on the surface ({', '.join(f'{v} {k}' for k, v in tab.cls.value_counts().items())})"
+      f"; {int((tab.n_vertices == 0).sum())} too far from the pial surface (> {a.near_mm:g} mm)"
+      + (f"; {len(hid)} partly hidden under a safer class" if len(hid) else ""))
+sv = "inflated" if os.path.exists(f"{sdir}/{subj}/surf/lh.inflated") else "pial"
+print("view:  freeview -viewport 3d " + " ".join(
+    f"-f {sdir}/{subj}/surf/{h}.{sv}:annot={files[h][0]}:overlay={files[h][1]}:overlay_threshold=0.5,999"
+    for h in ("lh", "rh")))
+print("       (annotation = colours; the overlay holds object ids: + candidate, - excluded; click a vertex to read it)")
 ```

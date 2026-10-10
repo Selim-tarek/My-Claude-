@@ -226,11 +226,12 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
 - minIP series must not be used as input; the reviewer computes its own minIP slab for reading.
 - Workbook (tools/build_workbook.py) builds the Excel validation workbook; recalculated with LibreOffice.
 
-## Next steps
-1. Re-run P006 with --t1 --recon (back up review/P006_* first), blinded re-review; target L1 R2 = 3.
-2. feature_report after each case; keep features with consistent AUC ≥0.75 / ≤0.25.
-3. ~15 cases: logistic regression on the definition features, leave-one-patient-out CV.
-4. Second blinded reader (κ), cSS-negative controls for false-positive burden.
+## Next steps (operating procedure: RUNBOOK.md)
+1. P006 with --recon: check_known 6/6, QC file, surface_features (agreement < 2 mm); P011 count (expect 8).
+2. Expert labels with fine codes (VS!) + missed-lesion outlines + study_meta split for every new case.
+3. Patient-grouped evaluation script reading labels/ (FP per negative scan, top-k sensitivity, FROC, CIs).
+4. Regularised ranking model with nested patient-level CV; review tiers from it; hard rules only after test.
+5. Stage 2 fixes from the audit (CSF label on recon-all, Hessian at mask edge, E8 gated on T1, staleness).
 
 ## How to test
 `bash tests/run_tests.sh` — v3 phantom (radial sulci, fissure, veins) end to end, fails if synthetic

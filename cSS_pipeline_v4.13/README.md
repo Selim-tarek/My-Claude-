@@ -1,7 +1,8 @@
-# cSS grading pipeline v4
+# cSS grading pipeline v4.16
 
-Research software. **Step-by-step guide: [PIPELINE.md](PIPELINE.md).** Technical context for
-Claude Code: CLAUDE.md.
+Research software, not clinically validated. **How to run it, step by step: [RUNBOOK.md](RUNBOOK.md).**
+Methods and rationale: [PIPELINE.md](PIPELINE.md). Audit and plan: docs/AUDIT_v4.13_and_FP_plan.md.
+Technical context for Claude Code: CLAUDE.md.
 
 ## Install on the Mac
     cd ~/Downloads/cSS_pipeline && zsh install.sh      # backs up old scripts first
@@ -21,6 +22,7 @@ Check: `bash tests/run_tests.sh` and `bash tests/test_shell.sh` must both pass.
 scripts/   pipeline scripts (installed to ~/css_project/scripts)
 tests/     phantoms (v3 + v4 definition phantom), run_tests.sh, test_shell.sh (no patient data needed)
 tools/     build_workbook.py (Excel validation workbook)
-PIPELINE.md  how to run it, how to read it, method details, validation plan
+RUNBOOK.md   the full procedure, DICOM to score, with every command
+PIPELINE.md  how to read it, method details, validation plan
 CLAUDE.md  project context for Claude Code
 ALL_CODE.md every script in one file for reading
