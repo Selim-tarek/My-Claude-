@@ -554,6 +554,14 @@ vein, section 5b) show that they separate real surface veins from real cSS, acro
 dot on another). `--vessel-overlay` adds the detector's vessel map to the minIP; it is off by default because it
 is a detector output and can bias a blinded reader.
 
+**On the brain surface** (recon-all cases): `python ~/css_project/scripts/surface_overlay.py P012` prints a
+freeview command that shows every candidate (red) and excluded object (blue) on the inflated surface;
+`--color-by expert` colours them by the expert's calls instead (red cSS, gold uncertain, blue surface vein,
+cyan other veins, orange artifact, grey other). Where objects overlap, a cSS call is always drawn on top.
+`review/P012_surf_list_objects.csv` gives the Destrieux sulcus under each object, a quick cross-check of the
+sulci used for the multifocality score. Model probabilities and review tiers are deliberately not shown: none
+are validated yet.
+
 **Stress test:** `--surface-veins K` (default 2) inserts veins that follow the cortex, some branching; the
 summary lists what happened to each decoy kind (sulcal / radial / surface).
 

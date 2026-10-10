@@ -580,3 +580,19 @@ cSS from out-of-surface veins (as `pial_dist_mm` already did). `surf_pieces`, `s
 phantom. Random-walk surface decoys in the stress test are finite, so they test detection/exclusion fate, not
 continuation. Real anatomy (veins draining 50-100 mm to a sinus, dense dark networks, noise) is the open
 question - the `VS` labels are what will answer it.
+
+## Review of the uploaded `plot_css_pysurfer.py` (v4.16)
+
+Not adopted. It visualises `p_css`, `p_surface_vein` and `review_tier` from
+`review/<ID>_candidates_with_ml.csv`, but no model, labels or tiers exist yet, so the display would present
+untrained numbers as results. It also repeats the half-voxel shift (`ijk + 0.5`), takes a hand-made
+`--surface-xfm` with no registration check, maps only each candidate's centroid (a tram-track's centroid lies in
+the CSF between the banks), resolves overlapping candidates with the *highest* tier code (a probable vein hides a
+high-priority cSS), and depends on PySurfer/Mayavi, which are unmaintained, hard to install on Apple Silicon, and
+not part of FreeSurfer.
+
+Replaced by `surface_overlay.py`: all voxels of every candidate and excluded object are projected with the
+checked transform of `css_surface.py`; output is a FreeSurfer annotation (categorical, no blending) plus an object
+id overlay for freeview, coloured by detector list or by expert calls, with a cSS call always drawn on top; the
+Destrieux sulcus/gyrus under each object is tabulated. Model probabilities and tiers can be added as a colour mode
+only after a model has passed the patient-level validation in section 5.

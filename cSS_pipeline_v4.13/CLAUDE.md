@@ -211,6 +211,11 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   surf_pieces/dark_cont/exit_paths do NOT separate on the phantom. make_synthetic --surface-veins K
   (default 2 in stress_test, decoy fate per kind); finite random-walk decoys cannot test continuation.
   expert_sheet: coronal + sagittal panels; --vessel-overlay optional (off: detector output biases readers).
+  surface_overlay.py (replaces the uploaded plot_css_pysurfer.py idea: no PySurfer/Mayavi, no unvalidated p_css
+  or tiers): every object voxel -> nearest pial vertex (css_surface.py transform + 2 mm check), FreeSurfer
+  annotation coloured by detector list or expert calls (safer class wins on overlap: cSS > uncertain > veins >
+  artifact > other), id overlay (.mgh, +cand/-excl), per-object Destrieux sulcus/gyrus from
+  label/?h.aparc.a2009s.annot, freeview command printed. tests/check_overlay.py.
 
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
@@ -230,7 +235,7 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
 ## How to test
 `bash tests/run_tests.sh` — v3 phantom (radial sulci, fissure, veins) end to end, fails if synthetic
 sensitivity < 4/8; v4 phantom (check_v4.py: sensitivity, score_v4 AUC ≥0.8, ICH Dice, sulcal 3/4).
-tests/check_surfvein.py (v4.16, PH6), tests/check_labels.py (v4.15) and tests/check_qc.py (all called by run_tests.sh): v4.14 QC status, column contract, dropped log, extent at the
+tests/check_surfvein.py + check_overlay.py (v4.16, PH6), tests/check_labels.py (v4.15) and tests/check_qc.py (all called by run_tests.sh): v4.14 QC status, column contract, dropped log, extent at the
 volume edge, label-shift monotonicity, transposed-orientation detection.
 `bash tests/test_shell.sh` — run_css.sh / prep_anat.sh / run_all.sh flow with stubbed FreeSurfer.
 No FreeSurfer or patient data needed.

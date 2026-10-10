@@ -132,6 +132,9 @@ echo "== v4.16 surface-following branching vein draining to a sinus (PH6): vein 
 python $ROOT/tests/phantom_surfvein.py; python $S/align_seg.py PH6 > /dev/null
 python $ROOT/tests/check_surfvein.py | tee $T/surfvein.log | grep -E "^(vein tracking|surface features)"
 grep -q "RESULT surfvein OK" $T/surfvein.log || { cat $T/surfvein.log; echo "FAIL: v4.16 surface-vein checks"; exit 1; }
+echo "== v4.16 surface overlay for freeview (detector list / expert calls, Destrieux sulcus per object)"
+python $ROOT/tests/check_overlay.py | tee $T/overlay.log | grep -v "^RESULT"
+grep -q "RESULT overlay OK" $T/overlay.log || { echo "FAIL: v4.16 overlay checks"; exit 1; }
 echo "== stress test on a host with T1 anatomy (PH4)"
 python $S/stress_test.py --hosts PH4 --depths 0.6 --seeds 1 --tag t1host | grep -E "anatomy|darkness"
 echo; echo "ALL TESTS PASSED  (temp dir $T)"

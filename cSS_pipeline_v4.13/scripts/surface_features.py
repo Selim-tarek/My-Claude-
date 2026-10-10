@@ -33,9 +33,9 @@ from scipy import ndimage as ndi
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import dijkstra, connected_components
 from scipy.spatial import cKDTree
-from nibabel.freesurfer.io import read_geometry
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from css_common import base as _base, FP
+from css_surface import apply, surface_to_swi
 
 ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 ap.add_argument("subject"); ap.add_argument("--surface-xfm", default="")
@@ -44,60 +44,8 @@ ap.add_argument("--near-mm", type=float, default=3.0); ap.add_argument("--reach-
 ap.add_argument("--force", action="store_true")
 a = ap.parse_args(); subj = a.subject; base = _base()
 sdir = a.subjects_dir or os.environ.get("CSS_SUBJECTS_DIR", f"{base}/subjects")
-AGREE_MM = 2.0
-
-def read_lta(p):
-    """4x4 RAS->RAS matrix of an LTA (type 1 RAS2RAS, or type 0 VOX2VOX converted with its volume info)"""
-    L = open(p).read().splitlines()
-    typ = int(next(l for l in L if l.strip().startswith("type")).split("=")[1].split()[0])
-    i = next(k for k, l in enumerate(L) if l.strip().split()[:3] == ["1", "4", "4"])
-    M = np.array([[float(x) for x in L[i + 1 + r].split()] for r in range(4)])
-    if typ == 1:
-        return M
-    def v2r(tag):                                     # vox2ras from "src/dst volume info" block
-        k = next(j for j, l in enumerate(L) if l.strip().startswith(tag))
-        info = {}
-        for l in L[k + 1:k + 10]:
-            if "=" in l:
-                key, val = l.split("=", 1); info[key.strip()] = val.split()
-        dims = np.array([float(x) for x in info["volume"][:3]]); vs = np.array([float(x) for x in info["voxelsize"]])
-        R = np.c_[[float(x) for x in info["xras"]], [float(x) for x in info["yras"]], [float(x) for x in info["zras"]]] * vs
-        c = np.array([float(x) for x in info["c_ras"]])
-        A = np.eye(4); A[:3, :3] = R; A[:3, 3] = c - R @ (dims / 2.0)
-        return A
-    return v2r("dst volume info") @ M @ np.linalg.inv(v2r("src volume info"))
-
-def apply(T, X): return X @ T[:3, :3].T + T[:3, 3]
-
-swi = nib.load(f"{base}/data/{subj}_swi.nii"); aff = swi.affine; vox = np.array(swi.header.get_zooms()[:3], float)
-seg = nib.load(f"{base}/work/{subj}_seg_swispace.nii.gz").get_fdata().astype(np.int32)
-brain = ndi.binary_fill_holes(np.asarray(swi.dataobj) > 0)
-tissue = ndi.binary_fill_holes(brain & (seg > 0) & (seg != 24))
-pial_sd = (ndi.distance_transform_edt(~tissue, sampling=vox) - ndi.distance_transform_edt(tissue, sampling=vox))
-inv_aff = np.linalg.inv(aff)
-def label_agreement(Vw):
-    """median |label pial distance| at the vertices (mm); 0 = surfaces sit on the label boundary"""
-    ijk = apply(inv_aff, Vw).T
-    return float(np.median(np.abs(ndi.map_coordinates(pial_sd, ijk, order=1, mode="nearest"))))
-
-surfs = {h: read_geometry(f"{sdir}/{subj}/surf/{h}.pial") for h in ("lh", "rh")}
-Vall = np.vstack([surfs["lh"][0], surfs["rh"][0]])[::50]
-if a.surface_xfm:
-    T = np.loadtxt(a.surface_xfm).reshape(4, 4); tsrc = "explicit --surface-xfm"
-    checks = {"explicit": label_agreement(apply(T, Vall))}
-else:
-    orig = nib.load(f"{sdir}/{subj}/mri/orig.mgz")
-    tkr2t1 = orig.header.get_vox2ras() @ np.linalg.inv(orig.header.get_vox2ras_tkr())
-    R = read_lta(f"{base}/work/{subj}_swi2t1.lta")
-    opts = {"LTA maps SWI->T1": np.linalg.inv(R) @ tkr2t1, "LTA maps T1->SWI": R @ tkr2t1}
-    checks = {k: label_agreement(apply(Tk, Vall)) for k, Tk in opts.items()}
-    tsrc = min(checks, key=checks.get); T = opts[tsrc]
-best = min(checks.values())
-print(f"{subj}: surface -> SWI ({tsrc}); median distance of pial vertices to the label pial boundary: "
-      + ", ".join(f"{k} {v:.2f} mm" for k, v in checks.items()))
-if best > AGREE_MM and not a.force:
-    sys.exit(f"{subj}: surfaces do not match the SWI labels (best {best:.2f} mm > {AGREE_MM} mm) - check the "
-             f"registration / transform (or --force)")
+swi = nib.load(f"{base}/data/{subj}_swi.nii"); aff = swi.affine; inv_aff = np.linalg.inv(aff)
+T, tsrc, checks, surfs = surface_to_swi(base, subj, sdir, a.surface_xfm, a.force)
 
 dark = nib.load(f"{base}/work/{subj}_dark.nii.gz").get_fdata() > 0
 
