@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""Interactive cSS review: shows each suspected candidate, you agree or disagree.
+usage: review_css.py SUBJECT [--top N] [--redo]
+  default: ALL candidates (v4). With --top N, candidates below N are recorded as NOT reviewed and
+  the score is reported with that caveat (v3 silently scored them as "not cSS").
+
+Keys (or click the buttons):
+  y = cSS (agree)      v = vein      o = normal cortex      a = artifact
+  i = near ICH         u = unsure    b = back one            [ / ] = move slice down/up
+  q = finish and score
+Decisions are saved after every key press, so you can quit and resume later.
+Left column: whole slice (top) and an 8 mm minIP slab of the zoom window (bottom) computed from the
+SWI itself - veins become continuous branching tubes there, cSS stays a band along the cortex.
+(Do not feed the scanner minIP series into the pipeline; this panel is only for reading.)
+Right column (only with run_css.sh --phase): filtered SWI phase - calcium has the opposite sign to
+veins and blood products (AJNR 2016 mimic list).
+Title: the v4 definition features - on-surface distance, plate/tube shape, tram-track, vein tree,
+nearby ICH, FLAIR - as a reading aid; the call is always yours.
+At the end, accepted candidates are scored automatically (score_css.py)."""
+import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+import sys, os, subprocess, numpy as np, nibabel as nib, pandas as pd
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import load_calls, save_calls
+import matplotlib
+if os.environ.get("CSS_REVIEW_TEST"): matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.widgets import Button
+from matplotlib.patches import Rectangle
+
+subj = sys.argv[1]
+top = int(sys.argv[sys.argv.index("--top") + 1]) if "--top" in sys.argv else None
+redo = "--redo" in sys.argv
+base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project"))
+csv = f"{base}/review/{subj}_candidates.csv"
+calls_csv = f"{base}/review/{subj}_calls.csv"
+
+swi = nib.as_closest_canonical(nib.load(f"{base}/data/{subj}_swi.nii"))      # RAS for display
+cnd = nib.as_closest_canonical(nib.load(f"{base}/review/{subj}_candidates.nii.gz"))
+I = swi.get_fdata().astype(np.float32); C = cnd.get_fdata().astype(int)
+vox = swi.header.get_zooms()[:3]
+br = I > 0
+lo, hi = np.percentile(I[br], [1, 99]) if br.any() else (I.min(), I.max())
+df = pd.read_csv(csv)
+ids = df.cand_id.astype(int).tolist()[:top]
+calls = {}
+if not redo:
+    # v4 fix: calls are matched by candidate fingerprint (centroid + volume), not by rank, so a
+    # re-run of the detector can no longer attach an old call to a different lesion
+    calls, warn = load_calls(base, subj, df)
+    if warn: print("WARNING:", warn)
+KEYS = {"y": "cSS", "v": "Vein", "o": "Normal", "a": "Artifact", "i": "Near ICH", "u": "Unsure"}
+COL = {"cSS": "#2e7d32", "Vein": "#1565c0", "Normal": "#6d6d6d", "Artifact": "#ef6c00",
+       "Near ICH": "#8e24aa", "Unsure": "#c9a400"}
+HW = int(round(30 / vox[0]))          # 60 mm zoom window
+# optional SWI phase (run_css.sh --phase): high-pass filtered phase separates paramagnetic blood
+# products (same sign as veins) from diamagnetic CALCIUM (opposite sign) - an AJNR 2016 cSS mimic.
+# Sign conventions differ by vendor (Vaccarino et al. 2025), so compare with a vein on the same image.
+PH = None
+_php = f"{base}/data/{subj}_phase.nii.gz"
+if os.path.exists(_php):
+    from nibabel.processing import resample_from_to
+    _ph = nib.load(_php)
+    if _ph.shape[:3] != swi.shape[:3] or not np.allclose(_ph.affine, swi.affine, atol=1e-3):
+        _ph = resample_from_to(_ph, swi, order=0)
+    else:
+        _ph = nib.as_closest_canonical(_ph)
+    PH = _ph.get_fdata().astype(np.float32)
+    _lo, _hi = float(PH.min()), float(PH.max())
+    if _hi - _lo > 2 * np.pi + 0.5:                 # scanner units (e.g. -4096..4095) -> radians
+        PH = (PH - _lo) / (_hi - _lo) * 2 * np.pi - np.pi
+from scipy import ndimage as _ndi
+def hp_phase(sl2d):
+    """homodyne high-pass of one phase slice: angle(z * conj(lowpass z)), wrap-safe"""
+    z = np.exp(1j * sl2d); sg = 4.0 / vox[0]
+    lp = _ndi.gaussian_filter(z.real, sg) + 1j * _ndi.gaussian_filter(z.imag, sg)
+    return np.angle(z * np.conj(lp))
+SLAB = max(1, int(round(4 / vox[2]))) # minIP slab half-thickness (~8 mm total)
+def num(v):
+    try: return float(v)
+    except (TypeError, ValueError): return float("nan")
+flag = lambda v: num(v) > 0          # NaN / missing column -> False
+
+class Reviewer:
+    def __init__(self):
+        self.pos = next((n for n, c in enumerate(ids) if c not in calls), 0)
+        self.shift = 0
+        ncol = 5 if PH is not None else 4
+        self.fig = plt.figure(figsize=(14 + 3.5 * (ncol - 4), 8.2))
+        gs = self.fig.add_gridspec(2, ncol, left=0.02, right=0.98, top=0.85, bottom=0.14, wspace=0.05, hspace=0.12)
+        self.ph = [self.fig.add_subplot(gs[r, 4]) for r in range(2)] if PH is not None else None
+        self.ov = self.fig.add_subplot(gs[0, 0]); self.mip = self.fig.add_subplot(gs[1, 0])
+        self.ax = [[self.fig.add_subplot(gs[r, c + 1]) for c in range(3)] for r in range(2)]
+        self.btns = []
+        labels = [("cSS (y)", "y"), ("Vein (v)", "v"), ("Normal (o)", "o"), ("Artifact (a)", "a"),
+                  ("Near ICH (i)", "i"), ("Unsure (u)", "u"), ("◀ Back (b)", "b"),
+                  ("Slice ↓ [", "["), ("Slice ↑ ]", "]"), ("Finish (q)", "q")]
+        w = 0.094
+        for n, (lab, k) in enumerate(labels):
+            bax = self.fig.add_axes([0.02 + n * (w + 0.003), 0.03, w, 0.06])
+            b = Button(bax, lab, color=COL.get(KEYS.get(k, ""), "#e0e0e0") if k in KEYS else "#e0e0e0",
+                       hovercolor="#ffffff")
+            if k in KEYS: b.label.set_color("white"); b.label.set_fontweight("bold")
+            b.on_clicked(lambda e, k=k: self.key(k)); self.btns.append(b)
+        self.fig.canvas.mpl_connect("key_press_event", lambda e: self.key(e.key))
+        self.show()
+
+    def show(self):
+        if self.pos >= len(ids): return self.finish()
+        cid = ids[self.pos]; r = df[df.cand_id == cid].iloc[0]
+        m = C == cid
+        if not m.any():
+            self.pos += 1; return self.show()
+        pts = np.argwhere(m); ci, cj = pts[:, 0].mean(), pts[:, 1].mean()
+        ks = np.bincount(pts[:, 2]); kc = int(ks.argmax()) + self.shift
+        kc = int(np.clip(kc, 1, I.shape[2] - 2))
+        i0, i1 = int(max(ci - HW, 0)), int(min(ci + HW, I.shape[0]))
+        j0, j1 = int(max(cj - HW, 0)), int(min(cj + HW, I.shape[1]))
+        # overview
+        self.ov.clear(); self.ov.imshow(I[:, :, kc].T, cmap="gray", origin="lower", vmin=lo, vmax=hi)
+        self.ov.add_patch(Rectangle((i0, j0), i1 - i0, j1 - j0, fill=False, ec="yellow", lw=1.5))
+        self.ov.set_title("whole slice (yellow = zoom)", fontsize=9); self.ov.axis("off")
+        self.ov.text(2, I.shape[1] - 6, "L", color="yellow", fontsize=11); self.ov.text(I.shape[0] - 12, I.shape[1] - 6, "R", color="yellow", fontsize=11)
+        # minIP slab (8 mm) of the zoom window, suspect outlined on the centre slice
+        k0, k1 = max(kc - SLAB, 0), min(kc + SLAB + 1, I.shape[2])
+        slab = np.where(I[i0:i1, j0:j1, k0:k1] > 0, I[i0:i1, j0:j1, k0:k1], hi).min(axis=2)
+        self.mip.clear(); self.mip.imshow(slab.T, cmap="gray", origin="lower", vmin=lo, vmax=hi)
+        if m[i0:i1, j0:j1, k0:k1].any():
+            self.mip.contour(m[i0:i1, j0:j1, k0:k1].any(axis=2).T.astype(float), levels=[0.5], colors="red", linewidths=0.8)
+        self.mip.set_title(f"minIP {int(round((k1 - k0) * vox[2]))} mm slab (veins = tubes)", fontsize=9); self.mip.axis("off")
+        # zoomed: top row raw, bottom row with outline; slices kc-1, kc, kc+1
+        for c, k in enumerate((kc - 1, kc, kc + 1)):
+            for row in (0, 1):
+                a = self.ax[row][c]; a.clear()
+                a.imshow(I[i0:i1, j0:j1, k].T, cmap="gray", origin="lower", vmin=lo, vmax=hi)
+                if row == 1 and m[i0:i1, j0:j1, k].any():
+                    a.contour(m[i0:i1, j0:j1, k].T.astype(float), levels=[0.5], colors="red", linewidths=1.2)
+                a.set_xticks([]); a.set_yticks([])
+                if row == 0: a.set_title(f"slice {k}" + ("  (centre)" if k == kc else ""), fontsize=9)
+        self.ax[0][0].set_ylabel("raw SWI", fontsize=9); self.ax[1][0].set_ylabel("suspect outlined", fontsize=9)
+        if self.ph is not None:
+            hp = hp_phase(PH[:, :, kc])[i0:i1, j0:j1]; br2 = I[i0:i1, j0:j1, kc] > 0
+            v = float(np.percentile(np.abs(hp[br2]), 98)) if br2.any() else 1.0
+            for row in (0, 1):
+                a = self.ph[row]; a.clear()
+                a.imshow(np.where(br2, hp, 0).T, cmap="gray", origin="lower", vmin=-v, vmax=v)
+                if row == 1 and m[i0:i1, j0:j1, kc].any():
+                    a.contour(m[i0:i1, j0:j1, kc].T.astype(float), levels=[0.5], colors="red", linewidths=1.2)
+                a.set_xticks([]); a.set_yticks([])
+            self.ph[0].set_title("filtered PHASE (centre slice)\ncalcium = opposite sign to veins", fontsize=9)
+        flags = [n for n, f in (("artifact zone", "artifact_zone"), ("midline", "midline_zone"), ("vein-like", "vein_like"),
+                                ("INFRATENTORIAL", "infratentorial"), ("FLAIR-bright CSF: acute cSAH?", "flair_bright"),
+                                ("FLAIR-bright cortex: cortical vein thrombosis?", "flair_ctx_bright"),
+                                ("microbleed-like: small, >=half in parenchyma", "cmb_like")) if flag(r.get(f, 0))]
+        if flag(r.get("near_ich_suggest", 0)):
+            flags.append(f"ICH {num(r.get('ich_dist_mm')):.0f} mm away - press i if contiguous")
+        feat = ""
+        if "pial_dist_mm" in r:
+            shape = "plate" if num(r.tube_ratio) < 0.4 else ("tube" if num(r.tube_ratio) > 0.5 else "mixed")
+            tram = num(r.tram_frac)
+            ev = (f"   |   evidence: cSS {num(r.css_evidence):.2f}  vein {num(r.vein_evidence):.2f}"
+                  if "css_evidence" in r else "")
+            feat = (f"\npial {num(r.pial_dist_mm):+.1f} mm   shape {shape} ({num(r.tube_ratio):.2f})   "
+                    f"follows surface {num(r.surface_alignment):.2f}   "
+                    f"tram-track {'n/a' if np.isnan(tram) else f'{tram:.0%}'}   vein tree {num(r.vein_tree_mm):.0f} mm   "
+                    f"mirror dark {num(r.mirror_dark_frac):.0%}" + ev)
+        done = sum(1 for c in ids if c in calls)
+        prev = calls.get(cid)
+        self.fig.suptitle(f"{subj}   candidate #{cid}  ({self.pos + 1}/{len(ids)}, {done} decided)   —   "
+                          f"{r.hemi} {r.region}   {r.volume_mm3} mm³, {int(r.n_slices)} slices, darkness z {r.darkness_z}"
+                          + (f"   [{', '.join(flags)}]" if flags else "") + feat
+                          + (f"\nyour previous call: {prev}" if prev else "\nIs the red outline cSS?"),
+                          fontsize=11, color=COL.get(prev, "black"))
+        self.fig.canvas.draw_idle()
+
+    def key(self, k):
+        if k in KEYS:
+            calls[ids[self.pos]] = KEYS[k]; self.save(); self.pos += 1; self.shift = 0; self.show()
+        elif k == "b":
+            self.pos = max(self.pos - 1, 0); self.shift = 0; self.show()
+        elif k == "[": self.shift -= 1; self.show()
+        elif k == "]": self.shift += 1; self.show()
+        elif k == "q": self.finish()
+
+    def save(self):
+        save_calls(base, subj, df, calls)
+
+    def finish(self):
+        self.save(); plt.close(self.fig)
+
+R = Reviewer()
+if os.environ.get("CSS_REVIEW_TEST"):
+    R.fig.savefig(f"{base}/review/{subj}_review_preview.png", dpi=80)
+    for n, c in enumerate(ids): calls[c] = ["cSS", "Vein", "Near ICH", "Normal"][n % 4]
+    R.save()
+else:
+    plt.show()
+
+# ---- write decisions and score
+accepted = sorted(c for c, v in calls.items() if v == "cSS")
+ich = sorted(c for c, v in calls.items() if v == "Near ICH")
+unsure = sorted(c for c, v in calls.items() if v == "Unsure")
+print(f"\n{subj}: reviewed {len(calls)} of top {len(ids)}  |  cSS {accepted}  |  near-ICH {ich}"
+      + (f"  |  unsure {unsure} (counted as NOT cSS - re-check with: review_css.py {subj})" if unsure else ""))
+not_rev = len(df) - len(calls)
+if not_rev:
+    print(f"WARNING: {not_rev} of {len(df)} candidates NOT reviewed - the score is a lower bound "
+          f"(continue with: review_css.py {subj})")
+cmd = [sys.executable, f"{base}/scripts/mark_css.py", subj, ",".join(map(str, accepted)) or "none",
+       "--reviewed", ",".join(map(str, sorted(calls))) or "none"]
+if ich: cmd += ["--ich", ",".join(map(str, ich))]
+subprocess.run(cmd, check=False)
+print(f"decisions saved: {calls_csv}")
