@@ -1,4 +1,4 @@
-# All code — cSS pipeline v4.17.1
+# All code — cSS pipeline v4.17.2
 
 Generated from the files below; the files are authoritative.
 
@@ -55,7 +55,7 @@ if [ -n "$PHASE" ]; then
 fi
 if [ ${#ANAT[@]} -gt 0 ]; then
   echo "[0b] T1/FLAIR anatomy -> SWI grid"
-  zsh $SC/prep_anat.sh $S "${ANAT[@]}"
+  zsh $SC/prep_anat.sh $S "${ANAT[@]}" || { echo "ERROR: prep_anat.sh failed - stopping (old labels would be used)"; exit 1; }
 fi
 T1SEG=$B/work/${S}_t1seg_swispace.nii.gz
 echo "[1/4] segmentation"
@@ -114,6 +114,9 @@ done
 if [ -z "$S" ] || [ -z "$T1" ]; then
   echo "usage: prep_anat.sh SUBJECT_ID --t1 T1.nii [--flair FLAIR.nii] [--recon]"; exit 1
 fi
+# v4.17.2: stop at the first failed step (a typo in --t1 used to fall through and leave the old labels in place)
+die() { echo "ERROR: $1 - nothing after this step was run; the previous labels are unchanged"; exit 1; }
+[ -f "$T1" ] || die "T1 file not found: $T1"
 B=${CSS_BASE:-$HOME/css_project}; W=$B/work
 # always the project folder (FreeSurfer's setup script points SUBJECTS_DIR at its own install dir);
 # set CSS_SUBJECTS_DIR to use a different folder
@@ -123,29 +126,34 @@ SWI=$B/data/${S}_swi.nii
 mkdir -p $W $SUBJECTS_DIR
 
 echo "[a] T1: import + skull-strip (SynthStrip)"
-mri_convert "$T1" $B/data/${S}_t1.nii.gz > /dev/null
-mri_synthstrip -i $B/data/${S}_t1.nii.gz -o $W/${S}_t1_brain.nii.gz > /dev/null
+# via a temporary file, so --t1 data/ID_t1.nii.gz (the copy imported earlier) also works
+mri_convert "$T1" $B/data/${S}_t1_tmp.nii.gz > /dev/null || die "mri_convert could not read $T1"
+mv $B/data/${S}_t1_tmp.nii.gz $B/data/${S}_t1.nii.gz
+mri_synthstrip -i $B/data/${S}_t1.nii.gz -o $W/${S}_t1_brain.nii.gz > /dev/null || die "mri_synthstrip failed"
 
 A2=""
 if [ $RECON -eq 1 ] || [ -f $SUBJECTS_DIR/$S/mri/aparc.a2009s+aseg.mgz ]; then
   if [ ! -f $SUBJECTS_DIR/$S/mri/aparc.a2009s+aseg.mgz ]; then
     echo "[b] recon-all -all (1-3 h; log: $W/${S}_recon.log)"
-    recon-all -s $S -i $B/data/${S}_t1.nii.gz -all -threads 8 > $W/${S}_recon.log 2>&1
+    recon-all -s $S -i $B/data/${S}_t1.nii.gz -all -threads 8 > $W/${S}_recon.log 2>&1 \
+      || die "recon-all failed (see $W/${S}_recon.log)"
   else
     echo "[b] recon-all already finished for $S - re-using it"
   fi
   LAB=$SUBJECTS_DIR/$S/mri/aparc+aseg.mgz
   A2=$SUBJECTS_DIR/$S/mri/aparc.a2009s+aseg.mgz
   echo "[c] register SWI -> T1 (bbregister, boundary-based, T2*-like contrast)"
-  bbregister --s $S --mov $SWI --reg $W/${S}_swi2t1.lta --t2 --init-coreg > $W/${S}_bbreg.log 2>&1
+  bbregister --s $S --mov $SWI --reg $W/${S}_swi2t1.lta --t2 --init-coreg > $W/${S}_bbreg.log 2>&1 \
+    || die "bbregister failed (see $W/${S}_bbreg.log)"
   grep -i "min cost" $W/${S}_bbreg.log | tail -1 || true
   REGM=bbregister; COST=$(awk 'NR==1{print $1}' $W/${S}_swi2t1.lta.mincost 2>/dev/null || true)
 else
   echo "[b] SynthSeg --parc --robust on the T1"
-  mri_synthseg --i $B/data/${S}_t1.nii.gz --o $W/${S}_t1synthseg.nii.gz --parc --robust --threads 8 > /dev/null
+  mri_synthseg --i $B/data/${S}_t1.nii.gz --o $W/${S}_t1synthseg.nii.gz --parc --robust --threads 8 > /dev/null || die "mri_synthseg failed"
   LAB=$W/${S}_t1synthseg.nii.gz
   echo "[c] register SWI -> T1 (mri_coreg, rigid, mutual information)"
-  mri_coreg --mov $SWI --ref $W/${S}_t1_brain.nii.gz --reg $W/${S}_swi2t1.lta --dof 6 > $W/${S}_coreg.log 2>&1
+  mri_coreg --mov $SWI --ref $W/${S}_t1_brain.nii.gz --reg $W/${S}_swi2t1.lta --dof 6 > $W/${S}_coreg.log 2>&1 \
+    || die "mri_coreg failed (see $W/${S}_coreg.log)"
   REGM=mri_coreg; COST=""
 fi
 
@@ -154,7 +162,7 @@ echo "$COST" | grep -Eq '^[0-9.eE+-]+$' || COST=null
 printf '{"method": "%s", "cost": %s}\n' "$REGM" "$COST" > $W/${S}_reg.json
 echo "[d] labels -> SWI grid (nearest neighbour)"
 mri_vol2vol --mov $SWI --targ $LAB --lta $W/${S}_swi2t1.lta --inv --interp nearest \
-  --o $W/${S}_t1seg_swispace.nii.gz > /dev/null
+  --o $W/${S}_t1seg_swispace.nii.gz > /dev/null || die "mri_vol2vol (labels -> SWI) failed"
 if [ -n "$A2" ]; then
   mri_vol2vol --mov $SWI --targ $A2 --lta $W/${S}_swi2t1.lta --inv --interp nearest \
     --o $W/${S}_a2009s_swispace.nii.gz > /dev/null
@@ -170,7 +178,8 @@ if [ -n "$FL" ]; then
 fi
 
 echo ""
-echo "QC - labels must hug the SWI cortex, FLAIR must line up (toggle layers):"
+echo "QC - labels must hug the SWI cortex in the CORONAL and SAGITTAL views too (an up-down slip is"
+echo "invisible in axial slices); FLAIR must line up (toggle layers). detect_css.py reports label_shift_mm:"
 echo "  freeview -v $SWI $W/${S}_t1seg_swispace.nii.gz:colormap=lut:opacity=0.3" \
      "$( [ -n "$FL" ] && echo "$W/${S}_flair_swispace.nii.gz:visible=0" )" \
      "$( [ -n "$A2" ] && echo "$W/${S}_a2009s_swispace.nii.gz:colormap=lut:opacity=0.3:visible=0" )"

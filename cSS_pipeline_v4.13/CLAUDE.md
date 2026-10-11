@@ -239,6 +239,13 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   bias only (> 1.5 mm). Phantom: true 0 / 1.13 / 2.56 / 5.12 mm -> 0.02 / 1.11 / 2.56 / 4.3 mm (the old fixed
   window read 5.12 mm as 1.28 mm and passed it).
 
+- v4.17.1 on real data: P006 QC ok (shift 0.21 mm), surface LTA direction chosen 0.58 vs 15.51 mm, overlay 105
+  objects. P011 low_confidence_review: label_shift_vec_mm [1.34, -0.07, -3.87] (found_frac 0.97) = 3.9 mm
+  up-down slip from mri_coreg (no recon-all); axial freeview looked aligned. Re-registration with bbregister pending.
+- v4.17.2: prep_anat.sh stops at the first failed step (a placeholder --t1 path fell through and kept the old
+  labels); run_css.sh stops if prep_anat fails; --t1 data/ID_t1.nii.gz (the imported copy) works. RUNBOOK:
+  coronal/sagittal registration check. test_shell 6a/6a2.
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.

@@ -1,4 +1,4 @@
-# cSS pipeline v4.17.1 — runbook
+# cSS pipeline v4.17.2 — runbook
 
 Step-by-step operation of the whole pipeline, from DICOM to a validated research score. Method details and
 the reasoning behind each rule are in [PIPELINE.md](PIPELINE.md); the audit and plan in
@@ -135,8 +135,15 @@ Main outputs:
    ```
    The cortex ribbon must hug the SWI cortex in all three planes, especially at the vertex, occipital poles and
    temporal lobes. `edge_agreement_by_region_mm` in the QC file says where the fit is worst.
-   If it is off by more than ~1-2 mm: delete `work/P012_t1seg_swispace.nii.gz` and re-run `run_css.sh P012`
-   (falls back to SynthSeg on the SWI; the case becomes `low_confidence_review`).
+   **Always look at a coronal or sagittal view**: an up-down slip (third number of `label_shift_vec_mm`) is
+   invisible in axial slices (P011: 3.9 mm up-down, axial view looked perfect).
+   If it is off by more than ~1-2 mm, redo the registration first: re-run
+   `prep_anat.sh P012 --t1 data/P012_t1.nii.gz --recon` (bbregister on the cortex boundary instead of
+   `mri_coreg`; the imported T1 copy can be given as `--t1`), then `NOVIEW=1 run_css.sh P012`. Only if that also
+   fails: delete `work/P012_t1seg_swispace.nii.gz` and re-run `run_css.sh P012` (falls back to SynthSeg on the
+   SWI; the case becomes `low_confidence_review`).
+   `prep_anat.sh` stops with an ERROR at the first failed step (e.g. a wrong `--t1` path); it never leaves the
+   old labels in place silently.
 
 ---
 

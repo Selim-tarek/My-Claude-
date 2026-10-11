@@ -53,6 +53,14 @@ printf '#!/bin/bash\necho "bbregister $*" >> $STUBLOG\necho "0.512 1 2 3" > %s/b
 chmod +x $T/bin/bbregister.new; mv -f $T/bin/bbregister.new $T/bin/bbregister
 : > $T/log; $SH $T/base/scripts/prep_anat.sh P3 --t1 $T/t1.nii > /dev/null; notseen "recon-all"; seen bbregister
 grep -q '"cost": 0.512' $T/base/work/P3_reg.json || fail "bbregister mincost not recorded"
+echo "== 6a. v4.17.2: a missing --t1 file stops prep_anat and run_css before anything runs"
+: > $T/log; out=$($SH $T/base/scripts/prep_anat.sh P3 --t1 PATH_TO_T1 2>&1) && fail "prep_anat accepted a missing T1"
+echo "$out" | grep -q "T1 file not found" || fail "no clear message for a missing T1"; notseen mri_convert
+: > $T/log; $SH $T/base/scripts/run_css.sh P3 --t1 PATH_TO_T1 > /dev/null 2>&1 && fail "run_css went on after prep_anat failed"
+notseen "detect_css.py P3"
+echo "== 6a2. the imported copy data/ID_t1.nii.gz can be given as --t1"
+: > $T/log; $SH $T/base/scripts/prep_anat.sh P2 --t1 $T/base/data/P2_t1.nii.gz > /dev/null
+[ -s $T/base/data/P2_t1.nii.gz ] || fail "re-import of data/P2_t1.nii.gz lost the file"; seen "mri_coreg --mov"
 echo "== 6b. --phase is imported for the reviewer"
 echo ph > $T/ph.nii; : > $T/log; $SH $T/base/scripts/run_css.sh P4 $T/swi.nii --phase $T/ph.nii > /dev/null
 seen "mri_convert $T/ph.nii $T/base/data/P4_phase.nii.gz"

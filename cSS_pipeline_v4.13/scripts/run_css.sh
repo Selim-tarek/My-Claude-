@@ -48,7 +48,7 @@ if [ -n "$PHASE" ]; then
 fi
 if [ ${#ANAT[@]} -gt 0 ]; then
   echo "[0b] T1/FLAIR anatomy -> SWI grid"
-  zsh $SC/prep_anat.sh $S "${ANAT[@]}"
+  zsh $SC/prep_anat.sh $S "${ANAT[@]}" || { echo "ERROR: prep_anat.sh failed - stopping (old labels would be used)"; exit 1; }
 fi
 T1SEG=$B/work/${S}_t1seg_swispace.nii.gz
 echo "[1/4] segmentation"
