@@ -51,6 +51,13 @@ run(f"{S}/surface_features.py", "PH6", "--surface-xfm", f"{B}/work/PH6_tkras_to_
 F2 = pd.read_csv(f"{B}/review/PH6_surface_features.csv")
 if not np.allclose(F1.select_dtypes("number").fillna(-9).values, F2.select_dtypes("number").fillna(-9).values, atol=0.02):
     fail("LTA route and explicit-transform route disagree")
+# real FreeSurfer LTA format (type 0 VOX2VOX, volume info with "cras", as bbregister writes it) -> same features
+run(f"{os.path.dirname(os.path.abspath(__file__))}/phantom_surfaces.py", "PH6", "6", "--lta-vox2vox")
+out0 = run(f"{S}/surface_features.py", "PH6").stdout
+F0 = pd.read_csv(f"{B}/review/PH6_surface_features.csv")
+if "(LTA maps SWI->T1)" not in out0 or not np.allclose(F1.select_dtypes("number").fillna(-9).values,
+                                                       F0.select_dtypes("number").fillna(-9).values, atol=0.02):
+    fail(f"type-0 (vox2vox) LTA gives different results: {out0}")
 bad = np.loadtxt(f"{B}/work/PH6_tkras_to_swi.txt"); bad[:3, 3] += 8.0
 np.savetxt(f"{B}/work/PH6_bad_xfm.txt", bad)
 if run(f"{S}/surface_features.py", "PH6", "--surface-xfm", f"{B}/work/PH6_bad_xfm.txt", ok=False).returncode == 0:
@@ -60,7 +67,7 @@ F = F1.merge(O[["list", "obj_id", "kind"]], on=["list", "obj_id"])
 fc, fv = F[F.kind == "cSS"], F[F.kind.isin(["surface vein", "sinus"])]
 if not (fc.surf_normal_dist_mm < 0).all() or not (fv.surf_normal_dist_mm > 0).all():
     fail("surface normal distance: cSS should be subpial (<0), the surface vein outside (>0)")
-print(f"surface features: direction from labels OK, explicit transform identical, 8 mm shift refused; "
+print(f"surface features: direction from labels OK, RAS2RAS / VOX2VOX LTA / explicit transform identical, 8 mm shift refused; "
       f"normal distance cSS {fc.surf_normal_dist_mm.max():.2f} mm max, surface vein {fv.surf_normal_dist_mm.min():.2f} mm min")
 print(F[["kind", "list", "surf_normal_dist_mm", "surf_pieces", "surf_band_continuity", "geo_length_mm",
          "surf_dark_cont_mm", "surf_exit_paths"]][F.kind != "other"].to_string(index=False))

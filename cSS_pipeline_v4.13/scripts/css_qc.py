@@ -39,13 +39,14 @@ def read_acq(base, subj):
     return {}
 
 
-def edge_agreement(If, brain, pial_sd, normal, vox, sel, rng):
+def edge_agreement(If, brain, pial_sd, normal, vox, sel, rng, normals=False):
     """Signed offset (mm) of the strongest dark->bright step (cortex -> CSF) along the outward normal,
     searched within +-EDGE_WIN_MM of label-boundary voxels. 0 = the labels' pial boundary sits on the
-    SWI edge. Returns offsets of up to 4000 sampled boundary voxels in `sel`."""
+    SWI edge. Returns offsets of up to 4000 sampled boundary voxels in `sel` (and, with normals=True, the
+    outward unit normals of those voxels, for the shift fit)."""
     pts = np.argwhere(sel)
     if len(pts) < 50:
-        return np.array([])
+        return (np.array([]), np.zeros((0, 3))) if normals else np.array([])
     if len(pts) > 4000:
         pts = pts[rng.choice(len(pts), 4000, replace=False)]
     n = np.stack([normal[a][tuple(pts.T)] for a in range(3)], 1)
@@ -57,13 +58,61 @@ def edge_agreement(If, brain, pial_sd, normal, vox, sel, rng):
     d = np.diff(prof, axis=1)
     d[~(inb[:, 1:] & inb[:, :-1])] = -np.inf          # steps that leave the brain mask do not count
     j = np.argmax(d, axis=1); ok = np.isfinite(d[np.arange(len(d)), j]) & (d[np.arange(len(d)), j] > 0)
-    return (0.5 * (t[j] + t[j + 1]))[ok]
+    off = (0.5 * (t[j] + t[j + 1]))[ok]
+    return (off, n[ok]) if normals else off
+
+
+def _offsets(If, brain, normal, vox, pts, centre):
+    """offset (mm, along the outward normal) of the strongest dark->bright step within centre +- EDGE_WIN_MM"""
+    n = np.stack([normal[a][tuple(pts.T)] for a in range(3)], 1)
+    t = np.arange(-EDGE_WIN_MM, EDGE_WIN_MM + 1e-6, 0.25, dtype=np.float32)
+    tt = centre[:, None] + t[None, :]
+    q = pts[:, None, :] + tt[:, :, None] * n[:, None, :] / np.array(vox)
+    co = q.reshape(-1, 3).T
+    prof = ndi.map_coordinates(If, co, order=1, mode="nearest").reshape(q.shape[:2])
+    inb = ndi.map_coordinates(brain.astype(np.float32), co, order=0, mode="constant").reshape(q.shape[:2]) > 0
+    d = np.diff(prof, axis=1)
+    d[~(inb[:, 1:] & inb[:, :-1])] = -np.inf
+    j = np.argmax(d, axis=1); r = np.arange(len(d))
+    ok = np.isfinite(d[r, j]) & (d[r, j] > 0)
+    off = np.where(ok, 0.5 * (tt[r, j] + tt[r, j + 1]), np.nan)
+    return off, n
+
+
+def shift_fit(If, brain, normal, vox, sel, rng, iters=6):
+    """Rigid label->SWI shift s (mm): a label map displaced by s moves its boundary by s, so the SWI edge appears
+    at -s.n along each outward normal n. Iterative: each search window is re-centred on the current estimate
+    (a fixed +-3 mm window cannot see a large shift), offsets > 1.5 mm from the fit are dropped as outliers
+    (veins, the white-matter edge). Returns (s, bias, scatter, share of samples with an edge): bias = median
+    offset left after the shift (labels too small > 0 / too large < 0), scatter = median absolute residual."""
+    pts = np.argwhere(sel)
+    if len(pts) < 50:
+        return None, None, None, None
+    if len(pts) > 4000:
+        pts = pts[rng.choice(len(pts), 4000, replace=False)]
+    s = np.zeros(3)
+    for k in range(iters):
+        n = np.stack([normal[a][tuple(pts.T)] for a in range(3)], 1)
+        off, n = _offsets(If, brain, normal, vox, pts, -(n @ s))
+        ok = np.isfinite(off)
+        if ok.sum() < 50:
+            return None, None, None, float(ok.mean())
+        res = off + n @ s
+        if k:                                          # robust: drop outliers around the current fit
+            ok &= np.abs(res - np.median(res[ok])) < 1.5
+        s_new, *_ = np.linalg.lstsq(n[ok], -off[ok], rcond=None)
+        done = np.linalg.norm(s_new - s) < 0.05
+        s = s_new
+        if done:
+            break
+    res = (off + n @ s)[np.isfinite(off)]
+    return s, float(np.median(res)), float(np.median(np.abs(res - np.median(res)))), float(np.isfinite(off).mean())
 
 
 def case_qc(base, subj, swi, I, If, seg, brain, tissue, cortex, pial_sd, normal, rim, hemiL, vox,
             t1_anat, full_bottom):
     rng = np.random.default_rng(0)
-    qc = dict(subject=subj, qc_version="v4.14")
+    qc = dict(subject=subj, qc_version="v4.17.1")
     qc["acquisition"] = read_acq(base, subj)
     qc["voxel_mm"] = [round(v, 3) for v in vox]
     qc["orientation"] = "".join(nib.aff2axcodes(swi.affine))
@@ -87,6 +136,14 @@ def case_qc(base, subj, swi, I, If, seg, brain, tissue, cortex, pial_sd, normal,
     # pial confidence: label boundary vs SWI cortex/CSF edge, overall and by hemisphere x height third
     bnd = cortex & (np.abs(pial_sd) <= 0.75 * max(vox)) & ~rim
     off = edge_agreement(If, brain, pial_sd, normal, vox, bnd, rng)
+    s_, bias_, spread_, found_ = shift_fit(If, brain, normal, vox, bnd, rng)
+    # v4.17.1: separate a systematic misregistration (rigid shift, global bias) from scatter. On P006/P011 the
+    # median |offset| (1.6 / 2.1 mm) mixed both; the status now uses the systematic parts only.
+    qc["label_shift_mm"] = round(float(np.linalg.norm(s_)), 2) if s_ is not None else None
+    qc["label_shift_vec_mm"] = [round(float(v), 2) for v in s_] if s_ is not None else None
+    qc["edge_bias_mm"] = round(bias_, 2) if bias_ is not None else None
+    qc["edge_scatter_mm"] = round(spread_, 2) if spread_ is not None else None
+    qc["edge_found_frac"] = round(found_, 2) if found_ is not None else None
     qc["edge_offset_median_mm"] = round(float(np.median(off)), 2) if len(off) else None
     qc["edge_agreement_mm"] = round(float(np.median(np.abs(off))), 2) if len(off) else None
     qc["edge_n"] = int(len(off))
@@ -120,8 +177,12 @@ def case_qc(base, subj, swi, I, If, seg, brain, tissue, cortex, pial_sd, normal,
         why_low.append("SWI-only anatomy (no T1)")
     if qc["edge_agreement_mm"] is None:
         why_low.append("pial edge agreement not measurable")
-    elif qc["edge_agreement_mm"] > EDGE_LOW_CONF_MM:
-        why_low.append(f"label pial boundary {qc['edge_agreement_mm']} mm from the SWI cortex edge")
+    else:
+        if qc["label_shift_mm"] is not None and qc["label_shift_mm"] > EDGE_LOW_CONF_MM:
+            why_low.append(f"labels shifted {qc['label_shift_mm']} mm against the SWI (rigid fit to the cortex edge)")
+        if qc["edge_bias_mm"] is not None and abs(qc["edge_bias_mm"]) > EDGE_LOW_CONF_MM:
+            why_low.append(f"label pial boundary {qc['edge_bias_mm']:+.2f} mm from the SWI cortex edge on average "
+                           f"({'labels too small' if qc['edge_bias_mm'] > 0 else 'labels too large'})")
     cost = (qc["registration"] or {}).get("cost")
     if isinstance(cost, (int, float)) and cost > REG_COST_LOW_CONF:
         why_low.append(f"registration cost {cost}")

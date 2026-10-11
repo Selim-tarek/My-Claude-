@@ -31,7 +31,7 @@ def read_lta(p):
                 key, val = l.split("=", 1); info[key.strip()] = val.split()
         dims = np.array([float(x) for x in info["volume"][:3]]); vs = np.array([float(x) for x in info["voxelsize"]])
         R = np.c_[[float(x) for x in info["xras"]], [float(x) for x in info["yras"]], [float(x) for x in info["zras"]]] * vs
-        c = np.array([float(x) for x in info["c_ras"]])
+        c = np.array([float(x) for x in info.get("cras", info.get("c_ras"))])   # FreeSurfer writes "cras"
         A = np.eye(4); A[:3, :3] = R; A[:3, 3] = c - R @ (dims / 2.0)
         return A
     return v2r("dst volume info") @ M @ np.linalg.inv(v2r("src volume info"))

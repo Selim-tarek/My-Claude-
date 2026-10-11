@@ -229,6 +229,16 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   check_stage2.py, check_consensus.py. Still to confirm on P006 recon-all labels: count of label 0 vs 24 in
   brain & ~tissue (the fix is safe either way).
 
+- v4.17 on real data (user's Mac, FreeSurfer 8.2): P006 60 candidates, 6/6 known kept (ranks 6-43); P011 8
+  candidates; P006 recon-all CSF outside tissue = label 0: 377,534 vox, label 24: 615,819 vox (B2 fix matters).
+  surface_features crashed: real bbregister LTAs are type 0 with "cras" (parser expected "c_ras").
+- v4.17.1: LTA parser reads "cras"; phantom test with a bbregister-style type-0 LTA. QC: P006/P011 edge
+  agreement 1.62 / 2.12 mm mixed scatter with misregistration (P006 signed median -0.12, P011 +1.62). New
+  iterative robust rigid fit (search window re-centred on the estimate, outliers > 1.5 mm dropped):
+  label_shift_mm, label_shift_vec_mm, edge_bias_mm, edge_scatter_mm, edge_found_frac; status uses shift and
+  bias only (> 1.5 mm). Phantom: true 0 / 1.13 / 2.56 / 5.12 mm -> 0.02 / 1.11 / 2.56 / 4.3 mm (the old fixed
+  window read 5.12 mm as 1.28 mm and passed it).
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.

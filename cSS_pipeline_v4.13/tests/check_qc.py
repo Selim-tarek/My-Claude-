@@ -60,17 +60,20 @@ qt = make_case("PHT", np.transpose(I0, perm), np.transpose(seg0, perm), aff_t)
 if qt["orientation_ok"] or qt["status"] != "insufficient_quality": fail(f"transposed phantom QC {qt['status']}")
 print(f"orientation: transposed phantom -> {qt['status']} ({qt['reasons'][0]})")
 
-# 4. label misregistration: labels shifted by 0 / 0.8 / 1.6 / 3.2 mm (along x, y and z) -> edge agreement grows
+# 4. label misregistration: labels shifted by (n, n, 2n/3) voxels -> the rigid shift fit recovers the shift
+#    (v4.17.1; the window is +-3 mm, so the largest shift is only required to be flagged, not measured)
 vals = []
+zoom = np.array(img.header.get_zooms()[:3])
 for n in (0, 1, 2, 4):
     sh = (n, n, max(n * 2 // 3, 0))
     q = make_case(f"PHS{n}", I0, np.roll(seg0, sh, axis=(0, 1, 2)), aff)
-    vals.append((n, q["edge_agreement_mm"], q["status"]))
-e = [v[1] for v in vals]
-print("label shift (voxels) -> edge agreement mm, status: " + ", ".join(f"{n}: {a} {s}" for n, a, s in vals))
-if vals[0][2] != "ok": fail("unshifted T1-labelled phantom should be QC ok")
-if not all(a < b for a, b in zip(e, e[1:])): fail(f"edge agreement not monotonic {e}")
-if vals[-1][2] == "ok": fail("3.2 mm label shift still QC ok")
+    vals.append((n, float(np.linalg.norm(np.array(sh) * zoom)), q["label_shift_mm"], q["edge_bias_mm"], q["status"]))
+print("label shift true -> estimated mm (bias), status: " +
+      ", ".join(f"{t:.2f} -> {e} ({b}) {s}" for n, t, e, b, s in vals))
+if vals[0][4] != "ok": fail("unshifted T1-labelled phantom should be QC ok")
+for n, t, e, b, s in vals[:3]:
+    if abs(e - t) > 0.6: fail(f"shift {t:.2f} mm estimated as {e} mm")
+if vals[2][4] == "ok" or vals[3][4] == "ok": fail("a >= 2.5 mm label shift is still QC ok")
 
 # 5. extent at the volume edge (B1): crop so that a truth lesion starts on array slice 0
 k0 = int(np.argwhere(truth == 1)[:, 2].min()) + 1

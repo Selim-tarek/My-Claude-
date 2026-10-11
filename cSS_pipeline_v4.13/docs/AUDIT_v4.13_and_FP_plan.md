@@ -604,3 +604,7 @@ only after a model has passed the patient-level validation in section 5.
   region). Effect of B3 on phantoms: same objects and same exclusion decisions; tube_ratio changes <= 0.08,
   up to 0.17 on sinus pieces lying at the mask edge; ranks shift slightly. Detector version to freeze for the
   first labelled cohort: v4.17.
+- **v4.17.1** First real-data run (P006, P011 on the user's Mac): known lesions 6/6 kept, P011 8 candidates; CSF
+  outside tissue on P006's recon-all labels is 38 % label 0 (B2 confirmed on real data). Fixed the LTA parser
+  (real bbregister files: type 0, "cras" key) and replaced the QC edge measure with an iterative robust rigid fit
+  that separates misregistration (shift, bias) from scatter.

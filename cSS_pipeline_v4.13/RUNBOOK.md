@@ -1,4 +1,4 @@
-# cSS pipeline v4.17 — runbook
+# cSS pipeline v4.17.1 — runbook
 
 Step-by-step operation of the whole pipeline, from DICOM to a validated research score. Method details and
 the reasoning behind each rule are in [PIPELINE.md](PIPELINE.md); the audit and plan in
@@ -122,7 +122,11 @@ Main outputs:
    - `insufficient_quality` → **stop**. The SWI is not stored with the slice axis last, or the labels cover
      too little of the brain. Fix the input; do not read the candidates.
    - `low_confidence_review` → continue, but anatomy-based features and exclusions are less reliable. Note the
-     reasons (SWI-only anatomy, label pial boundary > 1.5 mm from the SWI edge, registration cost, slices > 2 mm).
+     reasons (SWI-only anatomy, labels shifted > 1.5 mm against the SWI, label boundary > 1.5 mm inside/outside the
+     SWI cortex edge on average, registration cost, slices > 2 mm).
+   - The QC file separates `label_shift_mm` (rigid misregistration, with its direction `label_shift_vec_mm`),
+     `edge_bias_mm` (labels systematically too small > 0 or too large < 0) and `edge_scatter_mm` (noise: veins,
+     partial volume — not a registration problem).
    - `ok` → continue.
    The thresholds are provisional; nothing in the pipeline acts on the status yet.
 2. **Look at the registration** with the command `prep_anat.sh` printed:

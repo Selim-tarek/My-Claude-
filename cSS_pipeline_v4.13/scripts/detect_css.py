@@ -725,7 +725,7 @@ print(f"{subj}: {n_raw} raw components -> {len(df)} candidates "
       + ("  FLAIR used" if FL is not None else ""))
 if fl_note: print(f"{subj}: {fl_note}")
 print(f"{subj}: QC {QC['status']}" + (f" ({'; '.join(QC['reasons'])})" if QC["reasons"] else "")
-      + f", pial edge agreement {QC['edge_agreement_mm']} mm, {len(dropped)} components below the generation gates"
+      + f", label shift {QC['label_shift_mm']} mm, edge bias {QC['edge_bias_mm']} mm, scatter {QC['edge_scatter_mm']} mm, {len(dropped)} components below the generation gates"
       + " [review/" + subj + "_qc.json; reported only]\n")
 if len(df):
     print(df.head(15)[["cand_id", "hemi", "region", "volume_mm3", "darkness_z", "pial_dist_mm",
