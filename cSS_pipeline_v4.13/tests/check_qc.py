@@ -56,7 +56,17 @@ print(f"dropped log: {len(d)} components, reasons {d.reason.value_counts().to_di
 # 3. orientation: same phantom stored with the S-I axis first -> insufficient_quality
 perm = (2, 0, 1)
 aff_t = aff.copy(); aff_t[:, :3] = aff[:, list(perm)]       # new axis i = old axis perm[i]
+# v4.18: detect_css stops (exit 2, QC file written) unless CSS_ALLOW_ORIENT=1
+nib.save(nib.Nifti1Image(np.transpose(I0, perm).astype(np.float32), aff_t), f"{B}/data/PHT_swi.nii")
+nib.save(nib.Nifti1Image(np.transpose(seg0, perm).astype(np.int32), aff_t), f"{B}/synthseg/PHT_seg.nii.gz")
+run(f"{S}/align_seg.py", "PHT")
+st = subprocess.run([py, f"{S}/detect_css.py", "PHT"], capture_output=True, text=True)
+q0 = json.load(open(f"{B}/review/PHT_qc.json"))
+if st.returncode != 2 or "STOPPED" not in st.stdout or q0["status"] != "insufficient_quality":
+    fail(f"wrong orientation did not stop detection (exit {st.returncode})")
+os.environ["CSS_ALLOW_ORIENT"] = "1"
 qt = make_case("PHT", np.transpose(I0, perm), np.transpose(seg0, perm), aff_t)
+del os.environ["CSS_ALLOW_ORIENT"]
 if qt["orientation_ok"] or qt["status"] != "insufficient_quality": fail(f"transposed phantom QC {qt['status']}")
 print(f"orientation: transposed phantom -> {qt['status']} ({qt['reasons'][0]})")
 

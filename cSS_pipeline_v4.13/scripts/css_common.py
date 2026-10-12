@@ -198,3 +198,15 @@ def cohen_kappa(a, b, categories=None, weights=None):
     W = np.where(i == j, 0.0, 1.0) if weights is None else (np.abs(i - j) / (n - 1)) ** (2 if weights == "quadratic" else 1)
     den = (W * E).sum()
     return float(1 - (W * O).sum() / den) if den > 0 else float("nan")
+
+
+def skeleton_length(sk, vox):
+    """v4.18: centre-line length (mm) of a 2-D skeleton from its steps (detect_css used pixels x vox[0], which
+    undercounts diagonals): orthogonal steps vox[0] / vox[1], diagonal steps their hypotenuse; a diagonal is
+    skipped where an orthogonal corner already joins the two pixels"""
+    import numpy as np
+    sk = np.asarray(sk, bool); a, b = float(vox[0]), float(vox[1]); d = float(np.hypot(a, b))
+    h = sk[1:, :] & sk[:-1, :]; v = sk[:, 1:] & sk[:, :-1]
+    d1 = sk[1:, 1:] & sk[:-1, :-1] & ~(sk[1:, :-1] | sk[:-1, 1:])
+    d2 = sk[1:, :-1] & sk[:-1, 1:] & ~(sk[1:, 1:] | sk[:-1, :-1])
+    return float(h.sum() * a + v.sum() * b + (d1.sum() + d2.sum()) * d)

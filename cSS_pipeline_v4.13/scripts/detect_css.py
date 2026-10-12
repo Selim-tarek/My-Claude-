@@ -55,13 +55,13 @@ v4.16: bounded local vein tracking columns (css_vessel.py; recorded only - no ru
   cand_geodesic_mm, local_cont_max/min/total_mm, terminal_ends, local_net_mm, local_branch_points/_per10mm
 """
 import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
-import sys, os, numpy as np, nibabel as nib, pandas as pd
+import sys, os, json, numpy as np, nibabel as nib, pandas as pd
 from scipy import ndimage as ndi
 from skimage.filters import sato
 from skimage.measure import regionprops
 from skimage.morphology import skeletonize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, load_lut, fresh, sha256, update_manifest, environment_record
+from css_common import base as _base, load_lut, fresh, sha256, update_manifest, environment_record, skeleton_length
 import css_qc, css_vessel
 
 subj   = sys.argv[1]
@@ -69,7 +69,7 @@ z_thr  = float(sys.argv[2]) if len(sys.argv) > 2 else -2.5
 r_pct  = float(sys.argv[3]) if len(sys.argv) > 3 else 85
 RIM_MM = float(sys.argv[4]) if len(sys.argv) > 4 else 3.0
 RANK   = os.environ.get("CSS_RANK", "v4")
-RULESET = "v4.17"                        # written to every row as rule_version
+RULESET = "v4.18"                        # written to every row as rule_version
 Z_LOW, R_PCT_LOW = -2.0, 80           # hysteresis (weak) thresholds
 GROW_Z = -1.5                          # 'dark' map used for region growing at scoring
 MIN_MM3, MIN_SLICES, MIN_ELONG = 25.0, 2, 2.0   # v4: 2.0 (tram-track = two parallel plates, ~2.4;
@@ -79,6 +79,9 @@ PIAL_IN_MM, PIAL_OUT_MM = 3.5, 4.0     # pial band: cortex thickness + blooming 
 # artifact, faint normal cortex). v4.9.2: microbleed-like is a flag only; skull-base / basal rules need T1
 # anatomy and a scan that includes the skull base. Excluded candidates are NOT deleted: they are listed with the reason
 # in review/ID_excluded.csv (+ .nii.gz). CSS_KEEP_ALL=1 switches all exclusions off.
+# v4.18: 2-D ridge (Sato) scales in mm, not pixels. [1, 2, 3] px were 0.47-1.4 mm on P010 (0.47 mm) but
+# 0.86-2.6 mm on P011 (0.86 mm); these values reproduce the validated P006 behaviour (0.573 mm -> 1.05/2.09/3.14 px)
+SATO_SIGMAS_MM = (0.6, 1.2, 1.8)
 MERGE_GAP_MM = 3.0      # fragments of one dark line closer than this are merged into one candidate
 MERGE_MAX_MM = 40.0     # ...but only while the merged object stays focus-sized: on P006 unlimited merging
                         # chained veins along a whole hemisphere into 10-17 cm objects (v4.9.1)
@@ -118,6 +121,20 @@ vox = tuple(float(v) for v in swi.header.get_zooms()[:3])
 # v4.9.2 anatomy confidence: millimetre position rules (skull base, basal cisterns) are only trusted
 # with T1-derived labels; SynthSeg on the SWI is too coarse (P010: real-looking lesions excluded)
 _t1p = f"{base}/work/{subj}_t1seg_swispace.nii.gz"
+# v4.18: the slice-wise ridge filter, slice counts, merge gap and "long structure" assume array axis 2 is the
+# superior-inferior / slice axis. Stop instead of running in the wrong plane (CSS_ALLOW_ORIENT=1 overrides).
+_si = int(np.argmax(np.abs(swi.affine[2, :3])))
+if (_si != 2 or vox[2] < max(vox[0], vox[1]) - 1e-3) and os.environ.get("CSS_ALLOW_ORIENT") != "1":
+    os.makedirs(f"{base}/review", exist_ok=True)
+    _why = (f"array axis 2 is not the slice / S-I axis (orientation {''.join(nib.aff2axcodes(swi.affine))}, "
+            f"voxel {[round(v, 3) for v in vox]})")
+    json.dump(dict(subject=subj, status="insufficient_quality", orientation_ok=False, si_axis=_si,
+                   orientation="".join(nib.aff2axcodes(swi.affine)), voxel_mm=[round(v, 3) for v in vox],
+                   reasons=[_why], stopped=True), open(f"{base}/review/{subj}_qc.json", "w"), indent=2)
+    print(f"{subj}: STOPPED - {_why}.\n  Reslice the SWI so the slices are axial (e.g. mri_convert --out_orientation LAS"
+          f" after checking the acquisition plane), or set CSS_ALLOW_ORIENT=1 to run anyway (geometry unreliable)."
+          f"\n  Earlier outputs in review/ for {subj}, if any, are from a previous run.")
+    sys.exit(2)
 T1_ANAT = os.path.exists(_t1p) and os.path.getmtime(_t1p) >= os.path.getmtime(f"{base}/data/{subj}_swi.nii")
 MERGE_GAP_MM = min(max(MERGE_GAP_MM, 2.0 * vox[2]), 4.0)   # thick slices: inter-slice gaps must not split a line
 s2d = np.ones((3, 3, 1), bool); s3 = np.ones((3, 3, 3), bool)
@@ -167,9 +184,11 @@ zone = shell & ~rim
 
 # ---- 3. curvilinear dark structures, slice by slice (candidate generation)
 R = np.zeros_like(I)
+_inpl = float(np.sqrt(vox[0] * vox[1]))
+SATO_PX = [max(0.5, m / _inpl) for m in SATO_SIGMAS_MM]
 for k in range(I.shape[2]):
     if I[:, :, k].max() > 0:
-        R[:, :, k] = sato(If[:, :, k], sigmas=[1, 2, 3], black_ridges=True)
+        R[:, :, k] = sato(If[:, :, k], sigmas=SATO_PX, black_ridges=True)
 r_hi = np.percentile(R[shell], r_pct); r_lo = np.percentile(R[shell], R_PCT_LOW)
 strong = zone & (z < z_thr) & (R > r_hi)
 weak   = zone & (z < Z_LOW) & (R > r_lo)          # strong is a subset of weak
@@ -318,9 +337,16 @@ if len(P) > 100:
 else:
     pc = np.array(I.shape) * vox / 2; mvec = np.array([1.0, 0, 0])
 zmin3 = ndi.minimum_filter(z, size=3)
+brain_in = ndi.binary_erosion(brain, structure=s3)      # one voxel inside the mask edge
 def mirror_dark(pts):
     p = pts * vox; q = p - 2 * ((p - pc) @ mvec)[:, None] * mvec[None, :]
-    qi = np.clip(np.round(q / vox).astype(int), 0, np.array(I.shape) - 1)
+    qi = np.round(q / vox).astype(int)
+    ok = np.all((qi >= 0) & (qi < np.array(I.shape)), axis=1)
+    qi = qi[ok]; ok[ok] = brain_in[qi[:, 0], qi[:, 1], qi[:, 2]]
+    # v4.18: mirror points outside the brain read as dark (stripped background) -> ignored; NaN if most are outside
+    if ok.mean() < 0.5:
+        return float("nan")
+    qi = np.round(q[ok] / vox).astype(int)
     return float((zmin3[qi[:, 0], qi[:, 1], qi[:, 2]] < Z_LOW).mean())
 
 # ---- 8. lobar ICH: reader-drawn mask, else dark compact blobs in lobar tissue
@@ -386,7 +412,7 @@ def branches_per_10mm(mm):
         if sl.sum() < 3: continue
         sk = skeletonize(sl)
         nb = ndi.convolve(sk.astype(int), k8, mode="constant")
-        bp += int((sk & (nb >= 3)).sum()); length += sk.sum() * vox[0]
+        bp += int((sk & (nb >= 3)).sum()); length += skeleton_length(sk, vox)
     return 10.0 * bp / max(length, 1.0)
 
 def tram_track(pts):
@@ -739,7 +765,8 @@ _inputs = {k: p_ for k, p_ in (("swi", f"{base}/data/{subj}_swi.nii"), ("labels"
            if os.path.exists(p_)}
 update_manifest(base, subj, "detect", dict(
     pipeline_version=RULESET, run_at=pd.Timestamp.now().isoformat(timespec="seconds"), args=sys.argv[1:],
-    parameters=dict(z_thr=z_thr, ridge_pct=r_pct, rim_mm=RIM_MM, rank=RANK, keep_all=KEEP_ALL),
+    parameters=dict(z_thr=z_thr, ridge_pct=r_pct, rim_mm=RIM_MM, rank=RANK, keep_all=KEEP_ALL,
+                    sato_sigmas_mm=list(SATO_SIGMAS_MM), sato_sigmas_px=[round(v, 2) for v in SATO_PX]),
     anatomy="T1" if T1_ANAT else "SWI-only", flair_used=FL is not None, qc_status=QC["status"],
     n_candidates=int(len(df)), n_excluded=len(excluded), n_dropped=len(dropped),
     inputs={k: dict(path=p_, sha256=sha256(p_), mtime=os.path.getmtime(p_)) for k, p_ in _inputs.items()},

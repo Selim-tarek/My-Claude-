@@ -611,7 +611,8 @@ summary lists what happened to each decoy kind (sulcal / radial / surface).
 4. **Candidate generation.**
    - Search zone: −3.5 to +4 mm from the pial surface, minus white matter, deep grey nuclei and
      a 3 mm skull-strip rim.
-   - Per-slice Sato ridge filter (σ 1–3 voxels, dark ridges).
+   - Per-slice Sato ridge filter (dark ridges), σ 0.6 / 1.2 / 1.8 mm converted to in-plane pixels (v4.18;
+     until v4.17 σ was 1–3 pixels, i.e. a different filter on each protocol).
    - Strong voxels: z < −2.5 and ridge > 85th percentile. Weak voxels: z < −2.0 and ridge > 80th
      percentile.
    - Hysteresis connected components per hemisphere.
