@@ -186,6 +186,8 @@ zone = shell & ~rim
 R = np.zeros_like(I)
 _inpl = float(np.sqrt(vox[0] * vox[1]))
 SATO_PX = [max(0.5, m / _inpl) for m in SATO_SIGMAS_MM]
+if os.environ.get("CSS_SATO_LEGACY") == "1":     # v4.17 behaviour, for before/after comparisons on real data
+    SATO_PX = [1.0, 2.0, 3.0]
 for k in range(I.shape[2]):
     if I[:, :, k].max() > 0:
         R[:, :, k] = sato(If[:, :, k], sigmas=SATO_PX, black_ridges=True)

@@ -1,4 +1,4 @@
-# cSS grading pipeline v4.17.2
+# cSS grading pipeline v4.18
 
 Research software, not clinically validated. **How to run it, step by step: [RUNBOOK.md](RUNBOOK.md).**
 Methods and rationale: [PIPELINE.md](PIPELINE.md). Audit and plan: docs/AUDIT_v4.13_and_FP_plan.md.

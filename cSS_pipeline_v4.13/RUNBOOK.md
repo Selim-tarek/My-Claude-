@@ -1,4 +1,4 @@
-# cSS pipeline v4.17.2 — runbook
+# cSS pipeline v4.18 — runbook
 
 Step-by-step operation of the whole pipeline, from DICOM to a validated research score. Method details and
 the reasoning behind each rule are in [PIPELINE.md](PIPELINE.md); the audit and plan in

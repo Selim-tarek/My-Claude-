@@ -245,6 +245,16 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
 - v4.17.2: prep_anat.sh stops at the first failed step (a placeholder --t1 path fell through and kept the old
   labels); run_css.sh stops if prep_anat fails; --t1 data/ID_t1.nii.gz (the imported copy) works. RUNBOOK:
   coronal/sagittal registration check. test_shell 6a/6a2.
+- v4.18 (external review, verified against the code): Sato sigmas 0.6/1.2/1.8 mm -> in-plane px (was 1-3 px:
+  P010 0.47 mm vs P011 0.86 mm got different filters; values reproduce P006 at 0.573 mm); CSS_SATO_LEGACY=1 =
+  old [1,2,3] px for before/after runs. mirror_dark_frac ignores mirror points outside the brain (NaN if most
+  are). branch_per10mm uses true skeleton step length (css_common.skeleton_length). detect stops (exit 2, QC
+  written) on a non-axial array, CSS_ALLOW_ORIENT=1 overrides. Phantoms: same candidate/excluded counts except
+  PH1S (0.5 mm in-plane, sigmas become 1.2/2.4/3.6 px): 8/8 -> 7/8, lesion 3 (11 mm3 true) generated but its
+  component measured 23.5 mm3 < 25 mm3 volume gate; stress small 16/16 -> 15/16 (same lesion); legacy switch
+  restores 8/8 exactly. Fine-resolution scans (P010-like) are where the change matters most -> real-data gate:
+  P006 check_known 6/6, P010 + P011 counts and stress test, both settings. docs/METHODS_scope_and_protocol.md
+  drafts the phenotype-scope / protocol text (scope option a/b is a PI decision).
 
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
