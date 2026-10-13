@@ -92,6 +92,7 @@ HESS_SIGMAS_MM = (0.8, 1.6)            # 3-D shape analysis scales
 # v4.11 vessel exclusion: a dark line that continues as a TUBE beyond the cortical band (into the white
 # matter = medullary / transcortical vein) and runs perpendicular to the cortex is a vessel, not cSS
 VES_WM_MM = 15.0        # how deep under the cortical band the vessel map reaches
+MIDLINE_END_MM = 4.0    # v4.18 end_type "midline": continuation reaches within this of the mid-sagittal plane
 VES_REACH_MM = 20.0     # vessel continuation is measured up to this distance (bounded: vein_tree saturated)
 OFF_CTX_FRAC, OFF_PIAL_MM = 0.30, 0.30   # v4.12 "off the cortex" exclusion (T1 anatomy only)
 VES_WM_Z = -3.0         # WM vessel voxels: this many SD darker than the white matter
@@ -553,7 +554,7 @@ for p in regionprops(lab, spacing=vox):
     del dcm, gl_, reach, rwm
     # v4.16 bounded local vein tracking along the vessel map (recorded only, css_vessel.py)
     vt = css_vessel.local_tracking(cm, VES[vb], vox, VES_REACH_MM, band=(pial_sd[vb] > -PIAL_IN_MM) & ~np.isin(seg[vb], WM + DEEP),
-                                   dark=DARKS[vb])
+                                   dark=DARKS[vb], midline=dmid[vb] < MIDLINE_END_MM)
     mdark = mirror_dark(pts)
     # microbleed vs cSS (Charidimou, AJNR 2016;37:E43): microbleeds are small (generally 2-5 mm),
     # round/oval and at least half surrounded by brain parenchyma - cSS lies on the surface / in CSF
@@ -643,7 +644,8 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "vessel_ext_mm", "vessel_wm_mm", "vessel_run_mm", "axis_normal", "score_v3", "score_v4", "accept",
         "qc_status", "rule_version", "n_pieces",                                   # v4.14, appended
         "cand_geodesic_mm", "local_cont_max_mm", "local_cont_min_mm", "local_cont_total_mm",  # v4.16,
-        "terminal_ends", "local_net_mm", "local_branch_points", "local_branch_per10mm"]       # recorded only
+        "terminal_ends", "local_net_mm", "local_branch_points", "local_branch_per10mm",       # recorded only
+        "end_type_max", "end_type_min", "review_tier", "tier_reason"]                        # v4.18, recorded only
 
 # ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason
 # height is measured within the CEREBRUM (cortex + cerebral WM), so 0 = floor of the temporal/frontal
@@ -700,6 +702,13 @@ for r in rows:
     r["qc_status"] = QC["status"]
     r["rule_version"] = rv or RULESET
     r["exclusion_confidence"] = ("low" if QC["status"] != "ok" else RULE_CONF[rv.split("@")[0]]) if rv else ""
+    # v4.18 review tier (audit S3), RECORDED ONLY: 2 = the candidate's own flags point to a mimic. Nothing is hidden
+    # and the order is unchanged (review_css.py --by-tier is opt-in). Case QC is not used: it applies to every
+    # candidate of the case alike. Not validated - check the known lesions' tiers before ordering by it.
+    why = [n for n, f in (("artifact zone", r["artifact_zone"]), ("vein-like", r["vein_like"]),
+                          ("microbleed-like", r["cmb_like"]),
+                          ("vein evidence > cSS evidence", r["vein_evidence"] > r["css_evidence"])) if f]
+    r["review_tier"] = 2 if why else 1; r["tier_reason"] = "; ".join(why)
 excluded = [r for r in rows if r["_excl"]]
 rows = [r for r in rows if not r["_excl"]]
 os.makedirs(f"{base}/review", exist_ok=True)
@@ -754,7 +763,9 @@ print(f"{subj}: {n_raw} raw components -> {len(df)} candidates "
 if fl_note: print(f"{subj}: {fl_note}")
 print(f"{subj}: QC {QC['status']}" + (f" ({'; '.join(QC['reasons'])})" if QC["reasons"] else "")
       + f", label shift {QC['label_shift_mm']} mm, edge bias {QC['edge_bias_mm']} mm, scatter {QC['edge_scatter_mm']} mm, {len(dropped)} components below the generation gates"
-      + " [review/" + subj + "_qc.json; reported only]\n")
+      + " [review/" + subj + "_qc.json; reported only]")
+print(f"{subj}: review tier (recorded only) 1: {sum(r['review_tier'] == 1 for r in rows)}, "
+      f"2: {sum(r['review_tier'] == 2 for r in rows)}\n")
 if len(df):
     print(df.head(15)[["cand_id", "hemi", "region", "volume_mm3", "darkness_z", "pial_dist_mm",
                        "tube_ratio", "surface_alignment", "tram_frac", "vein_tree_mm", "score",

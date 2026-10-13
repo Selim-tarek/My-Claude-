@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Interactive cSS review: shows each suspected candidate, you agree or disagree.
-usage: review_css.py SUBJECT [--top N] [--redo]
+usage: review_css.py SUBJECT [--top N] [--redo] [--by-tier]
+  --by-tier (v4.18, opt-in): tier-1 candidates first, then tier 2 (review_tier, recorded by detect_css.py;
+  not validated). Every candidate is still shown; with --top N the cut applies to the reordered list.
   default: ALL candidates (v4). With --top N, candidates below N are recorded as NOT reviewed and
   the score is reported with that caveat (v3 silently scored them as "not cSS").
 
@@ -48,7 +50,11 @@ if os.path.exists(_qcp):
     if _qc.get("status") != "ok":
         print(f"WARNING: case QC {_qc.get('status')}: {'; '.join(_qc.get('reasons', []))} - "
               f"anatomy-based features and exclusions are less reliable for this scan")
-ids = df.cand_id.astype(int).tolist()[:top]
+if "--by-tier" in sys.argv and "review_tier" in df.columns:
+    ids = df.sort_values(["review_tier", "cand_id"], kind="stable").cand_id.astype(int).tolist()[:top]
+    print(f"order: tier 1 first ({int((df.review_tier == 1).sum())}), then tier 2 ({int((df.review_tier == 2).sum())})")
+else:
+    ids = df.cand_id.astype(int).tolist()[:top]
 calls = {}
 if not redo:
     # v4 fix: calls are matched by candidate fingerprint (centroid + volume), not by rank, so a

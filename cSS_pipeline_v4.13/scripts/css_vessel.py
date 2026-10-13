@@ -14,6 +14,11 @@ stay local and follow the vessel map (work/ID_vessels.nii.gz, the same VES map d
   local_net_mm          skeleton length of the vessel network connected to the candidate within reach
   local_branch_points   junctions in that network with >= 3 arms of >= 3 mm (one count per junction)
   local_branch_per10mm  junctions per 10 mm of network skeleton
+  end_type_max/_min     (v4.18) what each end's continuation does, for the end with the longer / shorter
+                        continuation: "stops" (< 3 mm), "runs_on" (continues without a junction),
+                        "branches" (its continuation contains a junction with >= 3 arms of >= 3 mm),
+                        "midline" (reaches the mid-sagittal zone, toward the sagittal sinus / falx, from an
+                        end that is not itself there). Two "stops" is the cSS pattern; a vein runs on.
 Tracking stays in the pial band (cortex + subarachnoid CSF): the target is veins running ALONG the surface.
 
 A cSS focus touching an unrelated vein inherits that vein's network: read these with the images."""
@@ -78,19 +83,30 @@ def _skeleton_stats(net, vox):
     return length, n_valid
 
 
-def local_tracking(cm, ves, vox, reach_mm, band=None, dark=None):
+def _end_type(cont_mm, reached, end_idx, shape, vox, midline):
+    """stops / runs_on / branches / midline for one end (see module docstring)"""
+    if cont_mm < TERMINAL_MM or not len(reached):
+        return "stops"
+    if midline is not None and not midline[tuple(end_idx)] and midline[tuple(reached.T)].any():
+        return "midline"
+    m = np.zeros(shape, bool); m[tuple(reached.T)] = True; m[tuple(end_idx)] = True
+    return "branches" if _skeleton_stats(m, vox)[1] > 0 else "runs_on"
+
+
+def local_tracking(cm, ves, vox, reach_mm, band=None, dark=None, midline=None):
     """cm: candidate mask, ves: vessel mask (same box, candidate +- reach_mm), vox: voxel size (mm),
     band: where tracking may go (detect_css.py passes the pial band: cortex + CSF, not deep white matter -
     continuation INTO the WM is vessel_wm_mm's job, and WM noise otherwise fakes continuation),
     dark: dark voxels (z < -2); continuation may also run through them, so that a vein draining into a
-    dural sinus continues into it (a sinus is too wide to be a Hessian 'tube' at sigma <= 1.6 mm)"""
+    dural sinus continues into it (a sinus is too wide to be a Hessian 'tube' at sigma <= 1.6 mm),
+    midline: mid-sagittal zone (same box), for end_type midline"""
     path_ok = ves | dark if dark is not None else ves.copy()
     if band is not None:
         ves = ves & band; path_ok &= band
     vox = np.asarray(vox, float)
     nan = dict(cand_geodesic_mm=np.nan, local_cont_max_mm=np.nan, local_cont_min_mm=np.nan,
                local_cont_total_mm=np.nan, terminal_ends=np.nan, local_net_mm=np.nan,
-               local_branch_points=np.nan, local_branch_per10mm=np.nan)
+               local_branch_points=np.nan, local_branch_per10mm=np.nan, end_type_max="", end_type_min="")
     ci = np.argwhere(cm)
     if len(ci) < 3:
         return nan
@@ -112,22 +128,25 @@ def local_tracking(cm, ves, vox, reach_mm, band=None, dark=None):
     dpath = da[path]
     # ---- forward continuation from each end through vessel voxels only (candidate voxels excluded)
     nodes_v = np.argwhere(path_ok & ~cm)
-    cont = []
+    cont, etype = [], []
     m_ = min(TANGENT_MM, L / 2)
     back_a = path[min(np.searchsorted(dpath, m_), len(path) - 1)]
     back_b = path[max(np.searchsorted(dpath, L - m_, side="right") - 1, 0)]
     for end, back in ((a, back_a), (b, back_b)):
         pe = ci[end] * vox; t = pe - ci[back] * vox
         if np.linalg.norm(t) < 1e-6 or not len(nodes_v):
-            cont.append(0.0); continue
+            cont.append(0.0); etype.append("stops"); continue
         t /= np.linalg.norm(t)
         rel = nodes_v * vox - pe; dist = np.linalg.norm(rel, axis=1)
         fwd = (dist <= reach_mm) & ((rel @ t >= np.cos(np.radians(CONE_DEG)) * dist) | (dist <= 2.0 * vox.max()))
         if not fwd.any():
-            cont.append(0.0); continue
+            cont.append(0.0); etype.append("stops"); continue
         idx = np.vstack([ci[end][None], nodes_v[fwd]])
         dd = dijkstra(_graph(idx, cm.shape, vox), indices=0, limit=reach_mm)
-        cont.append(float(np.max(dd[np.isfinite(dd)])))
+        c_ = float(np.max(dd[np.isfinite(dd)])); cont.append(c_)
+        etype.append(_end_type(c_, idx[1:][np.isfinite(dd[1:])], ci[end], cm.shape, vox, midline))
+    order = np.argsort(cont)[::-1]
+    out.update(end_type_max=etype[order[0]], end_type_min=etype[order[1]])
     out.update(local_cont_max_mm=round(max(cont), 1), local_cont_min_mm=round(min(cont), 1),
                local_cont_total_mm=round(sum(cont), 1),
                terminal_ends=int(sum(c < TERMINAL_MM for c in cont)))

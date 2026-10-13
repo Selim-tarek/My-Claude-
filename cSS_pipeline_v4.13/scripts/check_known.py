@@ -18,13 +18,19 @@ xp = f"{base}/review/{subj}_excluded.nii.gz"
 excl = nib.load(xp).get_fdata().astype(int) if os.path.exists(xp) else np.zeros_like(cand)
 xr = pd.read_csv(f"{base}/review/{subj}_excluded.csv").set_index("excl_id")["reason"] \
     if os.path.exists(f"{base}/review/{subj}_excluded.csv") else pd.Series(dtype=str)
+cd = pd.read_csv(f"{base}/review/{subj}_candidates.csv").set_index("cand_id")
+def info(v):     # v4.18 recorded-only extras: review tier and what the ends do
+    if v not in cd.index or "review_tier" not in cd.columns: return f"#{v}"
+    r = cd.loc[v]; t = f"#{v} (tier {int(r.review_tier)}"
+    t += f": {r.tier_reason}" if isinstance(r.tier_reason, str) and r.tier_reason else ""
+    return t + f"; ends {r.end_type_max}/{r.end_type_min})" if isinstance(r.end_type_max, str) else t + ")"
 if old.shape != cand.shape: sys.exit("grids differ - re-import the same SWI")
 kept = 0
 for i in [int(x) for x in arg("--ids").split(",") if x.strip()]:
     m = ndi.binary_dilation(old == i, iterations=2)
     c = sorted(set(np.unique(cand[m])) - {0}); x = sorted(set(np.unique(excl[m])) - {0})
     if c: kept += 1
-    msg = (f"kept as candidate {', '.join('#' + str(v) for v in c)}" if c else "") + \
+    msg = (f"kept as candidate {', '.join(info(v) for v in c)}" if c else "") + \
           ("; " if c and x else "") + ("; ".join(f"EXCLUDED ({xr.get(v, '?')})" for v in x) if x else "")
     print(f"known lesion #{i}: {msg or 'NOT DETECTED'}")
 print(f"{subj}: {kept} of {len(arg('--ids').split(','))} known lesions still shown for review")
