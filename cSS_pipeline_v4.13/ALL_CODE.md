@@ -367,13 +367,19 @@ xp = f"{base}/review/{subj}_excluded.nii.gz"
 excl = nib.load(xp).get_fdata().astype(int) if os.path.exists(xp) else np.zeros_like(cand)
 xr = pd.read_csv(f"{base}/review/{subj}_excluded.csv").set_index("excl_id")["reason"] \
     if os.path.exists(f"{base}/review/{subj}_excluded.csv") else pd.Series(dtype=str)
+cd = pd.read_csv(f"{base}/review/{subj}_candidates.csv").set_index("cand_id")
+def info(v):     # v4.18 recorded-only extras: review tier and what the ends do
+    if v not in cd.index or "review_tier" not in cd.columns: return f"#{v}"
+    r = cd.loc[v]; t = f"#{v} (tier {int(r.review_tier)}"
+    t += f": {r.tier_reason}" if isinstance(r.tier_reason, str) and r.tier_reason else ""
+    return t + f"; ends {r.end_type_max}/{r.end_type_min})" if isinstance(r.end_type_max, str) else t + ")"
 if old.shape != cand.shape: sys.exit("grids differ - re-import the same SWI")
 kept = 0
 for i in [int(x) for x in arg("--ids").split(",") if x.strip()]:
     m = ndi.binary_dilation(old == i, iterations=2)
     c = sorted(set(np.unique(cand[m])) - {0}); x = sorted(set(np.unique(excl[m])) - {0})
     if c: kept += 1
-    msg = (f"kept as candidate {', '.join('#' + str(v) for v in c)}" if c else "") + \
+    msg = (f"kept as candidate {', '.join(info(v) for v in c)}" if c else "") + \
           ("; " if c and x else "") + ("; ".join(f"EXCLUDED ({xr.get(v, '?')})" for v in x) if x else "")
     print(f"known lesion #{i}: {msg or 'NOT DETECTED'}")
 print(f"{subj}: {kept} of {len(arg('--ids').split(','))} known lesions still shown for review")
@@ -988,6 +994,11 @@ stay local and follow the vessel map (work/ID_vessels.nii.gz, the same VES map d
   local_net_mm          skeleton length of the vessel network connected to the candidate within reach
   local_branch_points   junctions in that network with >= 3 arms of >= 3 mm (one count per junction)
   local_branch_per10mm  junctions per 10 mm of network skeleton
+  end_type_max/_min     (v4.18) what each end's continuation does, for the end with the longer / shorter
+                        continuation: "stops" (< 3 mm), "runs_on" (continues without a junction),
+                        "branches" (its continuation contains a junction with >= 3 arms of >= 3 mm),
+                        "midline" (reaches the mid-sagittal zone, toward the sagittal sinus / falx, from an
+                        end that is not itself there). Two "stops" is the cSS pattern; a vein runs on.
 Tracking stays in the pial band (cortex + subarachnoid CSF): the target is veins running ALONG the surface.
 
 A cSS focus touching an unrelated vein inherits that vein's network: read these with the images."""
@@ -1052,19 +1063,30 @@ def _skeleton_stats(net, vox):
     return length, n_valid
 
 
-def local_tracking(cm, ves, vox, reach_mm, band=None, dark=None):
+def _end_type(cont_mm, reached, end_idx, shape, vox, midline):
+    """stops / runs_on / branches / midline for one end (see module docstring)"""
+    if cont_mm < TERMINAL_MM or not len(reached):
+        return "stops"
+    if midline is not None and not midline[tuple(end_idx)] and midline[tuple(reached.T)].any():
+        return "midline"
+    m = np.zeros(shape, bool); m[tuple(reached.T)] = True; m[tuple(end_idx)] = True
+    return "branches" if _skeleton_stats(m, vox)[1] > 0 else "runs_on"
+
+
+def local_tracking(cm, ves, vox, reach_mm, band=None, dark=None, midline=None):
     """cm: candidate mask, ves: vessel mask (same box, candidate +- reach_mm), vox: voxel size (mm),
     band: where tracking may go (detect_css.py passes the pial band: cortex + CSF, not deep white matter -
     continuation INTO the WM is vessel_wm_mm's job, and WM noise otherwise fakes continuation),
     dark: dark voxels (z < -2); continuation may also run through them, so that a vein draining into a
-    dural sinus continues into it (a sinus is too wide to be a Hessian 'tube' at sigma <= 1.6 mm)"""
+    dural sinus continues into it (a sinus is too wide to be a Hessian 'tube' at sigma <= 1.6 mm),
+    midline: mid-sagittal zone (same box), for end_type midline"""
     path_ok = ves | dark if dark is not None else ves.copy()
     if band is not None:
         ves = ves & band; path_ok &= band
     vox = np.asarray(vox, float)
     nan = dict(cand_geodesic_mm=np.nan, local_cont_max_mm=np.nan, local_cont_min_mm=np.nan,
                local_cont_total_mm=np.nan, terminal_ends=np.nan, local_net_mm=np.nan,
-               local_branch_points=np.nan, local_branch_per10mm=np.nan)
+               local_branch_points=np.nan, local_branch_per10mm=np.nan, end_type_max="", end_type_min="")
     ci = np.argwhere(cm)
     if len(ci) < 3:
         return nan
@@ -1086,22 +1108,25 @@ def local_tracking(cm, ves, vox, reach_mm, band=None, dark=None):
     dpath = da[path]
     # ---- forward continuation from each end through vessel voxels only (candidate voxels excluded)
     nodes_v = np.argwhere(path_ok & ~cm)
-    cont = []
+    cont, etype = [], []
     m_ = min(TANGENT_MM, L / 2)
     back_a = path[min(np.searchsorted(dpath, m_), len(path) - 1)]
     back_b = path[max(np.searchsorted(dpath, L - m_, side="right") - 1, 0)]
     for end, back in ((a, back_a), (b, back_b)):
         pe = ci[end] * vox; t = pe - ci[back] * vox
         if np.linalg.norm(t) < 1e-6 or not len(nodes_v):
-            cont.append(0.0); continue
+            cont.append(0.0); etype.append("stops"); continue
         t /= np.linalg.norm(t)
         rel = nodes_v * vox - pe; dist = np.linalg.norm(rel, axis=1)
         fwd = (dist <= reach_mm) & ((rel @ t >= np.cos(np.radians(CONE_DEG)) * dist) | (dist <= 2.0 * vox.max()))
         if not fwd.any():
-            cont.append(0.0); continue
+            cont.append(0.0); etype.append("stops"); continue
         idx = np.vstack([ci[end][None], nodes_v[fwd]])
         dd = dijkstra(_graph(idx, cm.shape, vox), indices=0, limit=reach_mm)
-        cont.append(float(np.max(dd[np.isfinite(dd)])))
+        c_ = float(np.max(dd[np.isfinite(dd)])); cont.append(c_)
+        etype.append(_end_type(c_, idx[1:][np.isfinite(dd[1:])], ci[end], cm.shape, vox, midline))
+    order = np.argsort(cont)[::-1]
+    out.update(end_type_max=etype[order[0]], end_type_min=etype[order[1]])
     out.update(local_cont_max_mm=round(max(cont), 1), local_cont_min_mm=round(min(cont), 1),
                local_cont_total_mm=round(sum(cont), 1),
                terminal_ends=int(sum(c < TERMINAL_MM for c in cont)))
@@ -1215,6 +1240,7 @@ HESS_SIGMAS_MM = (0.8, 1.6)            # 3-D shape analysis scales
 # v4.11 vessel exclusion: a dark line that continues as a TUBE beyond the cortical band (into the white
 # matter = medullary / transcortical vein) and runs perpendicular to the cortex is a vessel, not cSS
 VES_WM_MM = 15.0        # how deep under the cortical band the vessel map reaches
+MIDLINE_END_MM = 4.0    # v4.18 end_type "midline": continuation reaches within this of the mid-sagittal plane
 VES_REACH_MM = 20.0     # vessel continuation is measured up to this distance (bounded: vein_tree saturated)
 OFF_CTX_FRAC, OFF_PIAL_MM = 0.30, 0.30   # v4.12 "off the cortex" exclusion (T1 anatomy only)
 VES_WM_Z = -3.0         # WM vessel voxels: this many SD darker than the white matter
@@ -1676,7 +1702,7 @@ for p in regionprops(lab, spacing=vox):
     del dcm, gl_, reach, rwm
     # v4.16 bounded local vein tracking along the vessel map (recorded only, css_vessel.py)
     vt = css_vessel.local_tracking(cm, VES[vb], vox, VES_REACH_MM, band=(pial_sd[vb] > -PIAL_IN_MM) & ~np.isin(seg[vb], WM + DEEP),
-                                   dark=DARKS[vb])
+                                   dark=DARKS[vb], midline=dmid[vb] < MIDLINE_END_MM)
     mdark = mirror_dark(pts)
     # microbleed vs cSS (Charidimou, AJNR 2016;37:E43): microbleeds are small (generally 2-5 mm),
     # round/oval and at least half surrounded by brain parenchyma - cSS lies on the surface / in CSF
@@ -1766,7 +1792,8 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "vessel_ext_mm", "vessel_wm_mm", "vessel_run_mm", "axis_normal", "score_v3", "score_v4", "accept",
         "qc_status", "rule_version", "n_pieces",                                   # v4.14, appended
         "cand_geodesic_mm", "local_cont_max_mm", "local_cont_min_mm", "local_cont_total_mm",  # v4.16,
-        "terminal_ends", "local_net_mm", "local_branch_points", "local_branch_per10mm"]       # recorded only
+        "terminal_ends", "local_net_mm", "local_branch_points", "local_branch_per10mm",       # recorded only
+        "end_type_max", "end_type_min", "review_tier", "tier_reason"]                        # v4.18, recorded only
 
 # ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason
 # height is measured within the CEREBRUM (cortex + cerebral WM), so 0 = floor of the temporal/frontal
@@ -1823,6 +1850,13 @@ for r in rows:
     r["qc_status"] = QC["status"]
     r["rule_version"] = rv or RULESET
     r["exclusion_confidence"] = ("low" if QC["status"] != "ok" else RULE_CONF[rv.split("@")[0]]) if rv else ""
+    # v4.18 review tier (audit S3), RECORDED ONLY: 2 = the candidate's own flags point to a mimic. Nothing is hidden
+    # and the order is unchanged (review_css.py --by-tier is opt-in). Case QC is not used: it applies to every
+    # candidate of the case alike. Not validated - check the known lesions' tiers before ordering by it.
+    why = [n for n, f in (("artifact zone", r["artifact_zone"]), ("vein-like", r["vein_like"]),
+                          ("microbleed-like", r["cmb_like"]),
+                          ("vein evidence > cSS evidence", r["vein_evidence"] > r["css_evidence"])) if f]
+    r["review_tier"] = 2 if why else 1; r["tier_reason"] = "; ".join(why)
 excluded = [r for r in rows if r["_excl"]]
 rows = [r for r in rows if not r["_excl"]]
 os.makedirs(f"{base}/review", exist_ok=True)
@@ -1877,7 +1911,9 @@ print(f"{subj}: {n_raw} raw components -> {len(df)} candidates "
 if fl_note: print(f"{subj}: {fl_note}")
 print(f"{subj}: QC {QC['status']}" + (f" ({'; '.join(QC['reasons'])})" if QC["reasons"] else "")
       + f", label shift {QC['label_shift_mm']} mm, edge bias {QC['edge_bias_mm']} mm, scatter {QC['edge_scatter_mm']} mm, {len(dropped)} components below the generation gates"
-      + " [review/" + subj + "_qc.json; reported only]\n")
+      + " [review/" + subj + "_qc.json; reported only]")
+print(f"{subj}: review tier (recorded only) 1: {sum(r['review_tier'] == 1 for r in rows)}, "
+      f"2: {sum(r['review_tier'] == 2 for r in rows)}\n")
 if len(df):
     print(df.head(15)[["cand_id", "hemi", "region", "volume_mm3", "darkness_z", "pial_dist_mm",
                        "tube_ratio", "surface_alignment", "tram_frac", "vein_tree_mm", "score",
@@ -2647,7 +2683,9 @@ subprocess.run([sys.executable, f"{base}/scripts/score_css.py", subj], check=Tru
 ```python
 #!/usr/bin/env python3
 """Interactive cSS review: shows each suspected candidate, you agree or disagree.
-usage: review_css.py SUBJECT [--top N] [--redo]
+usage: review_css.py SUBJECT [--top N] [--redo] [--by-tier]
+  --by-tier (v4.18, opt-in): tier-1 candidates first, then tier 2 (review_tier, recorded by detect_css.py;
+  not validated). Every candidate is still shown; with --top N the cut applies to the reordered list.
   default: ALL candidates (v4). With --top N, candidates below N are recorded as NOT reviewed and
   the score is reported with that caveat (v3 silently scored them as "not cSS").
 
@@ -2695,7 +2733,11 @@ if os.path.exists(_qcp):
     if _qc.get("status") != "ok":
         print(f"WARNING: case QC {_qc.get('status')}: {'; '.join(_qc.get('reasons', []))} - "
               f"anatomy-based features and exclusions are less reliable for this scan")
-ids = df.cand_id.astype(int).tolist()[:top]
+if "--by-tier" in sys.argv and "review_tier" in df.columns:
+    ids = df.sort_values(["review_tier", "cand_id"], kind="stable").cand_id.astype(int).tolist()[:top]
+    print(f"order: tier 1 first ({int((df.review_tier == 1).sum())}), then tier 2 ({int((df.review_tier == 2).sum())})")
+else:
+    ids = df.cand_id.astype(int).tolist()[:top]
 calls = {}
 if not redo:
     # v4 fix: calls are matched by candidate fingerprint (centroid + volume), not by rank, so a
@@ -3860,5 +3902,26 @@ for s, inpl in (("PH1", 0.5), ("PH3", 0.8)):
 m = pd.concat([pd.read_csv(f"{B}/review/PH3_{k}.csv") for k in ("candidates", "excluded")]).mirror_dark_frac
 if ((m < 0) | (m > 1)).any(): fail("mirror_dark_frac outside [0, 1]")
 print(f"   PH3 mirror_dark_frac: {int(m.isna().sum())} NaN, median {m.median():.2f}")
+# 4. end types on synthetic geometry: a 10 mm candidate whose far end stops / runs on / forks / reaches the midline
+import css_vessel as cv, nibabel as nib
+sh = (80, 60, 8); vx = (0.5, 0.5, 0.5)
+for kind in ("stops", "runs_on", "branches", "midline"):
+    cm = np.zeros(sh, bool); ves = np.zeros(sh, bool); mid = np.zeros(sh, bool)
+    cm[10:30, 30, 4] = True
+    if kind != "stops": ves[31:60, 30, 4] = True
+    if kind == "branches":
+        for k in range(16): ves[45 + k, 30 + k, 4] = True; ves[45 + k, 30 - k, 4] = True
+    if kind == "midline": mid[55:] = True
+    o = cv.local_tracking(cm, ves, vx, 20.0, dark=np.zeros(sh, bool), midline=mid)
+    if (o["end_type_max"], o["end_type_min"]) != (kind, "stops"): fail(f"end type {kind}: {o['end_type_max']}/{o['end_type_min']}")
+print("   end types: stops / runs_on / branches / midline recovered on synthetic geometry")
+
+# 5. review tier on PH3 (phantom only - not a validation): every true lesion in tier 1
+c = pd.read_csv(f"{B}/review/PH3_candidates.csv")
+C = nib.load(f"{B}/review/PH3_candidates.nii.gz").get_fdata().astype(int)
+t = nib.load(f"{B}/work/PH3_truth.nii.gz").get_fdata() > 0
+c["truth"] = [t[C == i].mean() > 0.2 for i in c.cand_id]
+if (c[c.truth].review_tier != 1).any(): fail(f"PH3 true lesion in tier 2: {c[c.truth & (c.review_tier != 1)].cand_id.tolist()}")
+print(f"   PH3 tiers: lesions {c[c.truth].review_tier.tolist()}, others {c[~c.truth].review_tier.tolist()}")
 print("RESULT v4.18 OK")
 ```

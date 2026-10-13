@@ -257,6 +257,11 @@ Output (`review/P012_score.json`, one row per patient in `review/css_scores.csv`
 
 A `WARNING: N candidates were not reviewed` line means the score is a lower bound.
 
+`--by-tier` (v4.18, optional) shows tier-1 candidates first. `review_tier` = 2 when the candidate's own flags
+point to a mimic (artifact zone, vein-like, microbleed-like, vein evidence > cSS evidence; reason in
+`tier_reason`). It is NOT validated: every candidate is still shown and must still be read, and expert sheets
+keep their own order. Use it only after `check_known.py` shows the known lesions in tier 1.
+
 ---
 
 ## 10. Per-case bookkeeping
@@ -265,7 +270,8 @@ A `WARNING: N candidates were not reviewed` line means the score is a lower boun
 python ~/css_project/scripts/feature_report.py                       # features vs calls, all reviewed cases
 python ~/css_project/scripts/surface_overlay.py P012 --color-by expert   # expert calls on the surface
 ```
-After **any** detector change, re-check the known lesions of earlier cases:
+After **any** detector change, re-check the known lesions of earlier cases (v4.18 also prints each kept
+lesion's review tier and what its two ends do: stops / runs_on / branches / midline):
 ```zsh
 python ~/css_project/scripts/check_known.py P006 --old ~/css_project/review/v3/P006_candidates.nii.gz --ids 3,4,5,13,18,19
 ```

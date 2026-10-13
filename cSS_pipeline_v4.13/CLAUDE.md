@@ -255,6 +255,12 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   restores 8/8 exactly. Fine-resolution scans (P010-like) are where the change matters most -> real-data gate:
   P006 check_known 6/6, P010 + P011 counts and stress test, both settings. docs/METHODS_scope_and_protocol.md
   drafts the phenotype-scope / protocol text (scope option a/b is a PI decision).
+- v4.18 recorded-only additions: review_tier / tier_reason (2 = artifact zone, vein-like, cmb-like or vein_evidence >
+  css_evidence; case QC not used), review_css --by-tier opt-in; css_vessel end_type_max/_min = stops / runs_on /
+  branches / midline (continuation reaches dmid < 4 mm from an end that is not there). check_known prints both.
+  Phantoms only: PH3/PH6 true lesions all tier 1, all non-lesions tier 2; PH6 surface veins run_on (19.8-20 mm),
+  none typed branches/midline (the 20 mm reach stops before the sinus); unit geometry recovers all four types.
+  Untested on real data: cSS next to veins may read runs_on/branches (cf. vein_tree 255 on known P006 cSS).
 
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
