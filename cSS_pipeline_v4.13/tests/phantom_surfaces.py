@@ -34,6 +34,12 @@ for h, hm in (("lh", hemi_l), ("rh", ~hemi_l)):
     vw = v @ aff[:3, :3].T + aff[:3, 3]                            # SWI scanner RAS
     vt = vw @ swi_to_tkr[:3, :3].T + swi_to_tkr[:3, 3]             # tkRAS of the fake T1
     write_geometry(f"{B}/subjects/{name}/surf/{h}.pial", vt, f.astype(np.int32))
+    # v4.18 morphometry with known values: sulc = height below the top of the hemisphere (mm) - its median,
+    # curv = 0.1, thickness = 2.5 mm (check_surfvein.py recomputes the expected medians)
+    sulc = (vw[:, 2].max() - vw[:, 2]); sulc = sulc - np.median(sulc)
+    nib.freesurfer.write_morph_data(f"{B}/subjects/{name}/surf/{h}.sulc", sulc.astype(np.float32))
+    nib.freesurfer.write_morph_data(f"{B}/subjects/{name}/surf/{h}.curv", np.full(len(vt), 0.1, np.float32))
+    nib.freesurfer.write_morph_data(f"{B}/subjects/{name}/surf/{h}.thickness", np.full(len(vt), 2.5, np.float32))
     ijk = np.clip(np.round(v).astype(int), 0, np.array(a2.shape) - 1)
     codes = a2[tuple(n_[tuple(ijk.T)] for n_ in near_a2)]
     uc = np.unique(codes)

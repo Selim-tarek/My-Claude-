@@ -285,6 +285,7 @@ python ~/css_project/scripts/check_known.py P006 --old ~/css_project/review/v3/P
 | Reader agreement on candidate calls | `consensus.py --readers expertA,expertB` (step 7.5) |
 | Inter-/intra-rater agreement of two scoring sessions (incl. weighted kappa of the 0–4 score) | `cp -R review review_session1` (later `review_session2`); `agreement.py --a review_session1 --b review_session2 --col surface_mm2 --plot results/agreement.png` |
 | Volume / surface vs multifocality (ceiling effect) | `agreement.py --vs-score ~/css_project/review --col surface_mm2 --plot results/vs_score.png` |
+| Robustness of one scan to protocol / image changes (v4.18; ~8 detection runs) | `robustness.py P006 --old review/v3/P006_candidates.nii.gz --ids 3,4,5,13,18,19` |
 | Synthetic stress test on cSS-negative hosts (dev only) | `stress_test.py --hosts P011 --depths 0.6,0.45,0.3 --seeds 1,2 --surface-veins 2 --tag v416` |
 | Shortlist exclusion rules (dev only, hypothesis generation) | `rule_test.py --pos P006 --old ... --ids ... --neg P011` |
 

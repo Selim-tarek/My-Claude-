@@ -268,6 +268,15 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
 - Considered, not adopted now: LupoLab adaptive Frangi (protected .p files, erodes 17 px of brain surface, MRA-
   validated); brain-MRI-SSL encoders (2-D ResNet-50, no SWI in pretraining, no licence file) -> optional
   embed_candidates.py for the ranking model once ~10 expert-labelled patients exist.
+- v4.18 from the external-repo review (BrainIAC perturbation test, ABIDE FreeSurfer morphometry): robustness.py
+  re-runs detection on perturbed copies (ID_R<k>, removed afterwards): copy, in-plane / slice resampling (anti-
+  aliased), bias field, noise, gamma, 1-voxel image shift against the labels; reports candidates, found again (centroid
+  <= 5 mm, one-to-one), new, Spearman of matched scores, top-k overlap, known lesions kept -> review/ID_robustness.csv.
+  PH3 (phantom): gamma 1 identical to the copy; known 6/6 kept under every perturbation; a 1-voxel shift raised
+  candidates 7 -> 25 and slice 2 mm 7 -> 12 (registration / protocol sensitivity to check on P006).
+  surface_features adds surf_sulc, surf_curv, surf_thickness_mm, surf_sulcal_frac (?h.sulc/curv/thickness).
+  Repos reviewed and not adopted: nnU-Net cSS detector (needs many outlined positives), BrainIAC model (96^3,
+  research-only licence), tumour toolkits (100-voxel cleanup, active contours, slice-level splits).
 
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.

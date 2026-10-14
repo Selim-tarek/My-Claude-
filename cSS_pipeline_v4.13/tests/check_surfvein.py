@@ -71,4 +71,9 @@ print(f"surface features: direction from labels OK, RAS2RAS / VOX2VOX LTA / expl
       f"normal distance cSS {fc.surf_normal_dist_mm.max():.2f} mm max, surface vein {fv.surf_normal_dist_mm.min():.2f} mm min")
 print(F[["kind", "list", "surf_normal_dist_mm", "surf_pieces", "surf_band_continuity", "geo_length_mm",
          "surf_dark_cont_mm", "surf_exit_paths"]][F.kind != "other"].to_string(index=False))
+# v4.18 morphometry: constant curv / thickness read back exactly; sulc is lower (deeper) for the low sinus
+if not (np.allclose(F1.surf_curv.dropna(), 0.1, atol=1e-3) and np.allclose(F1.surf_thickness_mm.dropna(), 2.5, atol=1e-3)):
+    fail("surface morphometry (curv / thickness) not read back")
+if F1.surf_sulc.isna().all() or not F1.surf_sulcal_frac.between(0, 1).all(): fail("surf_sulc / surf_sulcal_frac missing")
+print(f"morphometry: curv 0.1 / thickness 2.5 mm read back; surf_sulc range {F1.surf_sulc.min():.1f}..{F1.surf_sulc.max():.1f}")
 print("RESULT surfvein OK")

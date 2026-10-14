@@ -58,4 +58,16 @@ cols = ["cand_radius_med_mm", "cand_radius_p95_mm", "cand_radius_cv", "net_radiu
 if not set(cols) <= set(c.columns): fail("radius columns missing")
 print(f"   radius: bands {got} mm; PH3 lesions median {c[c.truth].cand_radius_med_mm.median():.2f} mm, "
       f"others {c[~c.truth].cand_radius_med_mm.median():.2f} mm (phantom only)")
+# 7. robustness.py: an identity perturbation (gamma 1) must reproduce the copy exactly; copies are cleaned up
+import subprocess, glob
+r = subprocess.run([sys.executable, f"{B}/scripts/robustness.py", "PH3", "--perturb", "copy,gamma:1.0,shift:0",
+                    "--old", f"{B}/work/PH3_truth.nii.gz", "--ids", "1,2,3,4,5,6"], capture_output=True, text=True)
+if r.returncode: print(r.stdout[-800:], r.stderr[-1500:]); fail("robustness.py failed")
+rb = pd.read_csv(f"{B}/review/PH3_robustness.csv").set_index("perturbation")
+g, c0 = rb.loc["gamma:1"], rb.loc["copy"]
+if not (g.candidates == c0.candidates == g.found_again and g.new == 0 and g.spearman == 1.0):
+    fail(f"identity perturbation changed the result: {g.to_dict()}")
+if glob.glob(f"{B}/*/PH3_R*"): fail("robustness copies not cleaned up")
+print(f"   robustness: copy {int(c0.candidates)} candidates, gamma 1 identical; 1-voxel shift -> {int(rb.loc['shift:0'].candidates)} "
+      f"candidates, {int(rb.loc['shift:0'].found_again)}/{int(c0.candidates)} found again (phantom)")
 print("RESULT v4.18 OK")

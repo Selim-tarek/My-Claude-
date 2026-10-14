@@ -26,6 +26,10 @@ Features (each object is projected onto its nearest pial vertices, <= --near-mm 
                          vertex dark = work/ID_dark.nii.gz within 1.5 mm along its normal
   surf_exit_paths        separate dark paths leaving the projection 3-8 mm out: 0 = isolated band,
                          1 = runs on one way, 2 = runs through, >= 3 = branching
+  surf_sulc / surf_curv   (v4.18) median FreeSurfer ?h.sulc (sulcal depth; > 0 = in a sulcus, < 0 = on a gyral
+  surf_thickness_mm       crown) and ?h.curv (mean curvature) and ?h.thickness over the projected vertices;
+  surf_sulcal_frac        share of projected vertices with sulc > 0. NaN when the file is missing. Both cSS and
+                          sulcal veins sit in sulci: context for the ranking model, not a separator on its own.
 This replaces the uploaded geodesic_vein_features.py prototype: there, "continuation" was measured on the
 bare mesh (always the search limit, 25 mm) and "branches" were mesh vertices with >= 6 neighbours."""
 import sys, os, json, argparse, numpy as np, nibabel as nib, pandas as pd
@@ -73,6 +77,14 @@ class Surf:
             dk[ok] |= dark[tuple(ijk[ok].T)]
         self.dark = dk
 S = {"L": Surf(*surfs["lh"]), "R": Surf(*surfs["rh"])}
+# v4.18 per-vertex morphometry from recon-all (read only if present)
+for h_, k_ in (("lh", "L"), ("rh", "R")):
+    S[k_].morph = {}
+    for m_ in ("sulc", "curv", "thickness"):
+        p_ = f"{sdir}/{subj}/surf/{h_}.{m_}"
+        if os.path.exists(p_):
+            v_ = nib.freesurfer.read_morph_data(p_)
+            if len(v_) == len(S[k_].V): S[k_].morph[m_] = v_
 
 def sub_dist(sf, nodes, src, limit=np.inf):
     """Dijkstra inside the vertex subset `nodes` (bool) from `src` (indices into the full mesh)"""
@@ -92,6 +104,10 @@ def features(m, hemi):
     off = np.einsum("ij,ij->i", Pw[ok] - sf.V[vi[ok]], sf.N[vi[ok]])
     r["surf_normal_dist_mm"] = round(float(np.median(off)), 2)
     r["surf_normal_iqr_mm"] = round(float(np.subtract(*np.percentile(off, [75, 25]))), 2)
+    vv = np.unique(vi[ok]); mo = getattr(sf, "morph", {})
+    for m_, col in (("sulc", "surf_sulc"), ("curv", "surf_curv"), ("thickness", "surf_thickness_mm")):
+        r[col] = round(float(np.median(mo[m_][vv])), 3) if m_ in mo else np.nan
+    r["surf_sulcal_frac"] = round(float((mo["sulc"][vv] > 0).mean()), 2) if "sulc" in mo else np.nan
     P = np.zeros(len(sf.V), bool); P[vi[ok]] = True
     P1 = P.copy(); P1[sf.G[np.nonzero(P)[0]].indices] = True          # + 1 ring: voxel grid vs mesh spacing
     r["surf_area_mm2"] = round(float(sf.area[P1].sum()), 1)
@@ -135,7 +151,7 @@ for lst, idc in (("candidate", "cand_id"), ("excluded", "excl_id")):
                          **features(m, str(rr.get("hemi", "")))))
 cols = ["list", "obj_id"] + FP + ["surf_valid", "surf_normal_dist_mm", "surf_normal_iqr_mm", "surf_area_mm2",
         "surf_pieces", "surf_band_continuity", "geo_length_mm", "geo_euclid_ratio", "surf_dark_cont_mm",
-        "surf_exit_paths"]
+        "surf_exit_paths", "surf_sulc", "surf_curv", "surf_thickness_mm", "surf_sulcal_frac"]
 pd.DataFrame(rows, columns=cols).to_csv(f"{base}/review/{subj}_surface_features.csv", index=False)
 json.dump(dict(subject=subj, transform_source=tsrc, label_agreement_mm=checks, tkras_to_swi=T.tolist(),
                near_mm=a.near_mm, reach_mm=a.reach_mm, note="recorded only; not validated"),
