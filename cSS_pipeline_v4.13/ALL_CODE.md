@@ -134,6 +134,11 @@ mri_synthstrip -i $B/data/${S}_t1.nii.gz -o $W/${S}_t1_brain.nii.gz > /dev/null 
 A2=""
 if [ $RECON -eq 1 ] || [ -f $SUBJECTS_DIR/$S/mri/aparc.a2009s+aseg.mgz ]; then
   if [ ! -f $SUBJECTS_DIR/$S/mri/aparc.a2009s+aseg.mgz ]; then
+    # v4.18: an unfinished subject folder (earlier failed run) blocks recon-all -i; keep it, renamed
+    if [ -d $SUBJECTS_DIR/$S ]; then
+      mv $SUBJECTS_DIR/$S $SUBJECTS_DIR/${S}_failed_$(date +%Y%m%d_%H%M%S)
+      echo "    moved the unfinished $SUBJECTS_DIR/$S aside (${S}_failed_<date>)"
+    fi
     echo "[b] recon-all -all (1-3 h; log: $W/${S}_recon.log)"
     recon-all -s $S -i $B/data/${S}_t1.nii.gz -all -threads 8 > $W/${S}_recon.log 2>&1 \
       || die "recon-all failed (see $W/${S}_recon.log)"
@@ -4340,7 +4345,9 @@ print(f"{os.path.basename(a.out)}: SWI = magnitude x phase-mask^{a.power}; phase
 #   --subjects  default: the 26 volunteers aged 55-75 with GRE + 3-D FLAIR
 #   --summary   only print the summary table of finished subjects
 #   --force     re-run subjects that already finished (default: skipped, so an interrupted batch can be restarted)
-# Per subject: make_swi.py (magnitude + phase -> SWI) -> run_css.sh ID swi --t1 --flair --recon --phase
+# Per subject: make_swi.py (magnitude + phase -> SWI); mp2rage_robust.py (UNI + INV1 + INV2 -> T1 with a clean
+#   background: the noisy MP2RAGE background made recon-all fail on P201) -> run_css.sh ID swi --t1 --flair --recon
+#   --phase; if recon-all still fails: the same without --recon (SynthSeg on the T1 + mri_coreg; no surfaces)
 #   -> study_meta.py ID --split dev. IDs P201... are fixed in labels/id_map.csv (study code <-> source id).
 # Logs: logs/ID_run.log. Summary: review/lemon_summary.csv.
 # These volunteers are PRESUMED cSS-negative (community volunteers, not expert-read) - never claim more.
@@ -4348,7 +4355,7 @@ B=${CSS_BASE:-$HOME/css_project}; SC=$B/scripts
 DEFAULT="sub-010239 sub-010255 sub-010257 sub-010258 sub-010146 sub-010148 sub-010152 sub-010267 sub-010268
 sub-010272 sub-010275 sub-010276 sub-010277 sub-010278 sub-010279 sub-010280 sub-010282 sub-010283 sub-010284
 sub-010285 sub-010286 sub-010287 sub-010288 sub-010289 sub-010290 sub-010291"
-FILES="acq-mag_GRE acq-phase_GRE acq-mp2rage_T1w acq-highres_FLAIR"
+FILES="acq-mag_GRE acq-phase_GRE acq-mp2rage_T1w inv-1_mp2rage inv-2_mp2rage acq-highres_FLAIR"
 URL=https://s3.amazonaws.com/openneuro.org/ds000221
 
 if [ "$1" = "--one" ]; then                      # internal: one subject (run in parallel by xargs)
@@ -4360,10 +4367,19 @@ if [ "$1" = "--one" ]; then                      # internal: one subject (run in
   if ( echo "== $ID = $s ($(date))"
        for f in $(echo $FILES); do [ -s ${p}_${f}.nii.gz ] || { echo "ERROR: missing ${p}_${f}.nii.gz"; exit 1; }; done
        python $SC/make_swi.py ${p}_acq-mag_GRE.nii.gz ${p}_acq-phase_GRE.nii.gz $B/work/${ID}_gre_swi.nii.gz || exit 1
-       NOVIEW=1 zsh $SC/run_css.sh $ID $B/work/${ID}_gre_swi.nii.gz --t1 ${p}_acq-mp2rage_T1w.nii.gz \
-         --flair ${p}_acq-highres_FLAIR.nii.gz --recon --phase ${p}_acq-phase_GRE.nii.gz || exit 1
+       python $SC/mp2rage_robust.py ${p}_acq-mp2rage_T1w.nii.gz ${p}_inv-1_mp2rage.nii.gz ${p}_inv-2_mp2rage.nii.gz \
+         $B/work/${ID}_t1_robust.nii.gz || exit 1
+       ANAT="recon-all"
+       if ! NOVIEW=1 zsh $SC/run_css.sh $ID $B/work/${ID}_gre_swi.nii.gz --t1 $B/work/${ID}_t1_robust.nii.gz \
+              --flair ${p}_acq-highres_FLAIR.nii.gz --recon --phase ${p}_acq-phase_GRE.nii.gz; then
+         echo "== recon-all route failed for $ID - falling back to SynthSeg on the T1 (no surfaces, mri_coreg)"
+         [ -d $B/subjects/$ID ] && mv $B/subjects/$ID $B/subjects/${ID}_failed_$(date +%Y%m%d_%H%M%S)
+         ANAT="SynthSeg fallback (recon-all failed)"
+         NOVIEW=1 zsh $SC/run_css.sh $ID $B/work/${ID}_gre_swi.nii.gz --t1 $B/work/${ID}_t1_robust.nii.gz \
+           --flair ${p}_acq-highres_FLAIR.nii.gz --phase ${p}_acq-phase_GRE.nii.gz || exit 1
+       fi
        python $SC/study_meta.py $ID --split dev \
-         --note "LEMON ds000221 $s healthy volunteer: PRESUMED cSS-negative, not expert-read; GRE->SWI by make_swi.py" || exit 1
+         --note "LEMON ds000221 $s healthy volunteer: PRESUMED cSS-negative, not expert-read; GRE->SWI by make_swi.py; T1 robust MP2RAGE; anatomy $ANAT" || exit 1
        echo "== $ID done ($(date))" ) > $B/logs/${ID}_run.log 2>&1; then
     echo "OK     $ID ($s)"
   else
@@ -4774,4 +4790,103 @@ fr = pd.read_csv(f"{B}/review/evaluation_test_consensus_froc.csv")
 if not (fr.lesion_sens.is_monotonic_increasing and fr.fp_per_scan.is_monotonic_increasing): fail("FROC not monotone")
 print("   " + "\n   ".join(l for l in r.stdout.splitlines()[:6]))
 print("RESULT evaluate OK")
+```
+
+## scripts/mp2rage_robust.py
+
+```python
+#!/usr/bin/env python3
+"""MP2RAGE background clean-up before FreeSurfer (v4.18): the 'robust combination' of O'Brien et al. 2014
+(PLoS One 9:e99676) as implemented by J. Marques (RobustCombination.m), from MAGNITUDE images.
+usage: mp2rage_robust.py UNI.nii.gz INV1.nii.gz INV2.nii.gz OUT_T1.nii.gz [--lambda auto|1|5|...]
+The MP2RAGE UNI image has salt-and-pepper noise outside the head (division of two noisy signals). recon-all
+then fails to strip dura / background (LEMON P201: 'extra large defect ... dura has not been removed from
+wm.mgz', topology fixing aborted). The robust combination adds a noise term beta to the UNI formula:
+      UNI_r = (INV1 * INV2 - beta) / (INV1^2 + INV2^2 + 2 beta),   beta = lambda * mean(INV2 noise)^2
+which leaves the brain (high INV2 signal) unchanged and pushes the background to -0.5 (black). INV1's sign
+(lost in magnitude images) is recovered from UNI: INV1 = the root of UNI = INV1 INV2 / (INV1^2 + INV2^2) that
+is closer to the measured |INV1|. --lambda auto: the smallest of 1, 2, 4, 8, 16, 32 that makes the image
+border darker than 10 % of the head's median. Output is scaled to 0..4095 like a scanner UNI. Prints the
+correlation with the original UNI inside the head (should stay > 0.95)."""
+import sys, argparse, numpy as np, nibabel as nib
+from scipy import ndimage as ndi
+
+ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+ap.add_argument("uni"); ap.add_argument("inv1"); ap.add_argument("inv2"); ap.add_argument("out")
+ap.add_argument("--lambda", dest="lam", default="auto")
+a = ap.parse_args()
+iu, i1, i2 = (nib.load(p) for p in (a.uni, a.inv1, a.inv2))
+if not (iu.shape[:3] == i1.shape[:3] == i2.shape[:3]) or not (np.allclose(iu.affine, i1.affine, atol=1e-2)
+                                                             and np.allclose(iu.affine, i2.affine, atol=1e-2)):
+    sys.exit("UNI, INV1 and INV2 must be on the same grid (same MP2RAGE acquisition)")
+U = np.asarray(iu.dataobj, np.float64); A1 = np.abs(np.asarray(i1.dataobj, np.float64)); A2 = np.abs(np.asarray(i2.dataobj, np.float64))
+# UNI to [-0.5, 0.5]
+if U.max() > 1.5:
+    lo, hi = (0.0, 4095.0) if U.min() >= 0 and U.max() <= 4096 else (float(U.min()), float(U.max()))
+    u = (U - lo) / (hi - lo) - 0.5
+else:
+    u = U - 0.5 if U.min() >= 0 else U
+u = np.clip(u, -0.5, 0.5)
+# INV1 sign from UNI: u (i1^2 + i2^2) = i1 i2  ->  u i1^2 - i2 i1 + u i2^2 = 0
+with np.errstate(invalid="ignore", divide="ignore"):
+    disc = np.sqrt(np.clip(A2 ** 2 - 4 * u * u * A2 ** 2, 0, None))
+    r_pos = np.where(np.abs(u) > 1e-6, (A2 + disc) / (2 * u), 0.0)
+    r_neg = np.where(np.abs(u) > 1e-6, (A2 - disc) / (2 * u), 0.0)
+I1 = np.where(np.abs(np.abs(r_pos) - A1) < np.abs(np.abs(r_neg) - A1), r_pos, r_neg)
+I1 = np.where(np.isfinite(I1), I1, 0.0)
+# noise of INV2 from the image border (defaced / zero-filled voxels ignored)
+bd = np.zeros(A2.shape, bool); w = max(3, min(A2.shape) // 20)
+for ax in range(3):
+    sl = [slice(None)] * 3; sl[ax] = slice(0, w); bd[tuple(sl)] = True; sl[ax] = slice(-w, None); bd[tuple(sl)] = True
+noise = A2[bd & (A2 > 0)]
+noise = float(np.mean(noise)) if noise.size else float(np.percentile(A2[A2 > 0], 1))
+head = ndi.binary_fill_holes(ndi.binary_opening(A2 > 5 * noise, iterations=2))
+lab, n = ndi.label(head)
+if n: head = lab == (np.argmax(np.bincount(lab.ravel())[1:]) + 1)
+def robust(lam):
+    b = lam * noise ** 2
+    return (I1 * A2 - b) / (I1 ** 2 + A2 ** 2 + 2 * b)
+lams = [1, 2, 4, 8, 16, 32] if a.lam == "auto" else [float(a.lam)]
+for lam in lams:
+    r = robust(lam); out = np.clip((r + 0.5) * 4095, 0, 4095)
+    ok = np.median(out[bd & ~head]) < 0.1 * np.median(out[head]) if (bd & ~head).any() else True
+    if ok: break
+c = float(np.corrcoef(out[head], (u[head] + 0.5) * 4095)[0, 1])
+img = nib.Nifti1Image(out.astype(np.float32), iu.affine, iu.header); img.set_data_dtype(np.float32)
+nib.save(img, a.out)
+print(f"{a.out}: robust MP2RAGE combination, lambda {lam:g} (noise {noise:.1f}); border median "
+      f"{np.median(out[bd & ~head]) if (bd & ~head).any() else 0:.0f} vs head {np.median(out[head]):.0f}; "
+      f"correlation with the original UNI inside the head {c:.3f}" + ("" if ok else "  WARNING: background still bright"))
+if c < 0.95: print("WARNING: brain contrast changed (correlation < 0.95) - check the image before recon-all")
+```
+
+## tests/check_mp2rage.py
+
+```python
+"""v4.18 mp2rage_robust.py: synthetic MP2RAGE (signed INV1, complex noise) -> background noise removed, brain kept.
+usage: check_mp2rage.py    (scratch files in $CSS_BASE/work)"""
+import os, sys, subprocess, numpy as np, nibabel as nib
+B = os.environ["CSS_BASE"]; W = f"{B}/work"; os.makedirs(W, exist_ok=True)
+def fail(m): print("FAIL:", m); sys.exit(1)
+rng = np.random.default_rng(0); sh = (100, 110, 90)
+x, y, z = np.meshgrid(*[np.arange(n) for n in sh], indexing="ij")
+e = lambda a, b, c: ((x - 50) / a) ** 2 + ((y - 55) / b) ** 2 + ((z - 45) / c) ** 2 < 1
+head, brain, wm = e(40, 45, 38), e(32, 37, 30), e(20, 24, 18)
+i1 = np.where(head, -200.0, 0.0); i1[brain] = -80; i1[wm] = 150          # INV1 sign flips with T1
+i2 = np.where(head, 600.0, 0.0); i2[brain] = 700; i2[wm] = 800
+n = lambda v: v + rng.normal(0, 20, sh) + 1j * rng.normal(0, 20, sh)
+c1, c2 = n(i1), n(i2)
+uni = np.real(c1 * np.conj(c2)) / (np.abs(c1) ** 2 + np.abs(c2) ** 2)
+for name, v in (("uni", np.round((uni + 0.5) * 4095)), ("inv1", np.abs(c1)), ("inv2", np.abs(c2))):
+    nib.save(nib.Nifti1Image(v.astype(np.float32), np.eye(4)), f"{W}/MP2_{name}.nii.gz")
+r = subprocess.run([sys.executable, f"{B}/scripts/mp2rage_robust.py", *(f"{W}/MP2_{k}.nii.gz" for k in ("uni", "inv1", "inv2")),
+                    f"{W}/MP2_robust.nii.gz"], capture_output=True, text=True)
+if r.returncode: print(r.stdout, r.stderr); fail("mp2rage_robust failed")
+U = nib.load(f"{W}/MP2_uni.nii.gz").get_fdata(); O = nib.load(f"{W}/MP2_robust.nii.gz").get_fdata()
+bg_before, bg_after = U[~head].std(), O[~head].std()
+cor = float(np.corrcoef(U[brain], O[brain])[0, 1])
+if not (bg_after < 0.4 * bg_before and cor > 0.95 and abs(np.median(O[wm]) - np.median(U[wm])) < 0.05 * np.median(U[wm])):
+    fail(f"background SD {bg_before:.0f} -> {bg_after:.0f}, brain correlation {cor:.3f}")
+print(f"   robust MP2RAGE: background SD {bg_before:.0f} -> {bg_after:.0f}, brain correlation {cor:.3f}, white matter unchanged")
+print("RESULT mp2rage OK")
 ```

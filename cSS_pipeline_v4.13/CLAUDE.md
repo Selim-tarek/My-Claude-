@@ -294,6 +294,12 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   + deduped missed outlines; FP excludes uncertain; top-k; FROC; patient bootstrap CIs; --by strata; default split
   test); tests/check_evaluate.py with hand-computed answers. AIBL SWI (CSIRO 50304, 370 older adults, 3 T Siemens,
   0.93x0.93x1.75 mm, TE 20 ms) named as possible SWI control source - title says synthetic microbleeds: verify first.
+- LEMON P201 on the user's Mac: make_swi sign -1 (median -0.28 rad, 72 %, n=17771; 0.4 % voxels darkened 42 %);
+  recon-all on the MP2RAGE UNI aborted in topology fixing ('extra large defect', dura in wm.mgz: noisy background).
+  v4.18 fix: mp2rage_robust.py (O'Brien 2014 robust combination from magnitude UNI+INV1+INV2, INV1 sign from UNI,
+  lambda auto 1-32 until the border is < 10 % of the head; check_mp2rage: background SD 1182 -> 255, brain r 1.000);
+  run_lemon downloads inv-1/inv-2, uses the robust T1, falls back to SynthSeg-on-T1 + mri_coreg if recon-all still
+  fails; prep_anat moves an unfinished subjects/ID aside (ID_failed_<date>) before recon-all -i.
 
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.

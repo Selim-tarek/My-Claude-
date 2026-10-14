@@ -62,17 +62,27 @@ echo "== 6a2. the imported copy data/ID_t1.nii.gz can be given as --t1"
 : > $T/log; $SH $T/base/scripts/prep_anat.sh P2 --t1 $T/base/data/P2_t1.nii.gz > /dev/null
 [ -s $T/base/data/P2_t1.nii.gz ] || fail "re-import of data/P2_t1.nii.gz lost the file"; seen "mri_coreg --mov"
 echo "== 6c. v4.18 run_lemon.sh: GRE -> SWI -> recon route for each subject, fixed P2xx ids, re-run keeps ids"
-for x in sub-1 sub-2; do mkdir -p $T/lemon/$x/ses-01/anat; for f in acq-mag_GRE acq-phase_GRE acq-mp2rage_T1w acq-highres_FLAIR; do
+for x in sub-1 sub-2 sub-3; do mkdir -p $T/lemon/$x/ses-01/anat; for f in acq-mag_GRE acq-phase_GRE acq-mp2rage_T1w inv-1_mp2rage inv-2_mp2rage acq-highres_FLAIR; do
   echo $f > $T/lemon/$x/ses-01/anat/${x}_ses-01_${f}.nii.gz; done; done
-printf '#!/bin/bash\necho "python $(basename $1) ${*:2}" >> $STUBLOG\n[ "$(basename $1)" = make_swi.py ] && echo swi > $4\nexit 0\n' > $T/bin/python
+printf '#!/bin/bash\necho "python $(basename $1) ${*:2}" >> $STUBLOG\n[ "$(basename $1)" = make_swi.py ] && echo swi > $4\n[ "$(basename $1)" = mp2rage_robust.py ] && echo t1 > $5\nexit 0\n' > $T/bin/python
 : > $T/log; $SH $T/base/scripts/run_lemon.sh $T/lemon --subjects "sub-1 sub-2" --parallel 2 > $T/lemon.out 2>&1
 grep -q "OK     P201 (sub-1)" $T/lemon.out && grep -q "OK     P202 (sub-2)" $T/lemon.out || { cat $T/lemon.out; fail "run_lemon did not finish both subjects"; }
 seen "make_swi.py $T/lemon/sub-1/ses-01/anat/sub-1_ses-01_acq-mag_GRE.nii.gz"; seen "recon-all -s P202"
 seen "bbregister --s P201 --mov $T/base/data/P201_swi.nii"; seen "python detect_css.py P202"; seen "python study_meta.py P201 --split dev"
+seen "python mp2rage_robust.py $T/lemon/sub-1/ses-01/anat/sub-1_ses-01_acq-mp2rage_T1w.nii.gz"
+seen "mri_convert $T/base/work/P201_t1_robust.nii.gz"
+echo "== 6c2. recon-all fails (P203): unfinished subject folder moved aside, SynthSeg fallback on the T1, still OK"
+mkdir -p $T/base/subjects/P203/mri; mv $T/bin/recon-all $T/bin/recon-all.ok
+printf '#!/bin/bash\necho "recon-all $*" >> $STUBLOG\nexit 1\n' > $T/bin/recon-all; chmod +x $T/bin/recon-all
+: > $T/log; $SH $T/base/scripts/run_lemon.sh $T/lemon --subjects "sub-3" > $T/lemon3.out 2>&1
+rm $T/bin/recon-all; mv $T/bin/recon-all.ok $T/bin/recon-all
+grep -q "OK     P203 (sub-3)" $T/lemon3.out || { cat $T/lemon3.out; cat $T/base/logs/P203_run.log; fail "fallback did not finish P203"; }
+grep -q "falling back to SynthSeg" $T/base/logs/P203_run.log || fail "no fallback message"
+seen "mri_synthseg --i $T/base/data/P203_t1.nii.gz"; ls -d $T/base/subjects/P203_failed_* > /dev/null 2>&1 || fail "unfinished folder not kept aside"
 : > $T/log; $SH $T/base/scripts/run_lemon.sh $T/lemon --subjects "sub-2 sub-1" --summary > /dev/null 2>&1
 $SH $T/base/scripts/run_lemon.sh $T/lemon --subjects "sub-1" > $T/lemon2.out 2>&1
 grep -q "SKIP   P201" $T/lemon2.out || { cat $T/lemon2.out; fail "finished subject not skipped on restart"; }
-[ "$(grep -c ds000221 $T/base/labels/id_map.csv)" = 2 ] && grep -q "P201,ds000221,sub-1" $T/base/labels/id_map.csv || fail "id map changed on re-run"
+[ "$(grep -c ds000221 $T/base/labels/id_map.csv)" = 3 ] && grep -q "P201,ds000221,sub-1" $T/base/labels/id_map.csv || fail "id map changed on re-run"
 printf '#!/bin/bash\necho "python $(basename $1) ${*:2}" >> $STUBLOG\n' > $T/bin/python; chmod +x $T/bin/python
 echo "== 6b. --phase is imported for the reviewer"
 echo ph > $T/ph.nii; : > $T/log; $SH $T/base/scripts/run_css.sh P4 $T/swi.nii --phase $T/ph.nii > /dev/null

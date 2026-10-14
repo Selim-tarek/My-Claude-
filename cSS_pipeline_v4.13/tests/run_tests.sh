@@ -129,6 +129,8 @@ echo "== v4.17 Stage 2: recon-all CSF labels, Hessian at the mask edge, E8 needs
 python $ROOT/tests/check_stage2.py | tee $T/stage2.log | grep -v "^RESULT"
 python $ROOT/tests/check_v418.py | tee $T/v418.log | grep -v "^RESULT"
 python $ROOT/tests/check_make_swi.py | tee $T/mkswi.log | grep -v "^RESULT"
+python $ROOT/tests/check_mp2rage.py | tee $T/mp2.log | grep -v "^RESULT"
+grep -q "^RESULT mp2rage OK" $T/mp2.log || { echo "FAIL: mp2rage"; exit 1; }
 python $ROOT/tests/check_physics.py | tee $T/physics.log | grep -v "^RESULT"
 python $ROOT/tests/check_evaluate.py | tee $T/evaluate.log | grep -v "^RESULT"
 grep -q "^RESULT evaluate OK" $T/evaluate.log || { echo "FAIL: evaluate"; exit 1; }

@@ -45,6 +45,11 @@ mri_synthstrip -i $B/data/${S}_t1.nii.gz -o $W/${S}_t1_brain.nii.gz > /dev/null 
 A2=""
 if [ $RECON -eq 1 ] || [ -f $SUBJECTS_DIR/$S/mri/aparc.a2009s+aseg.mgz ]; then
   if [ ! -f $SUBJECTS_DIR/$S/mri/aparc.a2009s+aseg.mgz ]; then
+    # v4.18: an unfinished subject folder (earlier failed run) blocks recon-all -i; keep it, renamed
+    if [ -d $SUBJECTS_DIR/$S ]; then
+      mv $SUBJECTS_DIR/$S $SUBJECTS_DIR/${S}_failed_$(date +%Y%m%d_%H%M%S)
+      echo "    moved the unfinished $SUBJECTS_DIR/$S aside (${S}_failed_<date>)"
+    fi
     echo "[b] recon-all -all (1-3 h; log: $W/${S}_recon.log)"
     recon-all -s $S -i $B/data/${S}_t1.nii.gz -all -threads 8 > $W/${S}_recon.log 2>&1 \
       || die "recon-all failed (see $W/${S}_recon.log)"

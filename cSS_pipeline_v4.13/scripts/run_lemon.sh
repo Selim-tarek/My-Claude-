@@ -8,7 +8,9 @@
 #   --subjects  default: the 26 volunteers aged 55-75 with GRE + 3-D FLAIR
 #   --summary   only print the summary table of finished subjects
 #   --force     re-run subjects that already finished (default: skipped, so an interrupted batch can be restarted)
-# Per subject: make_swi.py (magnitude + phase -> SWI) -> run_css.sh ID swi --t1 --flair --recon --phase
+# Per subject: make_swi.py (magnitude + phase -> SWI); mp2rage_robust.py (UNI + INV1 + INV2 -> T1 with a clean
+#   background: the noisy MP2RAGE background made recon-all fail on P201) -> run_css.sh ID swi --t1 --flair --recon
+#   --phase; if recon-all still fails: the same without --recon (SynthSeg on the T1 + mri_coreg; no surfaces)
 #   -> study_meta.py ID --split dev. IDs P201... are fixed in labels/id_map.csv (study code <-> source id).
 # Logs: logs/ID_run.log. Summary: review/lemon_summary.csv.
 # These volunteers are PRESUMED cSS-negative (community volunteers, not expert-read) - never claim more.
@@ -16,7 +18,7 @@ B=${CSS_BASE:-$HOME/css_project}; SC=$B/scripts
 DEFAULT="sub-010239 sub-010255 sub-010257 sub-010258 sub-010146 sub-010148 sub-010152 sub-010267 sub-010268
 sub-010272 sub-010275 sub-010276 sub-010277 sub-010278 sub-010279 sub-010280 sub-010282 sub-010283 sub-010284
 sub-010285 sub-010286 sub-010287 sub-010288 sub-010289 sub-010290 sub-010291"
-FILES="acq-mag_GRE acq-phase_GRE acq-mp2rage_T1w acq-highres_FLAIR"
+FILES="acq-mag_GRE acq-phase_GRE acq-mp2rage_T1w inv-1_mp2rage inv-2_mp2rage acq-highres_FLAIR"
 URL=https://s3.amazonaws.com/openneuro.org/ds000221
 
 if [ "$1" = "--one" ]; then                      # internal: one subject (run in parallel by xargs)
@@ -28,10 +30,19 @@ if [ "$1" = "--one" ]; then                      # internal: one subject (run in
   if ( echo "== $ID = $s ($(date))"
        for f in $(echo $FILES); do [ -s ${p}_${f}.nii.gz ] || { echo "ERROR: missing ${p}_${f}.nii.gz"; exit 1; }; done
        python $SC/make_swi.py ${p}_acq-mag_GRE.nii.gz ${p}_acq-phase_GRE.nii.gz $B/work/${ID}_gre_swi.nii.gz || exit 1
-       NOVIEW=1 zsh $SC/run_css.sh $ID $B/work/${ID}_gre_swi.nii.gz --t1 ${p}_acq-mp2rage_T1w.nii.gz \
-         --flair ${p}_acq-highres_FLAIR.nii.gz --recon --phase ${p}_acq-phase_GRE.nii.gz || exit 1
+       python $SC/mp2rage_robust.py ${p}_acq-mp2rage_T1w.nii.gz ${p}_inv-1_mp2rage.nii.gz ${p}_inv-2_mp2rage.nii.gz \
+         $B/work/${ID}_t1_robust.nii.gz || exit 1
+       ANAT="recon-all"
+       if ! NOVIEW=1 zsh $SC/run_css.sh $ID $B/work/${ID}_gre_swi.nii.gz --t1 $B/work/${ID}_t1_robust.nii.gz \
+              --flair ${p}_acq-highres_FLAIR.nii.gz --recon --phase ${p}_acq-phase_GRE.nii.gz; then
+         echo "== recon-all route failed for $ID - falling back to SynthSeg on the T1 (no surfaces, mri_coreg)"
+         [ -d $B/subjects/$ID ] && mv $B/subjects/$ID $B/subjects/${ID}_failed_$(date +%Y%m%d_%H%M%S)
+         ANAT="SynthSeg fallback (recon-all failed)"
+         NOVIEW=1 zsh $SC/run_css.sh $ID $B/work/${ID}_gre_swi.nii.gz --t1 $B/work/${ID}_t1_robust.nii.gz \
+           --flair ${p}_acq-highres_FLAIR.nii.gz --phase ${p}_acq-phase_GRE.nii.gz || exit 1
+       fi
        python $SC/study_meta.py $ID --split dev \
-         --note "LEMON ds000221 $s healthy volunteer: PRESUMED cSS-negative, not expert-read; GRE->SWI by make_swi.py" || exit 1
+         --note "LEMON ds000221 $s healthy volunteer: PRESUMED cSS-negative, not expert-read; GRE->SWI by make_swi.py; T1 robust MP2RAGE; anatomy $ANAT" || exit 1
        echo "== $ID done ($(date))" ) > $B/logs/${ID}_run.log 2>&1; then
     echo "OK     $ID ($s)"
   else
