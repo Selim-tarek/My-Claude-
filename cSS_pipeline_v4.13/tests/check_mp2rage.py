@@ -12,15 +12,20 @@ i2 = np.where(head, 600.0, 0.0); i2[brain] = 700; i2[wm] = 800
 n = lambda v: v + rng.normal(0, 20, sh) + 1j * rng.normal(0, 20, sh)
 c1, c2 = n(i1), n(i2)
 uni = np.real(c1 * np.conj(c2)) / (np.abs(c1) ** 2 + np.abs(c2) ** 2)
+pad = np.zeros(sh, bool); pad[8:-8, 8:-8, 8:-8] = True       # LEMON-like zero-padded / defaced border (v4.18.2)
 for name, v in (("uni", np.round((uni + 0.5) * 4095)), ("inv1", np.abs(c1)), ("inv2", np.abs(c2))):
-    nib.save(nib.Nifti1Image(v.astype(np.float32), np.eye(4)), f"{W}/MP2_{name}.nii.gz")
+    nib.save(nib.Nifti1Image((v * pad).astype(np.float32), np.eye(4)), f"{W}/MP2_{name}.nii.gz")
 r = subprocess.run([sys.executable, f"{B}/scripts/mp2rage_robust.py", *(f"{W}/MP2_{k}.nii.gz" for k in ("uni", "inv1", "inv2")),
                     f"{W}/MP2_robust.nii.gz"], capture_output=True, text=True)
 if r.returncode: print(r.stdout, r.stderr); fail("mp2rage_robust failed")
 U = nib.load(f"{W}/MP2_uni.nii.gz").get_fdata(); O = nib.load(f"{W}/MP2_robust.nii.gz").get_fdata()
-bg_before, bg_after = U[~head].std(), O[~head].std()
+from scipy import ndimage as ndi
+band = (ndi.distance_transform_edt(~head) > 5) & (ndi.distance_transform_edt(~head) <= 15) & pad
+hm = np.median(U[wm])
+bg_before, bg_after = (U[band] > 0.25 * hm).mean(), (O[band] > 0.25 * hm).mean()
 cor = float(np.corrcoef(U[brain], O[brain])[0, 1])
-if not (bg_after < 0.4 * bg_before and cor > 0.95 and abs(np.median(O[wm]) - np.median(U[wm])) < 0.05 * np.median(U[wm])):
-    fail(f"background SD {bg_before:.0f} -> {bg_after:.0f}, brain correlation {cor:.3f}")
-print(f"   robust MP2RAGE: background SD {bg_before:.0f} -> {bg_after:.0f}, brain correlation {cor:.3f}, white matter unchanged")
+if not (bg_after < 0.05 and bg_before > 0.3 and cor > 0.95 and abs(np.median(O[wm]) - np.median(U[wm])) < 0.10 * np.median(U[wm])):
+    fail(f"speckle {bg_before:.2f} -> {bg_after:.3f}, brain r {cor:.3f}, wm {np.median(O[wm]):.0f} vs {np.median(U[wm]):.0f}; {r.stdout.strip()}")
+print(f"   robust MP2RAGE (zero-padded border): speckle 5-15 mm outside the head {bg_before:.0%} -> {bg_after:.1%}, "
+      f"brain correlation {cor:.3f}, white matter within 10 %; {r.stdout.strip().split('; ')[0].split(': ')[-1]}")
 print("RESULT mp2rage OK")

@@ -300,6 +300,11 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   lambda auto 1-32 until the border is < 10 % of the head; check_mp2rage: background SD 1182 -> 255, brain r 1.000);
   run_lemon downloads inv-1/inv-2, uses the robust T1, falls back to SynthSeg-on-T1 + mri_coreg if recon-all still
   fails; prep_anat moves an unfinished subjects/ID aside (ID_failed_<date>) before recon-all -i.
+- v4.18.2: on P201 the border-based noise estimate read 10 (LEMON images are zero-padded/defaced at the border) ->
+  lambda 1, speckle left around skull and neck (user's freeview). Noise now from INV2 in the band 5-20 mm outside an
+  Otsu head mask; lambda 1..128 until < 5 % of that band is brighter than 25 % of the brain, stopping before the brain
+  correlation drops below 0.95. check_mp2rage now zero-pads the border: old version lambda 1, speckle 83 -> 81 %; new
+  lambda 32, 83 -> 0 %, brain r 1.000, WM median -6 %.
 
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.

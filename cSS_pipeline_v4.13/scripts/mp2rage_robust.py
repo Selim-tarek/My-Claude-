@@ -8,8 +8,8 @@ wm.mgz', topology fixing aborted). The robust combination adds a noise term beta
       UNI_r = (INV1 * INV2 - beta) / (INV1^2 + INV2^2 + 2 beta),   beta = lambda * mean(INV2 noise)^2
 which leaves the brain (high INV2 signal) unchanged and pushes the background to -0.5 (black). INV1's sign
 (lost in magnitude images) is recovered from UNI: INV1 = the root of UNI = INV1 INV2 / (INV1^2 + INV2^2) that
-is closer to the measured |INV1|. --lambda auto: the smallest of 1, 2, 4, 8, 16, 32 that makes the image
-border darker than 10 % of the head's median. Output is scaled to 0..4095 like a scanner UNI. Prints the
+is closer to the measured |INV1|. --lambda auto (v4.18.2): the smallest of 1, 2, 4 ... 128 that leaves < 5 % of the
+background band 5-20 mm outside the head brighter than 25 % of the brain, without changing the brain (r >= 0.95). Output is scaled to 0..4095 like a scanner UNI. Prints the
 correlation with the original UNI inside the head (should stay > 0.95)."""
 import sys, argparse, numpy as np, nibabel as nib
 from scipy import ndimage as ndi
@@ -37,27 +37,43 @@ with np.errstate(invalid="ignore", divide="ignore"):
     r_neg = np.where(np.abs(u) > 1e-6, (A2 - disc) / (2 * u), 0.0)
 I1 = np.where(np.abs(np.abs(r_pos) - A1) < np.abs(np.abs(r_neg) - A1), r_pos, r_neg)
 I1 = np.where(np.isfinite(I1), I1, 0.0)
-# noise of INV2 from the image border (defaced / zero-filled voxels ignored)
-bd = np.zeros(A2.shape, bool); w = max(3, min(A2.shape) // 20)
-for ax in range(3):
-    sl = [slice(None)] * 3; sl[ax] = slice(0, w); bd[tuple(sl)] = True; sl[ax] = slice(-w, None); bd[tuple(sl)] = True
-noise = A2[bd & (A2 > 0)]
-noise = float(np.mean(noise)) if noise.size else float(np.percentile(A2[A2 > 0], 1))
-head = ndi.binary_fill_holes(ndi.binary_opening(A2 > 5 * noise, iterations=2))
+# v4.18.2: noise from the background band 5-20 mm OUTSIDE the head (INV2 has a clean head outline). The image border
+# is often zero-padded / defaced (LEMON: border noise 10 -> lambda 1, speckle left around the skull and neck).
+from skimage.filters import threshold_otsu
+vox = np.array(iu.header.get_zooms()[:3], float)
+pos = A2[A2 > 0]
+head = A2 > threshold_otsu(pos) * 0.5
+head = ndi.binary_closing(head, iterations=2); head = ndi.binary_fill_holes(head)
 lab, n = ndi.label(head)
 if n: head = lab == (np.argmax(np.bincount(lab.ravel())[1:]) + 1)
+d_out = ndi.distance_transform_edt(~head, sampling=vox)
+shell = (d_out > 5) & (d_out <= 20) & (A2 > 0)
+if shell.sum() < 1000:                                    # tiny field of view: fall back to everything outside
+    shell = (d_out > 2) & (A2 > 0)
+noise = float(np.mean(A2[shell])) if shell.any() else float(np.percentile(pos, 1))
+core = ndi.binary_erosion(head, iterations=max(1, int(round(10 / vox.min()))))
+if not core.any(): core = head
+ref = (u[core] + 0.5) * 4095
 def robust(lam):
     b = lam * noise ** 2
     return (I1 * A2 - b) / (I1 ** 2 + A2 ** 2 + 2 * b)
-lams = [1, 2, 4, 8, 16, 32] if a.lam == "auto" else [float(a.lam)]
+lams = [1, 2, 4, 8, 16, 32, 64, 128] if a.lam == "auto" else [float(a.lam)]
+prev = None
 for lam in lams:
-    r = robust(lam); out = np.clip((r + 0.5) * 4095, 0, 4095)
-    ok = np.median(out[bd & ~head]) < 0.1 * np.median(out[head]) if (bd & ~head).any() else True
+    out_l = np.clip((robust(lam) + 0.5) * 4095, 0, 4095)
+    hm = float(np.median(out_l[core]))
+    speck = float((out_l[shell] > 0.25 * hm).mean()) if shell.any() else 0.0
+    rc = float(np.corrcoef(out_l[core], ref)[0, 1])
+    if rc < 0.95 and prev is not None:                    # brain contrast would change: keep the previous lambda
+        lam, out, speck, ok = prev; break
+    out, ok = out_l, speck < 0.05
+    prev = (lam, out_l, speck, ok)
     if ok: break
-c = float(np.corrcoef(out[head], (u[head] + 0.5) * 4095)[0, 1])
+bd = shell
+c = float(np.corrcoef(out[core], ref)[0, 1])
 img = nib.Nifti1Image(out.astype(np.float32), iu.affine, iu.header); img.set_data_dtype(np.float32)
 nib.save(img, a.out)
-print(f"{a.out}: robust MP2RAGE combination, lambda {lam:g} (noise {noise:.1f}); border median "
-      f"{np.median(out[bd & ~head]) if (bd & ~head).any() else 0:.0f} vs head {np.median(out[head]):.0f}; "
-      f"correlation with the original UNI inside the head {c:.3f}" + ("" if ok else "  WARNING: background still bright"))
+print(f"{a.out}: robust MP2RAGE combination, lambda {lam:g} (background noise {noise:.1f}, band 5-20 mm outside the head); "
+      f"speckle left in that band {speck:.1%} (was {float(((u[shell] + 0.5) * 4095 > 0.25 * np.median(ref)).mean()):.1%}); "
+      f"correlation with the original UNI inside the brain {c:.3f}" + ("" if ok else "  WARNING: background still speckled"))
 if c < 0.95: print("WARNING: brain contrast changed (correlation < 0.95) - check the image before recon-all")
