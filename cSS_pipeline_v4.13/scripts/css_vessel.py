@@ -14,6 +14,8 @@ stay local and follow the vessel map (work/ID_vessels.nii.gz, the same VES map d
   local_net_mm          skeleton length of the vessel network connected to the candidate within reach
   local_branch_points   junctions in that network with >= 3 arms of >= 3 mm (one count per junction)
   local_branch_per10mm  junctions per 10 mm of network skeleton
+  net_radius_med/p95_mm (v4.18) half-width of the connected vessel network (excluding the candidate), measured on
+                        the dark + vessel voxels at the network's centre line (css_common.radius_profile)
   end_type_max/_min     (v4.18) what each end's continuation does, for the end with the longer / shorter
                         continuation: "stops" (< 3 mm), "runs_on" (continues without a junction),
                         "branches" (its continuation contains a junction with >= 3 arms of >= 3 mm),
@@ -27,6 +29,7 @@ from scipy import ndimage as ndi
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import dijkstra, connected_components
 from skimage.morphology import skeletonize
+from css_common import radius_profile
 
 CONE_DEG = 60.0          # forward cone at each end (veins curve; cSS has no forward continuation at all)
 TANGENT_MM = 3.0         # end tangent from the point this far back along the candidate
@@ -106,7 +109,8 @@ def local_tracking(cm, ves, vox, reach_mm, band=None, dark=None, midline=None):
     vox = np.asarray(vox, float)
     nan = dict(cand_geodesic_mm=np.nan, local_cont_max_mm=np.nan, local_cont_min_mm=np.nan,
                local_cont_total_mm=np.nan, terminal_ends=np.nan, local_net_mm=np.nan,
-               local_branch_points=np.nan, local_branch_per10mm=np.nan, end_type_max="", end_type_min="")
+               local_branch_points=np.nan, local_branch_per10mm=np.nan, end_type_max="", end_type_min="",
+               net_radius_med_mm=np.nan, net_radius_p95_mm=np.nan)
     ci = np.argwhere(cm)
     if len(ci) < 3:
         return nan
@@ -160,4 +164,8 @@ def local_tracking(cm, ves, vox, reach_mm, band=None, dark=None, midline=None):
         length, nb = _skeleton_stats(net | cm, vox)
         out.update(local_net_mm=round(length, 1), local_branch_points=int(nb),
                    local_branch_per10mm=round(10.0 * nb / max(length, 1.0), 2))
+        rn = radius_profile(path_ok | ves, vox, sample=net & ~cm)
+        if len(rn):
+            out.update(net_radius_med_mm=round(float(np.median(rn)), 2),
+                       net_radius_p95_mm=round(float(np.percentile(rn, 95)), 2))
     return out

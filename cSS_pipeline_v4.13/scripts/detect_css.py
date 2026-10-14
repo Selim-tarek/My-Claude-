@@ -61,7 +61,7 @@ from skimage.filters import sato
 from skimage.measure import regionprops
 from skimage.morphology import skeletonize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, load_lut, fresh, sha256, update_manifest, environment_record, skeleton_length
+from css_common import base as _base, load_lut, fresh, sha256, update_manifest, environment_record, skeleton_length, radius_profile
 import css_qc, css_vessel
 
 subj   = sys.argv[1]
@@ -556,6 +556,11 @@ for p in regionprops(lab, spacing=vox):
     vt = css_vessel.local_tracking(cm, VES[vb], vox, VES_REACH_MM, band=(pial_sd[vb] > -PIAL_IN_MM) & ~np.isin(seg[vb], WM + DEEP),
                                    dark=DARKS[vb], midline=dmid[vb] < MIDLINE_END_MM)
     mdark = mirror_dark(pts)
+    # v4.18 thickness (recorded only): half-width along the candidate's centre line
+    rp = radius_profile(mm, vox)
+    rad = dict(cand_radius_med_mm=round(float(np.median(rp)), 2) if len(rp) else np.nan,
+               cand_radius_p95_mm=round(float(np.percentile(rp, 95)), 2) if len(rp) else np.nan,
+               cand_radius_cv=round(float(np.std(rp) / np.mean(rp)), 2) if len(rp) and np.mean(rp) > 0 else np.nan)
     # microbleed vs cSS (Charidimou, AJNR 2016;37:E43): microbleeds are small (generally 2-5 mm),
     # round/oval and at least half surrounded by brain parenchyma - cSS lies on the surface / in CSF
     shell1 = ndi.binary_dilation(mm, structure=s3) & ~mm
@@ -629,7 +634,7 @@ for p in regionprops(lab, spacing=vox):
                      basal_frac=round(float((d_basal[pad][mm] <= BASAL_MM).mean()), 2),
                      vessel_ext_mm=round(ves_ext, 1), vessel_wm_mm=round(ves_wm, 1), vessel_run_mm=round(min(ves_run, VES_REACH_MM), 1), axis_normal=round(axn, 2),
                      score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label,
-                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1, **vt))
+                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1, **vt, **rad))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
 cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongation",
@@ -645,7 +650,8 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "qc_status", "rule_version", "n_pieces",                                   # v4.14, appended
         "cand_geodesic_mm", "local_cont_max_mm", "local_cont_min_mm", "local_cont_total_mm",  # v4.16,
         "terminal_ends", "local_net_mm", "local_branch_points", "local_branch_per10mm",       # recorded only
-        "end_type_max", "end_type_min", "review_tier", "tier_reason"]                        # v4.18, recorded only
+        "end_type_max", "end_type_min", "review_tier", "tier_reason",
+        "cand_radius_med_mm", "cand_radius_p95_mm", "cand_radius_cv", "net_radius_med_mm", "net_radius_p95_mm"]                        # v4.18, recorded only
 
 # ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason
 # height is measured within the CEREBRUM (cortex + cerebral WM), so 0 = floor of the temporal/frontal

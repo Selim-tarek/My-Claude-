@@ -47,4 +47,15 @@ t = nib.load(f"{B}/work/PH3_truth.nii.gz").get_fdata() > 0
 c["truth"] = [t[C == i].mean() > 0.2 for i in c.cand_id]
 if (c[c.truth].review_tier != 1).any(): fail(f"PH3 true lesion in tier 2: {c[c.truth & (c.review_tier != 1)].cand_id.tolist()}")
 print(f"   PH3 tiers: lesions {c[c.truth].review_tier.tolist()}, others {c[~c.truth].review_tier.tolist()}")
+# 6. radius (half-width) along the centre line: 1 / 3 / 5-voxel-wide bands at 0.5 mm -> 0.25 / 0.75 / 1.25 mm
+from css_common import radius_profile
+got = []
+for w in (1, 3, 5):
+    m = np.zeros((40, 40, 3), bool); m[10:30, 20 - w // 2: 21 + w // 2, 1] = True
+    got.append(float(np.median(radius_profile(m, (0.5, 0.5, 1.0)))))
+if not np.allclose(got, [0.25, 0.75, 1.25]): fail(f"radius profile {got}")
+cols = ["cand_radius_med_mm", "cand_radius_p95_mm", "cand_radius_cv", "net_radius_med_mm", "net_radius_p95_mm"]
+if not set(cols) <= set(c.columns): fail("radius columns missing")
+print(f"   radius: bands {got} mm; PH3 lesions median {c[c.truth].cand_radius_med_mm.median():.2f} mm, "
+      f"others {c[~c.truth].cand_radius_med_mm.median():.2f} mm (phantom only)")
 print("RESULT v4.18 OK")

@@ -210,3 +210,22 @@ def skeleton_length(sk, vox):
     d1 = sk[1:, 1:] & sk[:-1, :-1] & ~(sk[1:, :-1] | sk[:-1, 1:])
     d2 = sk[1:, :-1] & sk[:-1, 1:] & ~(sk[1:, 1:] | sk[:-1, :-1])
     return float(h.sum() * a + v.sum() * b + (d1.sum() + d2.sum()) * d)
+
+
+def radius_profile(mask, vox, sample=None):
+    """v4.18: in-plane half-width (mm) along the 2-D centre line, slice by slice (cf. Avadiappan 2020: radius from a
+    Euclidean distance transform). Distance to the nearest outside voxel (sampling vox[0], vox[1]) minus half a voxel,
+    read on the skeleton of `sample` (default: the mask itself), so a 1-voxel-wide line reads half a voxel and a
+    3-voxel-wide band 1.5 voxels. Quantised at the in-plane voxel size: compare only within one protocol."""
+    import numpy as np
+    from scipy import ndimage as ndi
+    from skimage.morphology import skeletonize
+    mask = np.asarray(mask, bool); sample = mask if sample is None else np.asarray(sample, bool)
+    half = 0.5 * float(np.sqrt(vox[0] * vox[1])); out = []
+    for k in range(mask.shape[2]):
+        s = sample[:, :, k] & mask[:, :, k]
+        if not s.any(): continue
+        e = ndi.distance_transform_edt(np.pad(mask[:, :, k], 1), sampling=vox[:2])[1:-1, 1:-1]
+        sk = skeletonize(s) & s
+        out.append(e[sk] - half)
+    return np.concatenate(out) if out else np.zeros(0)

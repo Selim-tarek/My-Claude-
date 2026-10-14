@@ -261,6 +261,13 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   Phantoms only: PH3/PH6 true lesions all tier 1, all non-lesions tier 2; PH6 surface veins run_on (19.8-20 mm),
   none typed branches/midline (the 20 mm reach stops before the sinus); unit geometry recovers all four types.
   Untested on real data: cSS next to veins may read runs_on/branches (cf. vein_tree 255 on known P006 cSS).
+- v4.18 radius (recorded only; idea from Avadiappan 2020 adaptive Frangi, their MATLAB p-code not used): css_common
+  .radius_profile = in-plane half-width at the 2-D centre line (EDT - half a voxel; 1/3/5-voxel bands -> 0.25/0.75/1.25
+  mm at 0.5 mm). Columns cand_radius_med/p95_mm, cand_radius_cv; net_radius_med/p95_mm on the dark + vessel voxels
+  of the connected network. PH3: lesions median 0.73 mm vs others 0.40 mm (phantom only). Quantised at the voxel size.
+- Considered, not adopted now: LupoLab adaptive Frangi (protected .p files, erodes 17 px of brain surface, MRA-
+  validated); brain-MRI-SSL encoders (2-D ResNet-50, no SWI in pretraining, no licence file) -> optional
+  embed_candidates.py for the ranking model once ~10 expert-labelled patients exist.
 
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
