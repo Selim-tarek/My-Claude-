@@ -4339,6 +4339,7 @@ print(f"{os.path.basename(a.out)}: SWI = magnitude x phase-mask^{a.power}; phase
 #   --parallel  subjects processed at the same time (default 2; recon-all uses 8 threads each)
 #   --subjects  default: the 26 volunteers aged 55-75 with GRE + 3-D FLAIR
 #   --summary   only print the summary table of finished subjects
+#   --force     re-run subjects that already finished (default: skipped, so an interrupted batch can be restarted)
 # Per subject: make_swi.py (magnitude + phase -> SWI) -> run_css.sh ID swi --t1 --flair --recon --phase
 #   -> study_meta.py ID --split dev. IDs P201... are fixed in labels/id_map.csv (study code <-> source id).
 # Logs: logs/ID_run.log. Summary: review/lemon_summary.csv.
@@ -4353,6 +4354,9 @@ URL=https://s3.amazonaws.com/openneuro.org/ds000221
 if [ "$1" = "--one" ]; then                      # internal: one subject (run in parallel by xargs)
   s=$2; ID=$3; p=$LEMON_DIR/$s/ses-01/anat/${s}_ses-01
   mkdir -p $B/work $B/logs
+  if [ -z "$LEMON_FORCE" ] && grep -q "^== $ID done" $B/logs/${ID}_run.log 2>/dev/null; then
+    echo "SKIP   $ID ($s) - already done (--force to re-run)"; exit 0
+  fi
   if ( echo "== $ID = $s ($(date))"
        for f in $(echo $FILES); do [ -s ${p}_${f}.nii.gz ] || { echo "ERROR: missing ${p}_${f}.nii.gz"; exit 1; }; done
        python $SC/make_swi.py ${p}_acq-mag_GRE.nii.gz ${p}_acq-phase_GRE.nii.gz $B/work/${ID}_gre_swi.nii.gz || exit 1
@@ -4369,7 +4373,7 @@ if [ "$1" = "--one" ]; then                      # internal: one subject (run in
 fi
 
 L=$1; shift 2>/dev/null || true
-[ -n "$L" ] || { sed -n 2,13p $0; exit 1; }
+[ -n "$L" ] || { sed -n 2,14p $0; exit 1; }
 DL=0; PAR=2; SUBS=$DEFAULT; SUMONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -4377,6 +4381,7 @@ while [ $# -gt 0 ]; do
     --parallel) PAR=$2; shift 2;;
     --subjects) SUBS=$2; shift 2;;
     --summary) SUMONLY=1; shift;;
+    --force) export LEMON_FORCE=1; shift;;
     *) echo "run_lemon.sh: unknown option $1"; exit 1;;
   esac
 done

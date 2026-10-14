@@ -70,6 +70,8 @@ grep -q "OK     P201 (sub-1)" $T/lemon.out && grep -q "OK     P202 (sub-2)" $T/l
 seen "make_swi.py $T/lemon/sub-1/ses-01/anat/sub-1_ses-01_acq-mag_GRE.nii.gz"; seen "recon-all -s P202"
 seen "bbregister --s P201 --mov $T/base/data/P201_swi.nii"; seen "python detect_css.py P202"; seen "python study_meta.py P201 --split dev"
 : > $T/log; $SH $T/base/scripts/run_lemon.sh $T/lemon --subjects "sub-2 sub-1" --summary > /dev/null 2>&1
+$SH $T/base/scripts/run_lemon.sh $T/lemon --subjects "sub-1" > $T/lemon2.out 2>&1
+grep -q "SKIP   P201" $T/lemon2.out || { cat $T/lemon2.out; fail "finished subject not skipped on restart"; }
 [ "$(grep -c ds000221 $T/base/labels/id_map.csv)" = 2 ] && grep -q "P201,ds000221,sub-1" $T/base/labels/id_map.csv || fail "id map changed on re-run"
 printf '#!/bin/bash\necho "python $(basename $1) ${*:2}" >> $STUBLOG\n' > $T/bin/python; chmod +x $T/bin/python
 echo "== 6b. --phase is imported for the reviewer"
