@@ -17,6 +17,9 @@ ap.add_argument("--veins", default="4", help="synthetic vein decoys per syntheti
 ap.add_argument("--radial", default="2", help="transcortical / medullary vein decoys per synthetic scan")
 ap.add_argument("--surface-veins", default="2", help="veins running along the cortical surface, some branching (v4.16)")
 ap.add_argument("--legacy", action="store_true", help="v2 synthetic lesions (flood-filled, thicker)")
+ap.add_argument("--physics", action="store_true", help="v4.18: susceptibility (dipole) model instead of darkening")
+ap.add_argument("--te-ms", default="20"); ap.add_argument("--b0", default="3.0")
+ap.add_argument("--calcium", default="0", help="calcification-like decoys per scan (with --physics)")
 a = ap.parse_args()
 base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project")); S = f"{base}/scripts"
 py = sys.executable
@@ -38,7 +41,8 @@ for h in a.hosts.split(","):
     print(f"{h}: anatomy {'T1' if use_t1 else 'SWI-only'}", flush=True)
     for d in a.depths.split(","):
         for s in a.seeds.split(","):
-            run(f"{S}/make_synthetic.py", h, "8", d, s, *(["--legacy"] if a.legacy else ["--veins", a.veins, "--radial", a.radial, "--surface-veins", a.surface_veins]))
+            run(f"{S}/make_synthetic.py", h, "8", d, s, *(["--legacy"] if a.legacy else ["--veins", a.veins, "--radial", a.radial, "--surface-veins", a.surface_veins]),
+                *(["--physics", "--te-ms", a.te_ms, "--b0", a.b0, "--calcium", a.calcium] if a.physics else []))
             if use_t1:   # copied AFTER the synthetic SWI is written, so it counts as up to date
                 shutil.copy(t1, f"{base}/work/{h}S_t1seg_swispace.nii.gz")
             run(f"{S}/align_seg.py", h + "S")

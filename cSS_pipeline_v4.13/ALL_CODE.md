@@ -714,6 +714,37 @@ def radius_profile(mask, vox, sample=None):
         sk = skeletonize(s) & s
         out.append(e[sk] - half)
     return np.concatenate(out) if out else np.zeros(0)
+
+
+GAMMA_HZ_T = 42.577e6       # proton gyromagnetic ratio / 2 pi
+
+
+def susceptibility_signal(chi_ppm, vox, affine, b0_t=3.0, te_s=0.020, pad=16):
+    """v4.18 susceptibility forward model for synthetic lesions (cf. CenSynCMB 2026: dipole kernel + static dephasing).
+    chi_ppm: susceptibility DIFFERENCE map (ppm, 0 = host tissue). The field perturbation (ppm of B0) is the
+    convolution with the unit dipole, done in k-space: D(k) = 1/3 - (k.b0)^2 / |k|^2, with b0 the scanner z axis
+    expressed in the array axes (oblique acquisitions handled through the affine). Phase = 2 pi gamma B0 TE field.
+    Intravoxel dephasing for a field that varies linearly across the voxel: |sinc| along each axis of the local
+    phase gradient x voxel size. Returns (phase_rad, dephasing_attenuation 0-1). An approximation for
+    augmentation and stress tests - not a full GRE / SWI / QSM simulator."""
+    import numpy as np
+    chi = np.pad(np.asarray(chi_ppm, np.float64), pad)
+    vox = np.asarray(vox, float)
+    R = np.asarray(affine, float)[:3, :3] / vox[None, :]
+    b0 = R.T @ np.array([0.0, 0.0, 1.0]); b0 /= np.linalg.norm(b0)          # B0 (world z) in array axes
+    k = np.meshgrid(*[np.fft.fftfreq(n, d=v) for n, v in zip(chi.shape, vox)], indexing="ij")
+    k2 = k[0] ** 2 + k[1] ** 2 + k[2] ** 2
+    kb = k[0] * b0[0] + k[1] * b0[1] + k[2] * b0[2]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        D = 1.0 / 3.0 - np.where(k2 > 0, kb ** 2 / k2, 0.0)
+    D[0, 0, 0] = 0.0
+    field = np.real(np.fft.ifftn(np.fft.fftn(chi) * D))[pad:-pad, pad:-pad, pad:-pad]       # ppm
+    phase = 2 * np.pi * GAMMA_HZ_T * b0_t * te_s * field * 1e-6
+    att = np.ones_like(phase)
+    for ax in range(3):
+        g = np.gradient(phase, vox[ax], axis=ax)                                # rad / mm
+        att *= np.abs(np.sinc(g * vox[ax] / (2 * np.pi)))
+    return phase.astype(np.float32), att.astype(np.float32)
 ```
 
 ## scripts/css_qc.py
@@ -2442,6 +2473,14 @@ volume / branching / elongation separated them for the wrong reason):
   - --surface-veins K (v4.16): the hardest real mimic - K veins running ALONG the cortical surface in the
     CSF within 1.5 mm of the cortex, 25-45 mm over many slices, 60 % with a side branch (8-15 mm) leaving
     10-20 mm along; same veins file; kinds in work/HOSTS_vein_kinds.csv (sulcal / radial / surface)
+--physics (v4.18, cf. CenSynCMB 2026): instead of darkening voxels, every object gets a susceptibility (cSS
+    hemosiderin +depth ppm, veins +0.45 ppm, calcium -1.0 ppm), the field is computed with the dipole kernel
+    (css_common.susceptibility_signal, B0 along the scanner z axis), and the image is changed by intravoxel
+    dephasing (blooming that grows with --te-ms and --b0 and depends on orientation), short-T2* signal loss inside
+    the object, and the SWI phase mask^4 on the object's paramagnetic phase. Writes work/HOSTS_dphase.nii.gz.
+    --b0 3.0 --te-ms 20 (defaults). An approximation for stress tests, not an SWI simulator.
+--calcium K (with --physics): K calcification-like dots (r 0.8-1.5 mm, diamagnetic) at the cortex - a cSS /
+    microbleed mimic that SWI magnitude alone cannot tell apart (phase can); kind "calcium" in the veins file.
 --legacy reproduces the v2 generator (flood-filled, thicker lesions) for comparison."""
 import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
 import sys, os, numpy as np, nibabel as nib
@@ -2450,8 +2489,9 @@ from scipy import ndimage as ndi
 flag = lambda f, d: type(d)(sys.argv[sys.argv.index(f) + 1]) if f in sys.argv else d
 TRAM, NVEIN, NRAD, LEGACY = flag("--tram", 0.4), flag("--veins", 0), flag("--radial", 0), "--legacy" in sys.argv
 NSURF = flag("--surface-veins", 0)
+PHYS, B0, TE_MS, NCA = "--physics" in sys.argv, flag("--b0", 3.0), flag("--te-ms", 20.0), flag("--calcium", 0)
 # positional values given after a flag (e.g. "--veins 4") must not be read as lesion arguments
-pos = [a for i, a in enumerate(sys.argv[1:], 1) if not a.startswith("--") and not sys.argv[i - 1] in ("--tram", "--veins", "--radial", "--surface-veins")]
+pos = [a for i, a in enumerate(sys.argv[1:], 1) if not a.startswith("--") and not sys.argv[i - 1] in ("--tram", "--veins", "--radial", "--surface-veins", "--b0", "--te-ms", "--calcium")]
 host = pos[0]; N = int(pos[1]) if len(pos) > 1 else 8
 depth = float(pos[2]) if len(pos) > 2 else 0.6; seed = int(pos[3]) if len(pos) > 3 else 1
 rng = np.random.default_rng(seed)
@@ -2504,6 +2544,7 @@ def opposite_bank(path, k):
     return ok[rng.integers(len(ok))] if ok else None
 
 truth, seeds, tries = np.zeros(I.shape, np.int16), [], 0
+ldepth = {}
 dark = np.zeros(I.shape, np.float32)
 while len(seeds) < N and tries < 8000:
     tries += 1
@@ -2556,7 +2597,7 @@ while len(seeds) < N and tries < 8000:
             lesion = ndi.binary_dilation(lesion, structure=s2) & (cortex | sulcal) & brain
     if (truth[lesion] > 0).any() or not lesion.any(): continue
     seeds.append(p); truth[lesion] = len(seeds)
-    d_i = float(np.clip(depth + rng.uniform(-0.1, 0.1), 0.05, 0.9))
+    d_i = float(np.clip(depth + rng.uniform(-0.1, 0.1), 0.05, 0.9)); ldepth[len(seeds)] = d_i
     w = ndi.gaussian_filter(lesion.astype(np.float32), sigma=(rng.uniform(0.4, 0.8),) * 2 + (0,))
     dark = np.maximum(dark, np.clip(w * 2.0, 0, 1) * d_i)
 
@@ -2647,7 +2688,38 @@ if NSURF and not LEGACY:
         ns += 1; veins[m] = n0 + ns; kinds[n0 + ns] = "surface"
         dark = np.maximum(dark, m * float(np.clip(depth + rng.uniform(-0.1, 0.1), 0.05, 0.9)))
 
-Is = I * (1 - dark)
+# ---- calcification-like dots (v4.18, --physics only): diamagnetic, at the cortex
+if NCA and PHYS and not LEGACY:
+    n0, nc, ct = int(veins.max()), 0, 0
+    while nc < NCA and ct < 2000:
+        ct += 1
+        q = pts_all[rng.integers(len(pts_all))]
+        if any(np.linalg.norm((q - s_) * vox) < 12 for s_ in seeds) or veins[tuple(q)]: continue
+        rr = rng.uniform(0.8, 1.5)
+        m = np.zeros(I.shape, bool); m[tuple(q)] = True
+        m = (ndi.distance_transform_edt(~m, sampling=vox) <= rr) & brain
+        if (truth[m] > 0).any() or (veins[m] > 0).any(): continue
+        nc += 1; veins[m] = n0 + nc; kinds[n0 + nc] = "calcium"
+
+if PHYS:
+    from css_common import susceptibility_signal
+    te = TE_MS / 1000.0
+    css_fill = np.zeros(I.shape, np.float32); chi = np.zeros(I.shape, np.float32)
+    for i, d_i in ldepth.items():                       # thin hemosiderin layer, partial volume -> blurred fill
+        w = np.clip(2.0 * ndi.gaussian_filter((truth == i).astype(np.float32), sigma=(0.5, 0.5, 0)), 0, 1)
+        css_fill = np.maximum(css_fill, w); chi += w * d_i * 1.0           # ppm: depth 0.6 -> 0.6 ppm
+    is_ca = np.isin(veins, [v for v, k_ in kinds.items() if k_ == "calcium"])
+    ves_fill = ((veins > 0) & ~is_ca).astype(np.float32)
+    chi += 0.45 * ves_fill - 1.0 * is_ca
+    ph, att = susceptibility_signal(chi, vox, img.affine, B0, te)
+    # signal inside the object relative to tissue: exp(-TE * dR2*), dR2* 60 /s hemosiderin, 30 /s venous blood
+    inside = 1 - css_fill * (1 - np.exp(-te * 60.0)) - ves_fill * (1 - np.exp(-te * 30.0)) - is_ca * 0.5
+    swi_mask = np.where(ph > 0, np.clip(1 - ph / np.pi, 0, 1), 1.0) ** 4    # SWI phase mask (paramagnetic +)
+    Is = I * att * np.clip(inside, 0, 1) * swi_mask
+    dark = 1 - Is / np.maximum(I, 1e-6)
+    nib.save(nib.Nifti1Image(ph, img.affine), f"{base}/work/{host}S_dphase.nii.gz")
+else:
+    Is = I * (1 - dark)
 Is += (rng.normal(0, 0.35 * sd_c, I.shape) * (dark > 0.05)).astype(np.float32)
 Is[brain] = np.maximum(Is[brain], 1.0)        # keep the brain mask unchanged
 Is[~brain] = I[~brain]
@@ -2666,7 +2738,8 @@ if os.path.exists(lutp):
         t = line.split()
         if len(t) > 2 and t[0].isdigit(): lut[int(t[0])] = t[1]
 print(f"{host}S: inserted {len(seeds)} synthetic cSS lesions ({'legacy' if LEGACY else 'v3 thin'}, depth ~{depth}, "
-      f"seed {seed}){f', {int(veins.max())} vein decoys' if veins.max() else ''}")
+      f"seed {seed}){f', {int(veins.max())} vein / mimic decoys' if veins.max() else ''}"
+      + (f"; physics model B0 {B0:g} T, TE {TE_MS:g} ms" if PHYS else ""))
 for i in range(1, len(seeds) + 1):
     m = truth == i; s = seg[m][seg[m] >= 1000]
     lab = int(np.bincount(s).argmax()) if s.size else 0
@@ -3421,6 +3494,9 @@ ap.add_argument("--veins", default="4", help="synthetic vein decoys per syntheti
 ap.add_argument("--radial", default="2", help="transcortical / medullary vein decoys per synthetic scan")
 ap.add_argument("--surface-veins", default="2", help="veins running along the cortical surface, some branching (v4.16)")
 ap.add_argument("--legacy", action="store_true", help="v2 synthetic lesions (flood-filled, thicker)")
+ap.add_argument("--physics", action="store_true", help="v4.18: susceptibility (dipole) model instead of darkening")
+ap.add_argument("--te-ms", default="20"); ap.add_argument("--b0", default="3.0")
+ap.add_argument("--calcium", default="0", help="calcification-like decoys per scan (with --physics)")
 a = ap.parse_args()
 base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project")); S = f"{base}/scripts"
 py = sys.executable
@@ -3442,7 +3518,8 @@ for h in a.hosts.split(","):
     print(f"{h}: anatomy {'T1' if use_t1 else 'SWI-only'}", flush=True)
     for d in a.depths.split(","):
         for s in a.seeds.split(","):
-            run(f"{S}/make_synthetic.py", h, "8", d, s, *(["--legacy"] if a.legacy else ["--veins", a.veins, "--radial", a.radial, "--surface-veins", a.surface_veins]))
+            run(f"{S}/make_synthetic.py", h, "8", d, s, *(["--legacy"] if a.legacy else ["--veins", a.veins, "--radial", a.radial, "--surface-veins", a.surface_veins]),
+                *(["--physics", "--te-ms", a.te_ms, "--b0", a.b0, "--calcium", a.calcium] if a.physics else []))
             if use_t1:   # copied AFTER the synthetic SWI is written, so it counts as up to date
                 shutil.copy(t1, f"{base}/work/{h}S_t1seg_swispace.nii.gz")
             run(f"{S}/align_seg.py", h + "S")
@@ -4392,4 +4469,304 @@ for s in (1, -1):
     if not (rv < 0.3 and rc > 0.95): fail(f"sign {s:+d}: veins x{rv:.2f}, calcium x{rc:.2f}")
     print(f"   sign {s:+d}: found; veins x{rv:.2f} of magnitude, calcium x{rc:.2f}")
 print("RESULT make_swi OK")
+```
+
+## scripts/evaluate.py
+
+```python
+#!/usr/bin/env python3
+"""Patient-grouped evaluation of the detector against expert labels (v4.18; protocol after VALDO / CenSynCMB 2026:
+per-patient counts, patient bootstrap, stratified by protocol). Reads labels/, never changes them.
+usage: evaluate.py [--split test|dev|all] [--source consensus|reader:NAME] [--k 5,10,20] [--boot 1000] [--seed 1]
+                   [--by field_T,sequence,slice_group] [--tag NAME]
+Reference standard, per study (labels/study_meta.csv gives split and patient status):
+  cSS lesions = objects called cSS (labels/consensus.csv, or one reader's latest session in candidate_labels.csv)
+                among shown candidates AND excluded objects (sheets made with --include-excluded),
+                + reader-outlined missed cSS (labels/missed_lesions.csv; outlines within 5 mm across readers count once)
+  detected    = the lesion is a SHOWN candidate in the current detector output (matched by cand_uid fingerprint);
+                its rank = cand_id. Missed lesions are split by why: excluded (rule id) / dropped / not generated.
+  false positive = shown candidate called anything but cSS or uncertain; 'uncertain' calls are counted apart.
+Reported (with 95 % patient-bootstrap intervals): lesion sensitivity (all shown and top-k), patient sensitivity
+(cSS-positive patients with >= 1 lesion shown), false positives per scan and per cSS-NEGATIVE scan, uncertain per
+scan; a FROC table (rank cut-off -> sensitivity vs mean FP per scan); a per-study table; strata from --by.
+Labels that no longer match the current detector output (re-run after labelling) are reported, not guessed.
+Writes review/evaluation_<tag>.json, _patients.csv, _froc.csv. Default split is TEST: dev studies were used to
+design the rules, so their numbers are optimistic by construction."""
+import sys, os, json, argparse, numpy as np, pandas as pd
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import base as _base, cand_uid, label_class
+
+ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+ap.add_argument("--split", default="test", choices=["test", "dev", "all"])
+ap.add_argument("--source", default="consensus"); ap.add_argument("--k", default="5,10,20")
+ap.add_argument("--boot", type=int, default=1000); ap.add_argument("--seed", type=int, default=1)
+ap.add_argument("--by", default=""); ap.add_argument("--tag", default="")
+a = ap.parse_args(); B = _base(); L = f"{B}/labels"
+KS = [int(x) for x in a.k.split(",") if x]
+tag = a.tag or f"{a.split}_{a.source.replace(':', '-')}"
+
+meta = pd.read_csv(f"{L}/study_meta.csv", dtype=str)
+if a.split != "all": meta = meta[meta.split == a.split]
+if not len(meta): sys.exit(f"no studies with split '{a.split}' in labels/study_meta.csv")
+
+if a.source == "consensus":
+    lab = pd.read_csv(f"{L}/consensus.csv")
+    pend = lab[lab.method == "pending"]; lab = lab[lab.method != "pending"]
+    lab = lab.assign(cls=lab.consensus_class)
+elif a.source.startswith("reader:"):
+    rd = a.source.split(":", 1)[1]; lab = pd.read_csv(f"{L}/candidate_labels.csv")
+    lab = lab[lab.reader_id == rd]
+    if not len(lab): sys.exit(f"no labels from reader {rd}")
+    lab = lab[lab.session == lab.groupby("study_id").session.transform("max")]
+    pend = lab.iloc[0:0]; lab = lab.assign(cls=lab.label.map(label_class))
+else:
+    sys.exit("--source consensus or reader:NAME")
+mp = f"{L}/missed_lesions.csv"
+missed = pd.read_csv(mp) if os.path.exists(mp) else pd.DataFrame(columns=["study_id"])
+
+rows, warn = [], []
+for _, st in meta.iterrows():
+    s = st.study_id; cp, xp = f"{B}/review/{s}_candidates.csv", f"{B}/review/{s}_excluded.csv"
+    if not os.path.exists(cp): warn.append(f"{s}: no detector output - skipped"); continue
+    c = pd.read_csv(cp); x = pd.read_csv(xp) if os.path.exists(xp) else pd.DataFrame(columns=c.columns)
+    uid_rank = {cand_uid(s, r): int(r.cand_id) for _, r in c.iterrows()}
+    uid_rule = {cand_uid(s, r): str(r.get("rule_version", r.get("reason", ""))) for _, r in x.iterrows()}
+    ls = lab[lab.study_id == s]
+    lesions, fp_ranks, unc_ranks, stale = [], [], [], 0
+    seen_shown = set()
+    for _, r in ls.iterrows():
+        u = r.cand_uid
+        if u in uid_rank:
+            rk = uid_rank[u]; seen_shown.add(rk)
+            if r.cls == "cSS": lesions.append(dict(fate="shown", rank=rk))
+            elif r.cls == "uncertain": unc_ranks.append(rk)
+            else: fp_ranks.append(rk)
+        elif u in uid_rule:
+            if r.cls == "cSS": lesions.append(dict(fate="excluded", rank=None, why=uid_rule[u]))
+        else:
+            stale += 1
+    unlabelled = sorted(set(uid_rank.values()) - seen_shown)
+    # reader-outlined missed lesions (fates from label_missed.py), outlines from several readers counted once
+    ms = missed[missed.study_id == s] if len(missed) else missed
+    kept = []
+    for _, r in ms.iterrows():
+        p = np.array([r.vox_i, r.vox_j, r.vox_k], float)
+        if any(np.linalg.norm(p - q) <= 5.0 for q in kept): continue
+        kept.append(p)
+        f = str(r.fate)
+        if f == "shown":
+            ob = int(r.obj_id) if pd.notna(r.obj_id) else None
+            if ob is not None and any(l_["rank"] == ob for l_ in lesions): continue    # already counted
+            lesions.append(dict(fate="shown", rank=ob))
+            if ob in fp_ranks: fp_ranks.remove(ob)                 # it overlaps real cSS: not a false positive
+        elif f == "excluded": lesions.append(dict(fate="excluded", rank=None, why=str(r.rule_version)))
+        else: lesions.append(dict(fate=f, rank=None, why=str(r.reason)))
+    row = dict(study_id=s, split=st.split, css_status=st.get("css_status"), n_candidates=len(c),
+               n_ref_lesions=len(lesions), n_detected=sum(l_["fate"] == "shown" for l_ in lesions),
+               n_lost_excluded=sum(l_["fate"] == "excluded" for l_ in lesions),
+               n_lost_dropped=sum(l_["fate"] == "dropped" for l_ in lesions),
+               n_lost_not_generated=sum(l_["fate"] == "not generated" for l_ in lesions),
+               n_fp=len(fp_ranks), n_uncertain=len(unc_ranks), n_unlabelled=len(unlabelled), n_stale_labels=stale,
+               n_pending=int((pend.study_id == s).sum()) if len(pend) else 0,
+               lesion_ranks=";".join(str(l_["rank"]) for l_ in lesions if l_["fate"] == "shown"),
+               fp_ranks=";".join(map(str, sorted(fp_ranks))),
+               lost=";".join(f"{l_['fate']}:{l_.get('why', '')}" for l_ in lesions if l_["fate"] != "shown"))
+    for k in KS:
+        row[f"det_top{k}"] = sum(1 for l_ in lesions if l_["fate"] == "shown" and l_["rank"] is not None and l_["rank"] <= k)
+        row[f"fp_top{k}"] = sum(1 for rk in fp_ranks if rk <= k)
+    for col in ("field_T", "sequence", "vendor", "voxel_mm", "slice_mm", "qc_status", "anatomy"):
+        row[col] = st.get(col)
+    try: sm = float(st.get("slice_mm"))
+    except (TypeError, ValueError): sm = np.nan
+    row["slice_group"] = "unknown" if np.isnan(sm) else ("<=1.2 mm" if sm <= 1.2 else ("<=2 mm" if sm <= 2.0 else ">2 mm"))
+    if stale: warn.append(f"{s}: {stale} label(s) match no current candidate/excluded object (detector re-run after labelling?)")
+    if unlabelled: warn.append(f"{s}: {len(unlabelled)} shown candidate(s) without a label - neither TP nor FP")
+    rows.append(row)
+P = pd.DataFrame(rows)
+if not len(P): sys.exit("no evaluable studies\n" + "\n".join(warn))
+
+def metrics(d):
+    ref = d.n_ref_lesions.sum(); pos = d[d.n_ref_lesions > 0]; neg = d[d.css_status == "neg"]
+    m = dict(n_studies=len(d), n_ref_lesions=int(ref),
+             lesion_sens=d.n_detected.sum() / ref if ref else np.nan,
+             patient_sens=float((pos.n_detected > 0).mean()) if len(pos) else np.nan,
+             fp_per_scan=float(d.n_fp.mean()), fp_per_neg_scan=float(neg.n_fp.mean()) if len(neg) else np.nan,
+             uncertain_per_scan=float(d.n_uncertain.mean()))
+    for k in KS:
+        m[f"sens_top{k}"] = d[f"det_top{k}"].sum() / ref if ref else np.nan
+        m[f"fp_per_scan_top{k}"] = float(d[f"fp_top{k}"].mean())
+    return m
+
+def boot(d, rng):
+    out = {}
+    if len(d) < 2: return out
+    bs = [metrics(d.iloc[rng.integers(0, len(d), len(d))]) for _ in range(a.boot)]
+    for key in bs[0]:
+        v = np.array([b_[key] for b_ in bs], float); v = v[np.isfinite(v)]
+        if len(v) and key not in ("n_studies", "n_ref_lesions"):
+            out[key] = [round(float(np.percentile(v, 2.5)), 3), round(float(np.percentile(v, 97.5)), 3)]
+    return out
+
+rng = np.random.default_rng(a.seed)
+overall = metrics(P); ci = boot(P, rng)
+# FROC: rank cut-off k -> pooled lesion sensitivity vs mean FP per scan (ranks are per study)
+maxk = int(P.n_candidates.max())
+froc = []
+for k in range(1, maxk + 1):
+    det = sum(sum(1 for t in str(r.lesion_ranks).split(";") if t not in ("", "None") and int(t) <= k) for _, r in P.iterrows())
+    fp = np.mean([sum(1 for t in str(r.fp_ranks).split(";") if t and int(t) <= k) for _, r in P.iterrows()])
+    froc.append(dict(top_k=k, lesion_sens=det / overall["n_ref_lesions"] if overall["n_ref_lesions"] else np.nan,
+                     fp_per_scan=float(fp)))
+strata = {}
+for col in [c_ for c_ in a.by.split(",") if c_]:
+    if col not in P: warn.append(f"--by {col}: not a column"); continue
+    strata[col] = {str(g): dict(metrics(d), ci=boot(d, rng)) for g, d in P.groupby(P[col].astype(str))}
+
+os.makedirs(f"{B}/review", exist_ok=True)
+P.to_csv(f"{B}/review/evaluation_{tag}_patients.csv", index=False)
+pd.DataFrame(froc).to_csv(f"{B}/review/evaluation_{tag}_froc.csv", index=False)
+json.dump(dict(split=a.split, source=a.source, overall=overall, ci95=ci, strata=strata, warnings=warn,
+               pending_adjudication=int(len(pend)), boot=a.boot, seed=a.seed,
+               note="patient-grouped; research software; dev-split numbers are optimistic (rules were tuned on them)"),
+          open(f"{B}/review/evaluation_{tag}.json", "w"), indent=2, default=float)
+
+f = lambda v: "n/a" if v is None or (isinstance(v, float) and not np.isfinite(v)) else (f"{v:.2f}" if isinstance(v, float) else str(v))
+fci = lambda k_: f" [{ci[k_][0]:.2f}-{ci[k_][1]:.2f}]" if k_ in ci else ""
+print(f"evaluation ({a.split} split, reference: {a.source}): {overall['n_studies']} studies, {overall['n_ref_lesions']} reference cSS lesions")
+if a.split != "test": print("  NOTE: not the test split - these numbers are optimistic (rules were designed on dev studies)")
+if overall["n_studies"] < 10: print(f"  NOTE: only {overall['n_studies']} studies - intervals are wide and unstable")
+print(f"  lesion sensitivity (all shown)  {f(overall['lesion_sens'])}{fci('lesion_sens')}")
+for k in KS:
+    print(f"  lesion sensitivity, top {k:<3d}     {f(overall[f'sens_top{k}'])}{fci(f'sens_top{k}')}   FP per scan in top {k}: "
+          f"{f(overall[f'fp_per_scan_top{k}'])}{fci(f'fp_per_scan_top{k}')}")
+print(f"  patient sensitivity             {f(overall['patient_sens'])}{fci('patient_sens')}")
+print(f"  false positives per scan        {f(overall['fp_per_scan'])}{fci('fp_per_scan')}   per cSS-negative scan "
+      f"{f(overall['fp_per_neg_scan'])}{fci('fp_per_neg_scan')}   uncertain per scan {f(overall['uncertain_per_scan'])}")
+lost = P[["n_lost_excluded", "n_lost_dropped", "n_lost_not_generated"]].sum()
+print(f"  lesions not shown: {int(lost.n_lost_excluded)} excluded by a rule, {int(lost.n_lost_dropped)} dropped at a gate, "
+      f"{int(lost.n_lost_not_generated)} never generated (details: lost column of the patient table)")
+for col, gr in strata.items():
+    for g, m in gr.items():
+        print(f"  [{col} = {g}] studies {m['n_studies']}, lesions {m['n_ref_lesions']}, sensitivity {f(m['lesion_sens'])}, "
+              f"FP per scan {f(m['fp_per_scan'])}")
+for w in warn: print("  WARNING:", w)
+if len(pend): print(f"  WARNING: {len(pend)} object(s) still pending adjudication - left out")
+print(f"-> review/evaluation_{tag}.json, _patients.csv, _froc.csv")
+```
+
+## tests/check_physics.py
+
+```python
+"""v4.18 physics-based synthetic lesions: dipole field (css_common.susceptibility_signal) against analytic values,
+then make_synthetic.py --physics on PH1: blooming grows with TE, calcium has the opposite phase, lesions detected.
+usage: check_physics.py    (needs PH1 from phantom.py, aligned, in $CSS_BASE)"""
+import os, sys, re, shutil, subprocess, numpy as np, nibabel as nib, pandas as pd
+B = os.environ["CSS_BASE"]; S = f"{B}/scripts"; py = sys.executable
+sys.path.insert(0, S)
+from css_common import susceptibility_signal, GAMMA_HZ_T
+def fail(m): print("FAIL:", m); sys.exit(1)
+def run(*a):
+    r = subprocess.run([py, *a], capture_output=True, text=True)
+    if r.returncode: print(r.stdout[-600:], r.stderr[-1500:]); fail("step failed: " + " ".join(a))
+    return r.stdout
+
+# 1. analytic checks: long cylinder inside field = chi (3 cos^2 th - 1) / 6; sphere outside: + along B0, - across
+sh, vox, aff = (80, 80, 80), (0.5, 0.5, 0.5), np.diag([0.5, 0.5, 0.5, 1.0])
+k = 2 * np.pi * GAMMA_HZ_T * 3.0 * 0.02 * 1e-6
+for name, sl, th in (("parallel", (slice(39, 41), slice(39, 41), slice(5, 75)), 0.0),
+                     ("perpendicular", (slice(5, 75), slice(39, 41), slice(39, 41)), np.pi / 2)):
+    chi = np.zeros(sh); chi[sl] = 0.45
+    ph, _ = susceptibility_signal(chi, vox, aff, 3.0, 0.02)
+    want = k * 0.45 * (3 * np.cos(th) ** 2 - 1) / 6; got = float(np.median(ph[sl]))
+    if abs(got - want) > 0.1 * abs(want): fail(f"cylinder {name}: phase {got:.2f} vs analytic {want:.2f}")
+x, y, z = np.meshgrid(*[np.arange(80)] * 3, indexing="ij")
+chi = np.zeros(sh); chi[(x - 40) ** 2 + (y - 40) ** 2 + (z - 40) ** 2 < 9] = 1.0
+ph, _ = susceptibility_signal(chi, vox, aff, 3.0, 0.02)
+if not (ph[40, 40, 46] > 0 > ph[46, 40, 40] and abs(ph[40, 40, 46] / ph[46, 40, 40] + 2) < 0.4):
+    fail(f"sphere dipole pattern {ph[40, 40, 46]:.2f} / {ph[46, 40, 40]:.2f} (expect ratio -2)")
+# B0 follows the affine: the same cylinder stored with axes swapped (array axis 0 = scanner z) reads parallel
+aff2 = np.zeros((4, 4)); aff2[0, 2] = aff2[1, 1] = aff2[2, 0] = 0.5; aff2[3, 3] = 1
+chi = np.zeros(sh); chi[5:75, 39:41, 39:41] = 0.45
+ph, _ = susceptibility_signal(chi, vox, aff2, 3.0, 0.02)
+if abs(float(np.median(ph[5:75, 39:41, 39:41])) - k * 0.45 / 3) > 0.1 * k * 0.45 / 3: fail("B0 direction not taken from the affine")
+print(f"   dipole model: cylinders match the analytic field (within 10 %), sphere pattern +2:-1, B0 from the affine")
+
+# 2. make_synthetic --physics on PH1: TE dependence, calcium phase sign, detection
+shutil.copy(f"{B}/synthseg/PH1_seg.nii.gz", f"{B}/synthseg/PH1S_seg.nii.gz")
+I = nib.load(f"{B}/data/PH1_swi.nii").get_fdata(); res = {}
+for te in (10, 40):
+    run(f"{S}/make_synthetic.py", "PH1", "8", "0.6", "1", "--physics", "--te-ms", str(te), "--calcium", "2", "--veins", "4")
+    Sx = nib.load(f"{B}/data/PH1S_swi.nii").get_fdata(); t = nib.load(f"{B}/work/PH1S_truth.nii.gz").get_fdata() > 0
+    v = nib.load(f"{B}/work/PH1S_veins.nii.gz").get_fdata().astype(int); ph = nib.load(f"{B}/work/PH1S_dphase.nii.gz").get_fdata()
+    kd = pd.read_csv(f"{B}/work/PH1S_vein_kinds.csv").set_index("vein_id").kind
+    ca = np.isin(v, [i for i, x in kd.items() if x == "calcium"])
+    if not ca.any(): fail("no calcium decoys inserted")
+    res[te] = dict(bloom=int(((Sx < 0.8 * I) & (I > 0) & ~t & (v == 0)).sum()), ca_phase=float(np.median(ph[ca])),
+                   lesion=float(np.median(Sx[t] / I[t])))
+if not res[40]["bloom"] > 1.5 * res[10]["bloom"]: fail(f"blooming does not grow with TE: {res}")
+if not (res[10]["ca_phase"] < 0 and res[40]["lesion"] < res[10]["lesion"]): fail(f"calcium phase / TE darkening wrong: {res}")
+run(f"{S}/make_synthetic.py", "PH1", "8", "0.6", "1", "--physics", "--calcium", "2", "--veins", "4", "--surface-veins", "2")
+run(f"{S}/align_seg.py", "PH1S"); run(f"{S}/detect_css.py", "PH1S")
+r = re.search(r"found=(\d+) total=(\d+)", run(f"{S}/eval_synthetic.py", "PH1S"))
+if int(r.group(1)) < 6: fail(f"physics lesions: only {r.group(1)}/{r.group(2)} found")
+print(f"   physics lesions on PH1: darkened voxels outside objects TE 10 ms {res[10]['bloom']} -> TE 40 ms {res[40]['bloom']}; "
+      f"calcium phase {res[10]['ca_phase']:+.2f} rad (diamagnetic); found {r.group(1)}/{r.group(2)} at TE 20 ms")
+print("RESULT physics OK")
+```
+
+## tests/check_evaluate.py
+
+```python
+"""v4.18 evaluate.py on hand-made label tables with known answers (no images needed).
+usage: check_evaluate.py    (writes into $CSS_BASE/eval_check/)"""
+import os, sys, json, subprocess, pandas as pd, numpy as np
+B0 = os.environ["CSS_BASE"]; B = f"{B0}/eval_check"; S = f"{B0}/scripts"
+def fail(m): print("FAIL:", m); sys.exit(1)
+for d in ("review", "labels"): os.makedirs(f"{B}/{d}", exist_ok=True)
+def cands(s, n, off=0):
+    return pd.DataFrame(dict(cand_id=range(1, n + 1), vox_i=[10 * i + off for i in range(1, n + 1)], vox_j=20, vox_k=5,
+                             volume_mm3=30.0, score=np.linspace(2, 1, n)))
+uid = lambda s, r: f"{s}:{int(r.vox_i)}:{int(r.vox_j)}:{int(r.vox_k)}:{float(r.volume_mm3):g}"
+cons = []
+def lab(s, r, cls, lst="candidate", oid=None):
+    cons.append(dict(study_id=s, cand_uid=uid(s, r), list=lst, obj_id=oid or int(r.get("cand_id", 0) or 0), readers="A+B",
+                     adjudicator="", consensus_label=cls, consensus_class=cls, method="agreement"))
+# S1 (test, positive): ranks 1 and 4 cSS, 2 vein, 3 uncertain, 5 unlabelled; one EXCLUDED object called cSS
+c1 = cands("S1", 5); c1.to_csv(f"{B}/review/S1_candidates.csv", index=False)
+x1 = cands("S1", 1, off=3).rename(columns={"cand_id": "excl_id"}).assign(rule_version="E7@v4.12")
+x1.to_csv(f"{B}/review/S1_excluded.csv", index=False)
+for rk, cls in ((1, "cSS"), (2, "other_vein"), (3, "uncertain"), (4, "cSS")): lab("S1", c1.iloc[rk - 1], cls)
+lab("S1", x1.iloc[0], "cSS", "excluded", 1)
+# S2 (test, negative): 3 candidates, all veins; plus a stale label (no matching object)
+c2 = cands("S2", 3); c2.to_csv(f"{B}/review/S2_candidates.csv", index=False)
+pd.DataFrame(columns=["excl_id"]).to_csv(f"{B}/review/S2_excluded.csv", index=False)
+for rk in (1, 2, 3): lab("S2", c2.iloc[rk - 1], "other_vein")
+cons.append(dict(study_id="S2", cand_uid="S2:1:1:1:9", list="candidate", obj_id=9, readers="A+B", adjudicator="",
+                 consensus_label="cSS", consensus_class="cSS", method="agreement"))
+# S3 (dev): must not appear in the test evaluation
+c3 = cands("S3", 2); c3.to_csv(f"{B}/review/S3_candidates.csv", index=False)
+lab("S3", c3.iloc[0], "cSS")
+pd.DataFrame(cons).to_csv(f"{B}/labels/consensus.csv", index=False)
+# missed outlines in S1: one never generated (two readers, 2 voxels apart = one lesion), one on shown rank 2 (the 'vein')
+pd.DataFrame([dict(study_id="S1", reader_id="A", vox_i=100, vox_j=100, vox_k=5, fate="not generated", obj_id=np.nan, rule_version="", reason="not dark"),
+              dict(study_id="S1", reader_id="B", vox_i=101, vox_j=101, vox_k=5, fate="not generated", obj_id=np.nan, rule_version="", reason="not dark"),
+              dict(study_id="S1", reader_id="A", vox_i=20, vox_j=20, vox_k=5, fate="shown", obj_id=2, rule_version="", reason="")]
+             ).to_csv(f"{B}/labels/missed_lesions.csv", index=False)
+pd.DataFrame([dict(study_id="S1", css_status="pos", split="test", slice_mm="1.2"),
+              dict(study_id="S2", css_status="neg", split="test", slice_mm="2.0"),
+              dict(study_id="S3", css_status="pos", split="dev", slice_mm="1.2")]).to_csv(f"{B}/labels/study_meta.csv", index=False)
+r = subprocess.run([sys.executable, f"{S}/evaluate.py", "--k", "1,2", "--boot", "200", "--by", "slice_group"],
+                   capture_output=True, text=True, env=dict(os.environ, CSS_BASE=B))
+if r.returncode: print(r.stdout, r.stderr); fail("evaluate.py failed")
+o = json.load(open(f"{B}/review/evaluation_test_consensus.json"))["overall"]
+want = dict(n_studies=2, n_ref_lesions=5, lesion_sens=0.6, sens_top1=0.2, sens_top2=0.4, patient_sens=1.0,
+            fp_per_scan=1.5, fp_per_neg_scan=3.0, uncertain_per_scan=0.5, fp_per_scan_top2=1.0)
+bad = {k: (o[k], v) for k, v in want.items() if abs(o[k] - v) > 1e-9}
+if bad: print(r.stdout); fail(f"metrics (got, want): {bad}")
+if "S2: 1 label(s) match no current" not in r.stdout or "S1: 1 shown candidate(s) without a label" not in r.stdout:
+    fail("stale / unlabelled warnings missing")
+fr = pd.read_csv(f"{B}/review/evaluation_test_consensus_froc.csv")
+if not (fr.lesion_sens.is_monotonic_increasing and fr.fp_per_scan.is_monotonic_increasing): fail("FROC not monotone")
+print("   " + "\n   ".join(l for l in r.stdout.splitlines()[:6]))
+print("RESULT evaluate OK")
 ```

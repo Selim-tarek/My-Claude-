@@ -284,6 +284,16 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   tests/check_make_swi.py: both sign conventions found, veins x0.03-0.04, calcium x1.00). run_lemon.sh: download
   (S3 curl), make_swi -> run_css --t1 --flair --recon --phase -> study_meta --split dev, ids P201+ in
   labels/id_map.csv, review/lemon_summary.csv. Presumed negative, not expert-read. MP2RAGE + recon-all untested.
+- v4.18 from the microbleed papers (MixMicrobleedNet, MixMicrobleed, CenSynCMB 2026 - read in full): css_common
+  .susceptibility_signal (dipole kernel in k-space, B0 = scanner z through the affine, phase 2 pi gamma B0 TE field,
+  linear-gradient intravoxel dephasing |sinc|); make_synthetic --physics (cSS +depth ppm, veins +0.45, calcium -1.0,
+  inside signal exp(-TE dR2*), SWI mask^4 on paramagnetic phase; --calcium K, --b0, --te-ms; work/HS_dphase);
+  stress_test --physics. check_physics: cylinders match analytic field (parallel chi/3, perpendicular -chi/6), sphere
+  +2:-1, B0 from affine; PH1 blooming TE10 4661 -> TE40 19390 voxels; calcium phase negative; 8/8 found (intensity
+  model 7/8). evaluate.py: patient-grouped evaluation from labels/ (consensus or one reader; shown + excluded objects
+  + deduped missed outlines; FP excludes uncertain; top-k; FROC; patient bootstrap CIs; --by strata; default split
+  test); tests/check_evaluate.py with hand-computed answers. AIBL SWI (CSIRO 50304, 370 older adults, 3 T Siemens,
+  0.93x0.93x1.75 mm, TE 20 ms) named as possible SWI control source - title says synthetic microbleeds: verify first.
 
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.

@@ -229,3 +229,34 @@ def radius_profile(mask, vox, sample=None):
         sk = skeletonize(s) & s
         out.append(e[sk] - half)
     return np.concatenate(out) if out else np.zeros(0)
+
+
+GAMMA_HZ_T = 42.577e6       # proton gyromagnetic ratio / 2 pi
+
+
+def susceptibility_signal(chi_ppm, vox, affine, b0_t=3.0, te_s=0.020, pad=16):
+    """v4.18 susceptibility forward model for synthetic lesions (cf. CenSynCMB 2026: dipole kernel + static dephasing).
+    chi_ppm: susceptibility DIFFERENCE map (ppm, 0 = host tissue). The field perturbation (ppm of B0) is the
+    convolution with the unit dipole, done in k-space: D(k) = 1/3 - (k.b0)^2 / |k|^2, with b0 the scanner z axis
+    expressed in the array axes (oblique acquisitions handled through the affine). Phase = 2 pi gamma B0 TE field.
+    Intravoxel dephasing for a field that varies linearly across the voxel: |sinc| along each axis of the local
+    phase gradient x voxel size. Returns (phase_rad, dephasing_attenuation 0-1). An approximation for
+    augmentation and stress tests - not a full GRE / SWI / QSM simulator."""
+    import numpy as np
+    chi = np.pad(np.asarray(chi_ppm, np.float64), pad)
+    vox = np.asarray(vox, float)
+    R = np.asarray(affine, float)[:3, :3] / vox[None, :]
+    b0 = R.T @ np.array([0.0, 0.0, 1.0]); b0 /= np.linalg.norm(b0)          # B0 (world z) in array axes
+    k = np.meshgrid(*[np.fft.fftfreq(n, d=v) for n, v in zip(chi.shape, vox)], indexing="ij")
+    k2 = k[0] ** 2 + k[1] ** 2 + k[2] ** 2
+    kb = k[0] * b0[0] + k[1] * b0[1] + k[2] * b0[2]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        D = 1.0 / 3.0 - np.where(k2 > 0, kb ** 2 / k2, 0.0)
+    D[0, 0, 0] = 0.0
+    field = np.real(np.fft.ifftn(np.fft.fftn(chi) * D))[pad:-pad, pad:-pad, pad:-pad]       # ppm
+    phase = 2 * np.pi * GAMMA_HZ_T * b0_t * te_s * field * 1e-6
+    att = np.ones_like(phase)
+    for ax in range(3):
+        g = np.gradient(phase, vox[ax], axis=ax)                                # rad / mm
+        att *= np.abs(np.sinc(g * vox[ax] / (2 * np.pi)))
+    return phase.astype(np.float32), att.astype(np.float32)

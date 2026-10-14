@@ -16,6 +16,14 @@ volume / branching / elongation separated them for the wrong reason):
   - --surface-veins K (v4.16): the hardest real mimic - K veins running ALONG the cortical surface in the
     CSF within 1.5 mm of the cortex, 25-45 mm over many slices, 60 % with a side branch (8-15 mm) leaving
     10-20 mm along; same veins file; kinds in work/HOSTS_vein_kinds.csv (sulcal / radial / surface)
+--physics (v4.18, cf. CenSynCMB 2026): instead of darkening voxels, every object gets a susceptibility (cSS
+    hemosiderin +depth ppm, veins +0.45 ppm, calcium -1.0 ppm), the field is computed with the dipole kernel
+    (css_common.susceptibility_signal, B0 along the scanner z axis), and the image is changed by intravoxel
+    dephasing (blooming that grows with --te-ms and --b0 and depends on orientation), short-T2* signal loss inside
+    the object, and the SWI phase mask^4 on the object's paramagnetic phase. Writes work/HOSTS_dphase.nii.gz.
+    --b0 3.0 --te-ms 20 (defaults). An approximation for stress tests, not an SWI simulator.
+--calcium K (with --physics): K calcification-like dots (r 0.8-1.5 mm, diamagnetic) at the cortex - a cSS /
+    microbleed mimic that SWI magnitude alone cannot tell apart (phase can); kind "calcium" in the veins file.
 --legacy reproduces the v2 generator (flood-filled, thicker lesions) for comparison."""
 import signal; signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # quiet when piped to head
 import sys, os, numpy as np, nibabel as nib
@@ -24,8 +32,9 @@ from scipy import ndimage as ndi
 flag = lambda f, d: type(d)(sys.argv[sys.argv.index(f) + 1]) if f in sys.argv else d
 TRAM, NVEIN, NRAD, LEGACY = flag("--tram", 0.4), flag("--veins", 0), flag("--radial", 0), "--legacy" in sys.argv
 NSURF = flag("--surface-veins", 0)
+PHYS, B0, TE_MS, NCA = "--physics" in sys.argv, flag("--b0", 3.0), flag("--te-ms", 20.0), flag("--calcium", 0)
 # positional values given after a flag (e.g. "--veins 4") must not be read as lesion arguments
-pos = [a for i, a in enumerate(sys.argv[1:], 1) if not a.startswith("--") and not sys.argv[i - 1] in ("--tram", "--veins", "--radial", "--surface-veins")]
+pos = [a for i, a in enumerate(sys.argv[1:], 1) if not a.startswith("--") and not sys.argv[i - 1] in ("--tram", "--veins", "--radial", "--surface-veins", "--b0", "--te-ms", "--calcium")]
 host = pos[0]; N = int(pos[1]) if len(pos) > 1 else 8
 depth = float(pos[2]) if len(pos) > 2 else 0.6; seed = int(pos[3]) if len(pos) > 3 else 1
 rng = np.random.default_rng(seed)
@@ -78,6 +87,7 @@ def opposite_bank(path, k):
     return ok[rng.integers(len(ok))] if ok else None
 
 truth, seeds, tries = np.zeros(I.shape, np.int16), [], 0
+ldepth = {}
 dark = np.zeros(I.shape, np.float32)
 while len(seeds) < N and tries < 8000:
     tries += 1
@@ -130,7 +140,7 @@ while len(seeds) < N and tries < 8000:
             lesion = ndi.binary_dilation(lesion, structure=s2) & (cortex | sulcal) & brain
     if (truth[lesion] > 0).any() or not lesion.any(): continue
     seeds.append(p); truth[lesion] = len(seeds)
-    d_i = float(np.clip(depth + rng.uniform(-0.1, 0.1), 0.05, 0.9))
+    d_i = float(np.clip(depth + rng.uniform(-0.1, 0.1), 0.05, 0.9)); ldepth[len(seeds)] = d_i
     w = ndi.gaussian_filter(lesion.astype(np.float32), sigma=(rng.uniform(0.4, 0.8),) * 2 + (0,))
     dark = np.maximum(dark, np.clip(w * 2.0, 0, 1) * d_i)
 
@@ -221,7 +231,38 @@ if NSURF and not LEGACY:
         ns += 1; veins[m] = n0 + ns; kinds[n0 + ns] = "surface"
         dark = np.maximum(dark, m * float(np.clip(depth + rng.uniform(-0.1, 0.1), 0.05, 0.9)))
 
-Is = I * (1 - dark)
+# ---- calcification-like dots (v4.18, --physics only): diamagnetic, at the cortex
+if NCA and PHYS and not LEGACY:
+    n0, nc, ct = int(veins.max()), 0, 0
+    while nc < NCA and ct < 2000:
+        ct += 1
+        q = pts_all[rng.integers(len(pts_all))]
+        if any(np.linalg.norm((q - s_) * vox) < 12 for s_ in seeds) or veins[tuple(q)]: continue
+        rr = rng.uniform(0.8, 1.5)
+        m = np.zeros(I.shape, bool); m[tuple(q)] = True
+        m = (ndi.distance_transform_edt(~m, sampling=vox) <= rr) & brain
+        if (truth[m] > 0).any() or (veins[m] > 0).any(): continue
+        nc += 1; veins[m] = n0 + nc; kinds[n0 + nc] = "calcium"
+
+if PHYS:
+    from css_common import susceptibility_signal
+    te = TE_MS / 1000.0
+    css_fill = np.zeros(I.shape, np.float32); chi = np.zeros(I.shape, np.float32)
+    for i, d_i in ldepth.items():                       # thin hemosiderin layer, partial volume -> blurred fill
+        w = np.clip(2.0 * ndi.gaussian_filter((truth == i).astype(np.float32), sigma=(0.5, 0.5, 0)), 0, 1)
+        css_fill = np.maximum(css_fill, w); chi += w * d_i * 1.0           # ppm: depth 0.6 -> 0.6 ppm
+    is_ca = np.isin(veins, [v for v, k_ in kinds.items() if k_ == "calcium"])
+    ves_fill = ((veins > 0) & ~is_ca).astype(np.float32)
+    chi += 0.45 * ves_fill - 1.0 * is_ca
+    ph, att = susceptibility_signal(chi, vox, img.affine, B0, te)
+    # signal inside the object relative to tissue: exp(-TE * dR2*), dR2* 60 /s hemosiderin, 30 /s venous blood
+    inside = 1 - css_fill * (1 - np.exp(-te * 60.0)) - ves_fill * (1 - np.exp(-te * 30.0)) - is_ca * 0.5
+    swi_mask = np.where(ph > 0, np.clip(1 - ph / np.pi, 0, 1), 1.0) ** 4    # SWI phase mask (paramagnetic +)
+    Is = I * att * np.clip(inside, 0, 1) * swi_mask
+    dark = 1 - Is / np.maximum(I, 1e-6)
+    nib.save(nib.Nifti1Image(ph, img.affine), f"{base}/work/{host}S_dphase.nii.gz")
+else:
+    Is = I * (1 - dark)
 Is += (rng.normal(0, 0.35 * sd_c, I.shape) * (dark > 0.05)).astype(np.float32)
 Is[brain] = np.maximum(Is[brain], 1.0)        # keep the brain mask unchanged
 Is[~brain] = I[~brain]
@@ -240,7 +281,8 @@ if os.path.exists(lutp):
         t = line.split()
         if len(t) > 2 and t[0].isdigit(): lut[int(t[0])] = t[1]
 print(f"{host}S: inserted {len(seeds)} synthetic cSS lesions ({'legacy' if LEGACY else 'v3 thin'}, depth ~{depth}, "
-      f"seed {seed}){f', {int(veins.max())} vein decoys' if veins.max() else ''}")
+      f"seed {seed}){f', {int(veins.max())} vein / mimic decoys' if veins.max() else ''}"
+      + (f"; physics model B0 {B0:g} T, TE {TE_MS:g} ms" if PHYS else ""))
 for i in range(1, len(seeds) + 1):
     m = truth == i; s = seg[m][seg[m] >= 1000]
     lab = int(np.bincount(s).argmax()) if s.size else 0
