@@ -128,6 +128,8 @@ grep -q "RESULT qc OK" $T/qc.log || { echo "FAIL: v4.14 QC checks"; exit 1; }
 echo "== v4.17 Stage 2: recon-all CSF labels, Hessian at the mask edge, E8 needs T1, stale inputs, manifest"
 python $ROOT/tests/check_stage2.py | tee $T/stage2.log | grep -v "^RESULT"
 python $ROOT/tests/check_v418.py | tee $T/v418.log | grep -v "^RESULT"
+python $ROOT/tests/check_make_swi.py | tee $T/mkswi.log | grep -v "^RESULT"
+grep -q "^RESULT make_swi OK" $T/mkswi.log || { echo "FAIL: make_swi"; exit 1; }
 grep -q "^RESULT v4.18 OK" $T/v418.log || { echo "FAIL: v4.18 checks"; exit 1; }
 grep -q "RESULT stage2 OK" $T/stage2.log || { echo "FAIL: v4.17 Stage 2 checks"; exit 1; }
 echo "== v4.15 expert labels: excluded objects on the sheet, fine codes, missed lesions, study metadata"

@@ -277,6 +277,13 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   surface_features adds surf_sulc, surf_curv, surf_thickness_mm, surf_sulcal_frac (?h.sulc/curv/thickness).
   Repos reviewed and not adopted: nnU-Net cSS detector (needs many outlined positives), BrainIAC model (96^3,
   research-only licence), tumour toolkits (100-voxel cleanup, active contours, slice-level splits).
+- v4.18 public controls: user's "6 new patients" (OpenNeuro ds004265) were MACAQUES (FUS safety study) - not used.
+  OpenNeuro ds000221 (LEMON, CC0): 112 healthy adults with acq-mag_GRE + acq-phase_GRE (Siemens Verio 3 T, TE 17.3 ms,
+  0.8 mm iso, LAI = axial, S-I axis 2), MP2RAGE T1w 1 mm, 3-D FLAIR; 26 aged 55-75 with GRE + 3-D FLAIR chosen.
+  make_swi.py (homodyne sigma 4 mm per axial slice, paramagnetic sign auto from dark-on-magnitude voxels, mask^4;
+  tests/check_make_swi.py: both sign conventions found, veins x0.03-0.04, calcium x1.00). run_lemon.sh: download
+  (S3 curl), make_swi -> run_css --t1 --flair --recon --phase -> study_meta --split dev, ids P201+ in
+  labels/id_map.csv, review/lemon_summary.csv. Presumed negative, not expert-read. MP2RAGE + recon-all untested.
 
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.

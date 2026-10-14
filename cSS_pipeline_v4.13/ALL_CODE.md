@@ -4164,3 +4164,232 @@ print(f"   robustness: copy {int(c0.candidates)} candidates, gamma 1 identical; 
       f"candidates, {int(rb.loc['shift:0'].found_again)}/{int(c0.candidates)} found again (phantom)")
 print("RESULT v4.18 OK")
 ```
+
+## scripts/make_swi.py
+
+```python
+#!/usr/bin/env python3
+"""Build an SWI image from gradient-echo MAGNITUDE + PHASE (v4.18) - for datasets that store the raw GRE
+(e.g. OpenNeuro ds000221 / MPI-Leipzig LEMON: acq-mag_GRE + acq-phase_GRE) instead of a processed SWI.
+usage: make_swi.py MAG.nii.gz PHASE.nii.gz OUT_swi.nii.gz [--sigma-mm 4] [--power 4] [--phase-sign auto|+1|-1]
+                   [--hp-out OUT_hpphase.nii.gz]
+Standard SWI processing (Haacke 2004): phase -> radians, homodyne high-pass per axial slice
+(angle(z * conj(lowpass z)), Gaussian low-pass sigma --sigma-mm, wrap-safe; the same filter the reviewer
+uses), a phase mask that darkens PARAMAGNETIC voxels (veins, haemosiderin) linearly to 0 at pi, and
+SWI = magnitude x mask^power. Nothing else is changed: the output keeps the magnitude's grid and affine.
+
+Phase sign: which sign is paramagnetic differs between vendors and reconstructions. With --phase-sign auto
+(default) it is read from the image: paramagnetic voxels are also dark on the magnitude at this TE, so the
+sign of the median high-pass phase of the darkest-for-their-neighbourhood brain voxels is used. The
+evidence is printed; if it is weak the script stops and asks for --phase-sign. Check the result once per
+protocol: veins must be DARKER on the SWI than on the magnitude (calcium is not darkened).
+Research software, not for clinical reading."""
+import sys, os, argparse, numpy as np, nibabel as nib
+from scipy import ndimage as ndi
+
+ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+ap.add_argument("mag"); ap.add_argument("phase"); ap.add_argument("out")
+ap.add_argument("--sigma-mm", type=float, default=4.0); ap.add_argument("--power", type=int, default=4)
+ap.add_argument("--phase-sign", default="auto"); ap.add_argument("--hp-out", default="")
+a = ap.parse_args()
+
+mi, pi_ = nib.load(a.mag), nib.load(a.phase)
+if mi.shape[:3] != pi_.shape[:3] or not np.allclose(mi.affine, pi_.affine, atol=1e-3):
+    sys.exit("magnitude and phase are not on the same grid - they must come from the same acquisition")
+M = np.asarray(mi.dataobj, np.float32); P = np.asarray(pi_.dataobj, np.float32)
+if M.ndim == 4 or P.ndim == 4:
+    sys.exit("4-D (multi-echo) input: pass one echo (e.g. the longest usable TE) as 3-D images")
+vox = np.array(mi.header.get_zooms()[:3], float)
+si = int(np.argmax(np.abs(mi.affine[2, :3])))          # superior-inferior array axis: slice-wise filter
+lo, hi = float(np.nanmin(P)), float(np.nanmax(P))
+if hi - lo > 2 * np.pi + 0.5:                            # scanner units (e.g. -4096..4095 or 0..4095)
+    P = (P - lo) / (hi - lo) * 2 * np.pi - np.pi
+    unit = f"scanner units {lo:g}..{hi:g} -> radians"
+else:
+    unit = "radians"
+
+# homodyne high-pass, slice by slice in the plane perpendicular to the S-I axis
+z = np.exp(1j * P.astype(np.float64))
+inpl = [ax for ax in range(3) if ax != si]
+sig = [0.0, 0.0, 0.0]
+for ax in inpl: sig[ax] = a.sigma_mm / vox[ax]
+lp = ndi.gaussian_filter(z.real, sig) + 1j * ndi.gaussian_filter(z.imag, sig)     # sigma 0 on the S-I axis
+HP = np.angle(z * np.conj(lp)).astype(np.float32)
+
+# brain-ish mask for the sign estimate: bright magnitude, eroded away from the head edge
+thr = 0.15 * float(np.percentile(M[M > 0], 99)) if (M > 0).any() else 0.0
+head = ndi.binary_fill_holes(M > thr)
+lab, n = ndi.label(head)
+if n: head = lab == (np.argmax(np.bincount(lab.ravel())[1:]) + 1)
+core = ndi.binary_erosion(head, iterations=max(1, int(round(10 / vox.min()))))
+if a.phase_sign == "auto":
+    rel = M / (ndi.gaussian_filter(M, 3.0 / vox) + 1e-6)
+    dark = core & (rel < 0.75) & (np.abs(HP) > 0.2)
+    if dark.sum() < 200:
+        sys.exit(f"too few dark brain voxels ({int(dark.sum())}) to read the phase sign - give --phase-sign +1 or -1")
+    med = float(np.median(HP[dark])); frac = float((np.sign(HP[dark]) == np.sign(med)).mean())
+    if abs(med) < 0.05 or frac < 0.6:
+        sys.exit(f"phase sign unclear (median {med:+.2f} rad, {frac:.0%} agree) - give --phase-sign +1 or -1")
+    sign = 1 if med > 0 else -1
+    how = f"auto: dark-on-magnitude voxels median high-pass phase {med:+.2f} rad, {frac:.0%} same sign, n={int(dark.sum())}"
+else:
+    sign = int(a.phase_sign); how = "given"
+    if sign not in (1, -1): sys.exit("--phase-sign must be auto, +1 or -1")
+
+# phase mask: paramagnetic side (sign) goes linearly from 1 at 0 to 0 at pi
+para = sign * HP
+mask = np.where(para > 0, np.clip(1.0 - para / np.pi, 0.0, 1.0), 1.0).astype(np.float32)
+S = (M * mask ** a.power).astype(np.float32)
+out = nib.Nifti1Image(S, mi.affine, mi.header); out.set_data_dtype(np.float32)
+nib.save(out, a.out)
+if a.hp_out:
+    nib.save(nib.Nifti1Image(HP, mi.affine), a.hp_out)
+red = float(1 - np.median(S[core & (mask < 0.9)] / (M[core & (mask < 0.9)] + 1e-6))) if (core & (mask < 0.9)).any() else 0.0
+print(f"{os.path.basename(a.out)}: SWI = magnitude x phase-mask^{a.power}; phase {unit}; high-pass sigma {a.sigma_mm} mm "
+      f"in-plane (S-I axis {si}); paramagnetic sign {sign:+d} ({how}); {(core & (mask < 0.9)).mean() if core.any() else 0:.1%} "
+      f"of brain voxels darkened, median by {red:.0%}")
+```
+
+## scripts/run_lemon.sh
+
+```bash
+#!/bin/zsh
+# Batch for OpenNeuro ds000221 (MPI-Leipzig LEMON): healthy volunteers with gradient-echo magnitude + phase,
+# MP2RAGE T1 and 3-D FLAIR. Use: cSS-NEGATIVE CONTROL scans (false positives per scan, robustness) - 'dev' only.
+# usage: run_lemon.sh LEMON_DIR [--download] [--parallel N] [--subjects "sub-010239 sub-010255"] [--summary]
+#   LEMON_DIR   folder with sub-XXXXXX/ses-01/anat/ (created by --download); no spaces in the path
+#   --download  fetch the 4 files per subject from the public OpenNeuro S3 bucket (curl; skips files present)
+#   --parallel  subjects processed at the same time (default 2; recon-all uses 8 threads each)
+#   --subjects  default: the 26 volunteers aged 55-75 with GRE + 3-D FLAIR
+#   --summary   only print the summary table of finished subjects
+# Per subject: make_swi.py (magnitude + phase -> SWI) -> run_css.sh ID swi --t1 --flair --recon --phase
+#   -> study_meta.py ID --split dev. IDs P201... are fixed in labels/id_map.csv (study code <-> source id).
+# Logs: logs/ID_run.log. Summary: review/lemon_summary.csv.
+# These volunteers are PRESUMED cSS-negative (community volunteers, not expert-read) - never claim more.
+B=${CSS_BASE:-$HOME/css_project}; SC=$B/scripts
+DEFAULT="sub-010239 sub-010255 sub-010257 sub-010258 sub-010146 sub-010148 sub-010152 sub-010267 sub-010268
+sub-010272 sub-010275 sub-010276 sub-010277 sub-010278 sub-010279 sub-010280 sub-010282 sub-010283 sub-010284
+sub-010285 sub-010286 sub-010287 sub-010288 sub-010289 sub-010290 sub-010291"
+FILES="acq-mag_GRE acq-phase_GRE acq-mp2rage_T1w acq-highres_FLAIR"
+URL=https://s3.amazonaws.com/openneuro.org/ds000221
+
+if [ "$1" = "--one" ]; then                      # internal: one subject (run in parallel by xargs)
+  s=$2; ID=$3; p=$LEMON_DIR/$s/ses-01/anat/${s}_ses-01
+  mkdir -p $B/work $B/logs
+  if ( echo "== $ID = $s ($(date))"
+       for f in $(echo $FILES); do [ -s ${p}_${f}.nii.gz ] || { echo "ERROR: missing ${p}_${f}.nii.gz"; exit 1; }; done
+       python $SC/make_swi.py ${p}_acq-mag_GRE.nii.gz ${p}_acq-phase_GRE.nii.gz $B/work/${ID}_gre_swi.nii.gz || exit 1
+       NOVIEW=1 zsh $SC/run_css.sh $ID $B/work/${ID}_gre_swi.nii.gz --t1 ${p}_acq-mp2rage_T1w.nii.gz \
+         --flair ${p}_acq-highres_FLAIR.nii.gz --recon --phase ${p}_acq-phase_GRE.nii.gz || exit 1
+       python $SC/study_meta.py $ID --split dev \
+         --note "LEMON ds000221 $s healthy volunteer: PRESUMED cSS-negative, not expert-read; GRE->SWI by make_swi.py" || exit 1
+       echo "== $ID done ($(date))" ) > $B/logs/${ID}_run.log 2>&1; then
+    echo "OK     $ID ($s)"
+  else
+    echo "FAILED $ID ($s) - see logs/${ID}_run.log"; tail -3 $B/logs/${ID}_run.log
+  fi
+  exit 0
+fi
+
+L=$1; shift 2>/dev/null || true
+[ -n "$L" ] || { sed -n 2,13p $0; exit 1; }
+DL=0; PAR=2; SUBS=$DEFAULT; SUMONLY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --download) DL=1; shift;;
+    --parallel) PAR=$2; shift 2;;
+    --subjects) SUBS=$2; shift 2;;
+    --summary) SUMONLY=1; shift;;
+    *) echo "run_lemon.sh: unknown option $1"; exit 1;;
+  esac
+done
+case "$L" in *" "*) echo "ERROR: no spaces in LEMON_DIR please ($L)"; exit 1;; esac
+mkdir -p $L $B/labels $B/logs $B/review
+export LEMON_DIR=$(cd $L && pwd)
+
+# fixed study codes: reuse labels/id_map.csv, append new subjects as the next P2xx
+MAP=$B/labels/id_map.csv
+[ -f $MAP ] || echo "study_id,source_dataset,source_id" > $MAP
+for s in $(echo $SUBS); do
+  if ! grep -q ",ds000221,$s\$" $MAP; then
+    n=$(grep -c ",ds000221," $MAP); printf "P%03d,ds000221,%s\n" $((201 + n)) $s >> $MAP
+  fi
+done
+
+if [ $SUMONLY -eq 0 ]; then
+  if [ $DL -eq 1 ]; then
+    for s in $(echo $SUBS); do for f in $(echo $FILES); do
+      o=$LEMON_DIR/$s/ses-01/anat/${s}_ses-01_${f}.nii.gz; mkdir -p $(dirname $o)
+      [ -s $o ] || curl -fsSL -o $o $URL/$s/ses-01/anat/${s}_ses-01_${f}.nii.gz || { echo "download FAILED: $s $f"; rm -f $o; }
+    done; done
+  fi
+  echo "LEMON: $(echo $SUBS | wc -w | tr -d ' ') subjects, $PAR at a time; recon-all ~1-3 h each (progress: tail -f $B/logs/<ID>_run.log)"
+  for s in $(echo $SUBS); do echo "$s $(grep ",ds000221,$s\$" $MAP | cut -d, -f1)"; done | xargs -n 2 -P $PAR zsh $0 --one
+fi
+
+python - "$B" $(echo $SUBS) <<'EOF'
+import sys, os, json, pandas as pd
+B = sys.argv[1]; subs = sys.argv[2:]
+m = pd.read_csv(f"{B}/labels/id_map.csv"); m = m[m.source_dataset == "ds000221"].set_index("source_id")
+rows = []
+for s in subs:
+    if s not in m.index: continue
+    i = m.loc[s, "study_id"]; r = dict(study_id=i, source_id=s)
+    c, x, q = (f"{B}/review/{i}_{k}" for k in ("candidates.csv", "excluded.csv", "qc.json"))
+    if not os.path.exists(c): r["status"] = "not run / failed"; rows.append(r); continue
+    cd = pd.read_csv(c); r.update(status="done", candidates=len(cd), excluded=len(pd.read_csv(x)) if os.path.exists(x) else None)
+    if "review_tier" in cd: r.update(tier1=int((cd.review_tier == 1).sum()), tier2=int((cd.review_tier == 2).sum()))
+    if os.path.exists(q):
+        qq = json.load(open(q)); r.update(qc=qq.get("status"), label_shift_mm=qq.get("label_shift_mm"), anatomy=qq.get("anatomy"))
+    rows.append(r)
+d = pd.DataFrame(rows)
+if len(d):
+    d.to_csv(f"{B}/review/lemon_summary.csv", index=False)
+    print(d.to_string(index=False))
+    ok = d[d.status == "done"]
+    if len(ok):
+        print(f"\ncandidates per PRESUMED-negative scan: median {ok.candidates.median():g}, range {ok.candidates.min():g}-"
+              f"{ok.candidates.max():g} (n={len(ok)}); QC ok in {int((ok.get('qc') == 'ok').sum())}/{len(ok)}. They count as "
+              f"false positives only if an expert confirms the scan is cSS-free.")
+EOF
+```
+
+## tests/check_make_swi.py
+
+```python
+"""v4.18 make_swi.py: synthetic GRE (wrapped background phase, paramagnetic veins, diamagnetic calcium) with
+both phase sign conventions -> sign found automatically, veins darkened, calcium untouched, grid kept.
+usage: check_make_swi.py    (uses $CSS_BASE/work as scratch)"""
+import os, sys, subprocess, numpy as np, nibabel as nib
+from scipy import ndimage as ndi
+B = os.environ["CSS_BASE"]; W = f"{B}/work"; os.makedirs(W, exist_ok=True)
+def fail(m): print("FAIL:", m); sys.exit(1)
+sh = (120, 140, 90); vox = 0.8
+x, y, z = np.meshgrid(*[np.arange(n) for n in sh], indexing="ij")
+head = ((x - 60) / 50) ** 2 + ((y - 70) / 60) ** 2 + ((z - 45) / 38) ** 2 < 1
+rng = np.random.default_rng(0); veins = np.zeros(sh, bool)
+for k in range(15):
+    p0 = np.array([rng.integers(25, 95), rng.integers(25, 115), rng.integers(20, 70)]); d = rng.normal(size=3); d /= np.linalg.norm(d)
+    pts = (p0 + np.outer(np.linspace(0, 25, 200), d)).round().astype(int)
+    ok = np.all((pts >= 0) & (pts < sh), 1); veins[tuple(pts[ok].T)] = True
+veins = ndi.binary_dilation(veins) & head
+calc = (x - 60) ** 2 + (y - 40) ** 2 + (z - 45) ** 2 < 9
+M = np.where(head, 1000.0, 0.0); M[veins] *= 0.6; M[calc] *= 0.6
+M = np.clip(M + rng.normal(0, 20, sh) * head, 0, None)
+aff = np.diag([-vox, vox, -vox, 1.0]); aff[:3, 3] = [50, -50, 40]          # LAI, like LEMON
+for s in (1, -1):
+    bg = 0.08 * (x - 60) + 0.05 * (y - 70) + 0.002 * (z - 45) ** 2          # wraps several times
+    ph = np.angle(np.exp(1j * (bg + s * 1.2 * ndi.gaussian_filter(veins.astype(float), 0.7) / 0.35 - s * 1.2 * calc))) * head
+    nib.save(nib.Nifti1Image(M.astype(np.float32), aff), f"{W}/GRE_mag.nii.gz")
+    nib.save(nib.Nifti1Image(((ph + np.pi) / (2 * np.pi) * 4095 - 2048).astype(np.float32), aff), f"{W}/GRE_pha.nii.gz")
+    r = subprocess.run([sys.executable, f"{B}/scripts/make_swi.py", f"{W}/GRE_mag.nii.gz", f"{W}/GRE_pha.nii.gz",
+                        f"{W}/GRE_swi.nii.gz"], capture_output=True, text=True)
+    if r.returncode: print(r.stdout, r.stderr); fail("make_swi failed")
+    if f"paramagnetic sign {s:+d}" not in r.stdout: fail(f"phase sign {s:+d} not found: {r.stdout}")
+    S = nib.load(f"{W}/GRE_swi.nii.gz")
+    if S.shape != sh or not np.allclose(S.affine, aff): fail("grid / affine changed")
+    S = S.get_fdata(); rv = float(np.median(S[veins] / M[veins].clip(1))); rc = float(np.median(S[calc] / M[calc].clip(1)))
+    if not (rv < 0.3 and rc > 0.95): fail(f"sign {s:+d}: veins x{rv:.2f}, calcium x{rc:.2f}")
+    print(f"   sign {s:+d}: found; veins x{rv:.2f} of magnitude, calcium x{rc:.2f}")
+print("RESULT make_swi OK")
+```

@@ -307,6 +307,28 @@ then, every candidate is read and the hand-set `score_v4` only orders the list.
 
 ---
 
+## 12. Public control scans: OpenNeuro ds000221 (MPI-Leipzig LEMON), v4.18
+
+Healthy volunteers (CC0), Siemens 3 T, gradient-echo magnitude + phase at 0.8 mm isotropic (TE 17.3 ms), MP2RAGE T1,
+3-D FLAIR. Use: **presumed cSS-negative controls, split dev** - false positives per scan, robustness to a new
+scanner/protocol. Never sensitivity, never test. `make_swi.py` builds the SWI from magnitude + phase (homodyne
+high-pass, paramagnetic phase mask^4, phase sign read from the image and printed - check once that veins get darker).
+
+```zsh
+zsh ~/css_project/scripts/run_lemon.sh ~/Documents/lemon --download --subjects "sub-010239" --parallel 1
+```
+First ONE subject: check `logs/P201_run.log`, `review/P201_qc.json` (label_shift_mm, status) and freeview in
+coronal view (MP2RAGE background noise can disturb recon-all skull stripping). Then all 26 (overnight):
+```zsh
+zsh ~/css_project/scripts/run_lemon.sh ~/Documents/lemon --download --parallel 2
+zsh ~/css_project/scripts/run_lemon.sh ~/Documents/lemon --summary
+```
+IDs P201... are fixed in `labels/id_map.csv`; every subject is entered in `labels/study_meta.csv` as split dev with
+the note "PRESUMED cSS-negative, not expert-read". Have an expert read a sample before calling any candidate a false
+positive.
+
+---
+
 ## Where things are (`$CSS_BASE`)
 
 ```
