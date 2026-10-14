@@ -62,7 +62,10 @@ if [ $RECON -eq 1 ] || [ -f $SUBJECTS_DIR/$S/mri/aparc.a2009s+aseg.mgz ]; then
   bbregister --s $S --mov $SWI --reg $W/${S}_swi2t1.lta --t2 --init-coreg > $W/${S}_bbreg.log 2>&1 \
     || die "bbregister failed (see $W/${S}_bbreg.log)"
   grep -i "min cost" $W/${S}_bbreg.log | tail -1 || true
-  REGM=bbregister; COST=$(awk 'NR==1{print $1}' $W/${S}_swi2t1.lta.mincost 2>/dev/null || true)
+  # FreeSurfer 8 bbregister names its side files after an internal .dat (ID_swi2t1.dat.mincost), older ones .lta.mincost
+  MC=$(ls $W/${S}_swi2t1.lta.mincost $W/${S}_swi2t1.dat.mincost 2>/dev/null | head -1)
+  REGM=bbregister; COST=$( [ -n "$MC" ] && awk 'NR==1{print $1}' $MC 2>/dev/null || true)
+  [ -n "$COST" ] && echo "    bbregister min cost $COST (FreeSurfer: < ~0.6 is typical for a good fit)"
 else
   echo "[b] SynthSeg --parc --robust on the T1"
   mri_synthseg --i $B/data/${S}_t1.nii.gz --o $W/${S}_t1synthseg.nii.gz --parc --robust --threads 8 > /dev/null || die "mri_synthseg failed"

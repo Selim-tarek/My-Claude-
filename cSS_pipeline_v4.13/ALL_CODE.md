@@ -38,9 +38,11 @@ mkdir -p $B/data $B/synthseg $B/work $B/review
 if [ -n "$SRC" ]; then
   if [ $STRIP -eq 1 ]; then
     echo "[0/4] importing + skull-stripping (SynthStrip, CSF kept) $SRC"
-    mri_convert "$SRC" $B/work/${S}_raw.nii.gz > /dev/null
+    mri_convert "$SRC" $B/work/${S}_raw.nii.gz > /dev/null || { echo "ERROR: mri_convert could not read $SRC"; exit 1; }
+    # v4.18.3: errors were silent under set -e (LEMON P203 stopped here with no message); keep SynthStrip's output
     mri_synthstrip -i $B/work/${S}_raw.nii.gz -o $B/data/${S}_swi.nii \
-      -m $B/work/${S}_brainmask.nii.gz > /dev/null
+      -m $B/work/${S}_brainmask.nii.gz > $B/work/${S}_synthstrip.log 2>&1 \
+      || { echo "ERROR: mri_synthstrip failed on the SWI (exit $?) - last lines of $B/work/${S}_synthstrip.log:"; tail -5 $B/work/${S}_synthstrip.log; exit 1; }
   else
     echo "[0/4] importing (no skull-strip) $SRC"
     mri_convert "$SRC" $B/data/${S}_swi.nii > /dev/null
@@ -151,7 +153,10 @@ if [ $RECON -eq 1 ] || [ -f $SUBJECTS_DIR/$S/mri/aparc.a2009s+aseg.mgz ]; then
   bbregister --s $S --mov $SWI --reg $W/${S}_swi2t1.lta --t2 --init-coreg > $W/${S}_bbreg.log 2>&1 \
     || die "bbregister failed (see $W/${S}_bbreg.log)"
   grep -i "min cost" $W/${S}_bbreg.log | tail -1 || true
-  REGM=bbregister; COST=$(awk 'NR==1{print $1}' $W/${S}_swi2t1.lta.mincost 2>/dev/null || true)
+  # FreeSurfer 8 bbregister names its side files after an internal .dat (ID_swi2t1.dat.mincost), older ones .lta.mincost
+  MC=$(ls $W/${S}_swi2t1.lta.mincost $W/${S}_swi2t1.dat.mincost 2>/dev/null | head -1)
+  REGM=bbregister; COST=$( [ -n "$MC" ] && awk 'NR==1{print $1}' $MC 2>/dev/null || true)
+  [ -n "$COST" ] && echo "    bbregister min cost $COST (FreeSurfer: < ~0.6 is typical for a good fit)"
 else
   echo "[b] SynthSeg --parc --robust on the T1"
   mri_synthseg --i $B/data/${S}_t1.nii.gz --o $W/${S}_t1synthseg.nii.gz --parc --robust --threads 8 > /dev/null || die "mri_synthseg failed"
@@ -869,7 +874,7 @@ def shift_fit(If, brain, normal, vox, sel, rng, iters=6):
 def case_qc(base, subj, swi, I, If, seg, brain, tissue, cortex, pial_sd, normal, rim, hemiL, vox,
             t1_anat, full_bottom):
     rng = np.random.default_rng(0)
-    qc = dict(subject=subj, qc_version="v4.17.1")
+    qc = dict(subject=subj, qc_version="v4.18.3")
     qc["acquisition"] = read_acq(base, subj)
     qc["voxel_mm"] = [round(v, 3) for v in vox]
     qc["orientation"] = "".join(nib.aff2axcodes(swi.affine))
@@ -891,7 +896,9 @@ def case_qc(base, subj, swi, I, If, seg, brain, tissue, cortex, pial_sd, normal,
     qc["label_slice_coverage"] = round(float((bs & ls).sum() / max(int(bs.sum()), 1)), 3)
     qc["label_voxel_frac"] = round(float(((seg > 0) & brain).sum() / max(int(brain.sum()), 1)), 3)
     # pial confidence: label boundary vs SWI cortex/CSF edge, overall and by hemisphere x height third
-    bnd = cortex & (np.abs(pial_sd) <= 0.75 * max(vox)) & ~rim
+    # v4.18.3: the voxel layers on both sides of the label boundary sit at |pial_sd| >= the smallest voxel size,
+    # so 0.75 x the largest voxel selected NOTHING on isotropic scans (LEMON 0.8 mm: edge_n 0, "not measurable")
+    bnd = cortex & (np.abs(pial_sd) <= max(0.75 * max(vox), 1.01 * min(vox))) & ~rim
     off = edge_agreement(If, brain, pial_sd, normal, vox, bnd, rng)
     s_, bias_, spread_, found_ = shift_fit(If, brain, normal, vox, bnd, rng)
     # v4.17.1: separate a systematic misregistration (rigid shift, global bias) from scatter. On P006/P011 the
@@ -4805,8 +4812,8 @@ wm.mgz', topology fixing aborted). The robust combination adds a noise term beta
       UNI_r = (INV1 * INV2 - beta) / (INV1^2 + INV2^2 + 2 beta),   beta = lambda * mean(INV2 noise)^2
 which leaves the brain (high INV2 signal) unchanged and pushes the background to -0.5 (black). INV1's sign
 (lost in magnitude images) is recovered from UNI: INV1 = the root of UNI = INV1 INV2 / (INV1^2 + INV2^2) that
-is closer to the measured |INV1|. --lambda auto: the smallest of 1, 2, 4, 8, 16, 32 that makes the image
-border darker than 10 % of the head's median. Output is scaled to 0..4095 like a scanner UNI. Prints the
+is closer to the measured |INV1|. --lambda auto (v4.18.2): the smallest of 1, 2, 4 ... 128 that leaves < 5 % of the
+background band 5-20 mm outside the head brighter than 25 % of the brain, without changing the brain (r >= 0.95). Output is scaled to 0..4095 like a scanner UNI. Prints the
 correlation with the original UNI inside the head (should stay > 0.95)."""
 import sys, argparse, numpy as np, nibabel as nib
 from scipy import ndimage as ndi
@@ -4834,29 +4841,45 @@ with np.errstate(invalid="ignore", divide="ignore"):
     r_neg = np.where(np.abs(u) > 1e-6, (A2 - disc) / (2 * u), 0.0)
 I1 = np.where(np.abs(np.abs(r_pos) - A1) < np.abs(np.abs(r_neg) - A1), r_pos, r_neg)
 I1 = np.where(np.isfinite(I1), I1, 0.0)
-# noise of INV2 from the image border (defaced / zero-filled voxels ignored)
-bd = np.zeros(A2.shape, bool); w = max(3, min(A2.shape) // 20)
-for ax in range(3):
-    sl = [slice(None)] * 3; sl[ax] = slice(0, w); bd[tuple(sl)] = True; sl[ax] = slice(-w, None); bd[tuple(sl)] = True
-noise = A2[bd & (A2 > 0)]
-noise = float(np.mean(noise)) if noise.size else float(np.percentile(A2[A2 > 0], 1))
-head = ndi.binary_fill_holes(ndi.binary_opening(A2 > 5 * noise, iterations=2))
+# v4.18.2: noise from the background band 5-20 mm OUTSIDE the head (INV2 has a clean head outline). The image border
+# is often zero-padded / defaced (LEMON: border noise 10 -> lambda 1, speckle left around the skull and neck).
+from skimage.filters import threshold_otsu
+vox = np.array(iu.header.get_zooms()[:3], float)
+pos = A2[A2 > 0]
+head = A2 > threshold_otsu(pos) * 0.5
+head = ndi.binary_closing(head, iterations=2); head = ndi.binary_fill_holes(head)
 lab, n = ndi.label(head)
 if n: head = lab == (np.argmax(np.bincount(lab.ravel())[1:]) + 1)
+d_out = ndi.distance_transform_edt(~head, sampling=vox)
+shell = (d_out > 5) & (d_out <= 20) & (A2 > 0)
+if shell.sum() < 1000:                                    # tiny field of view: fall back to everything outside
+    shell = (d_out > 2) & (A2 > 0)
+noise = float(np.mean(A2[shell])) if shell.any() else float(np.percentile(pos, 1))
+core = ndi.binary_erosion(head, iterations=max(1, int(round(10 / vox.min()))))
+if not core.any(): core = head
+ref = (u[core] + 0.5) * 4095
 def robust(lam):
     b = lam * noise ** 2
     return (I1 * A2 - b) / (I1 ** 2 + A2 ** 2 + 2 * b)
-lams = [1, 2, 4, 8, 16, 32] if a.lam == "auto" else [float(a.lam)]
+lams = [1, 2, 4, 8, 16, 32, 64, 128] if a.lam == "auto" else [float(a.lam)]
+prev = None
 for lam in lams:
-    r = robust(lam); out = np.clip((r + 0.5) * 4095, 0, 4095)
-    ok = np.median(out[bd & ~head]) < 0.1 * np.median(out[head]) if (bd & ~head).any() else True
+    out_l = np.clip((robust(lam) + 0.5) * 4095, 0, 4095)
+    hm = float(np.median(out_l[core]))
+    speck = float((out_l[shell] > 0.25 * hm).mean()) if shell.any() else 0.0
+    rc = float(np.corrcoef(out_l[core], ref)[0, 1])
+    if rc < 0.95 and prev is not None:                    # brain contrast would change: keep the previous lambda
+        lam, out, speck, ok = prev; break
+    out, ok = out_l, speck < 0.05
+    prev = (lam, out_l, speck, ok)
     if ok: break
-c = float(np.corrcoef(out[head], (u[head] + 0.5) * 4095)[0, 1])
+bd = shell
+c = float(np.corrcoef(out[core], ref)[0, 1])
 img = nib.Nifti1Image(out.astype(np.float32), iu.affine, iu.header); img.set_data_dtype(np.float32)
 nib.save(img, a.out)
-print(f"{a.out}: robust MP2RAGE combination, lambda {lam:g} (noise {noise:.1f}); border median "
-      f"{np.median(out[bd & ~head]) if (bd & ~head).any() else 0:.0f} vs head {np.median(out[head]):.0f}; "
-      f"correlation with the original UNI inside the head {c:.3f}" + ("" if ok else "  WARNING: background still bright"))
+print(f"{a.out}: robust MP2RAGE combination, lambda {lam:g} (background noise {noise:.1f}, band 5-20 mm outside the head); "
+      f"speckle left in that band {speck:.1%} (was {float(((u[shell] + 0.5) * 4095 > 0.25 * np.median(ref)).mean()):.1%}); "
+      f"correlation with the original UNI inside the brain {c:.3f}" + ("" if ok else "  WARNING: background still speckled"))
 if c < 0.95: print("WARNING: brain contrast changed (correlation < 0.95) - check the image before recon-all")
 ```
 
@@ -4877,16 +4900,21 @@ i2 = np.where(head, 600.0, 0.0); i2[brain] = 700; i2[wm] = 800
 n = lambda v: v + rng.normal(0, 20, sh) + 1j * rng.normal(0, 20, sh)
 c1, c2 = n(i1), n(i2)
 uni = np.real(c1 * np.conj(c2)) / (np.abs(c1) ** 2 + np.abs(c2) ** 2)
+pad = np.zeros(sh, bool); pad[8:-8, 8:-8, 8:-8] = True       # LEMON-like zero-padded / defaced border (v4.18.2)
 for name, v in (("uni", np.round((uni + 0.5) * 4095)), ("inv1", np.abs(c1)), ("inv2", np.abs(c2))):
-    nib.save(nib.Nifti1Image(v.astype(np.float32), np.eye(4)), f"{W}/MP2_{name}.nii.gz")
+    nib.save(nib.Nifti1Image((v * pad).astype(np.float32), np.eye(4)), f"{W}/MP2_{name}.nii.gz")
 r = subprocess.run([sys.executable, f"{B}/scripts/mp2rage_robust.py", *(f"{W}/MP2_{k}.nii.gz" for k in ("uni", "inv1", "inv2")),
                     f"{W}/MP2_robust.nii.gz"], capture_output=True, text=True)
 if r.returncode: print(r.stdout, r.stderr); fail("mp2rage_robust failed")
 U = nib.load(f"{W}/MP2_uni.nii.gz").get_fdata(); O = nib.load(f"{W}/MP2_robust.nii.gz").get_fdata()
-bg_before, bg_after = U[~head].std(), O[~head].std()
+from scipy import ndimage as ndi
+band = (ndi.distance_transform_edt(~head) > 5) & (ndi.distance_transform_edt(~head) <= 15) & pad
+hm = np.median(U[wm])
+bg_before, bg_after = (U[band] > 0.25 * hm).mean(), (O[band] > 0.25 * hm).mean()
 cor = float(np.corrcoef(U[brain], O[brain])[0, 1])
-if not (bg_after < 0.4 * bg_before and cor > 0.95 and abs(np.median(O[wm]) - np.median(U[wm])) < 0.05 * np.median(U[wm])):
-    fail(f"background SD {bg_before:.0f} -> {bg_after:.0f}, brain correlation {cor:.3f}")
-print(f"   robust MP2RAGE: background SD {bg_before:.0f} -> {bg_after:.0f}, brain correlation {cor:.3f}, white matter unchanged")
+if not (bg_after < 0.05 and bg_before > 0.3 and cor > 0.95 and abs(np.median(O[wm]) - np.median(U[wm])) < 0.10 * np.median(U[wm])):
+    fail(f"speckle {bg_before:.2f} -> {bg_after:.3f}, brain r {cor:.3f}, wm {np.median(O[wm]):.0f} vs {np.median(U[wm]):.0f}; {r.stdout.strip()}")
+print(f"   robust MP2RAGE (zero-padded border): speckle 5-15 mm outside the head {bg_before:.0%} -> {bg_after:.1%}, "
+      f"brain correlation {cor:.3f}, white matter within 10 %; {r.stdout.strip().split('; ')[0].split(': ')[-1]}")
 print("RESULT mp2rage OK")
 ```

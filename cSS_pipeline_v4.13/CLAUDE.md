@@ -305,6 +305,15 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   Otsu head mask; lambda 1..128 until < 5 % of that band is brighter than 25 % of the brain, stopping before the brain
   correlation drops below 0.95. check_mp2rage now zero-pads the border: old version lambda 1, speckle 83 -> 81 %; new
   lambda 32, 83 -> 0 %, brain r 1.000, WM median -6 %.
+- v4.18.3 (LEMON P201 finished with recon-all, 6 candidates / 7 excluded, but QC 'pial edge agreement not
+  measurable', edge_n 0, registration cost null):
+  (1) css_qc boundary sample was |pial_sd| <= 0.75 x largest voxel; the voxel layers either side of a label boundary
+  sit at >= the smallest voxel size, so on isotropic voxels (0.8 mm: 0.6 < 0.8) it was EMPTY. Now
+  max(0.75 x largest, 1.01 x smallest) - unchanged for anisotropic scans. check_qc test 6 (PH3 relabelled 0.8 mm iso):
+  old edge_n 0 / not measurable, new edge_n 4000, shift 0.02 mm, ok.
+  (2) FreeSurfer 8 bbregister writes ID_swi2t1.dat.mincost (not .lta.mincost) -> cost was never read; both names now.
+  (3) P203 stopped silently after '[0/4] importing + skull-stripping' on both routes (set -e, SynthStrip output sent
+  to /dev/null): run_css now reports the failing tool and keeps work/ID_synthstrip.log. Cause still to be read there.
 
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.

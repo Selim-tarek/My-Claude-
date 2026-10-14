@@ -112,7 +112,7 @@ def shift_fit(If, brain, normal, vox, sel, rng, iters=6):
 def case_qc(base, subj, swi, I, If, seg, brain, tissue, cortex, pial_sd, normal, rim, hemiL, vox,
             t1_anat, full_bottom):
     rng = np.random.default_rng(0)
-    qc = dict(subject=subj, qc_version="v4.17.1")
+    qc = dict(subject=subj, qc_version="v4.18.3")
     qc["acquisition"] = read_acq(base, subj)
     qc["voxel_mm"] = [round(v, 3) for v in vox]
     qc["orientation"] = "".join(nib.aff2axcodes(swi.affine))
@@ -134,7 +134,9 @@ def case_qc(base, subj, swi, I, If, seg, brain, tissue, cortex, pial_sd, normal,
     qc["label_slice_coverage"] = round(float((bs & ls).sum() / max(int(bs.sum()), 1)), 3)
     qc["label_voxel_frac"] = round(float(((seg > 0) & brain).sum() / max(int(brain.sum()), 1)), 3)
     # pial confidence: label boundary vs SWI cortex/CSF edge, overall and by hemisphere x height third
-    bnd = cortex & (np.abs(pial_sd) <= 0.75 * max(vox)) & ~rim
+    # v4.18.3: the voxel layers on both sides of the label boundary sit at |pial_sd| >= the smallest voxel size,
+    # so 0.75 x the largest voxel selected NOTHING on isotropic scans (LEMON 0.8 mm: edge_n 0, "not measurable")
+    bnd = cortex & (np.abs(pial_sd) <= max(0.75 * max(vox), 1.01 * min(vox))) & ~rim
     off = edge_agreement(If, brain, pial_sd, normal, vox, bnd, rng)
     s_, bias_, spread_, found_ = shift_fit(If, brain, normal, vox, bnd, rng)
     # v4.17.1: separate a systematic misregistration (rigid shift, global bias) from scatter. On P006/P011 the

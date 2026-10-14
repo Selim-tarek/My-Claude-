@@ -31,9 +31,11 @@ mkdir -p $B/data $B/synthseg $B/work $B/review
 if [ -n "$SRC" ]; then
   if [ $STRIP -eq 1 ]; then
     echo "[0/4] importing + skull-stripping (SynthStrip, CSF kept) $SRC"
-    mri_convert "$SRC" $B/work/${S}_raw.nii.gz > /dev/null
+    mri_convert "$SRC" $B/work/${S}_raw.nii.gz > /dev/null || { echo "ERROR: mri_convert could not read $SRC"; exit 1; }
+    # v4.18.3: errors were silent under set -e (LEMON P203 stopped here with no message); keep SynthStrip's output
     mri_synthstrip -i $B/work/${S}_raw.nii.gz -o $B/data/${S}_swi.nii \
-      -m $B/work/${S}_brainmask.nii.gz > /dev/null
+      -m $B/work/${S}_brainmask.nii.gz > $B/work/${S}_synthstrip.log 2>&1 \
+      || { echo "ERROR: mri_synthstrip failed on the SWI (exit $?) - last lines of $B/work/${S}_synthstrip.log:"; tail -5 $B/work/${S}_synthstrip.log; exit 1; }
   else
     echo "[0/4] importing (no skull-strip) $SRC"
     mri_convert "$SRC" $B/data/${S}_swi.nii > /dev/null

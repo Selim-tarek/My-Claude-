@@ -101,4 +101,9 @@ for tab, m, idc in ((cc, cmc, "cand_id"), (xc, xmc, "excl_id")):
         if abs(ext - r.extent_mm) > 0.15: fail(f"extent_mm {r.extent_mm} != bounding box {ext:.1f} ({idc} {r[idc]})")
 if not edge_hits: fail("no candidate touches slice 0 - test does not exercise the volume edge")
 print(f"extent at the volume edge: {edge_hits} object(s) on slice 0, all extent_mm equal their bounding box")
+# 6. isotropic voxels (v4.18.3, LEMON 0.8 mm): the pial boundary sample must not be empty ("not measurable")
+aff_i = aff.copy(); aff_i[:3, 2] = aff[:3, 2] / np.linalg.norm(aff[:3, 2]) * zoom[0]
+qi = make_case("PHI", I0, seg0, aff_i)
+print(f"isotropic {zoom[0]:.2f} mm voxels: edge_n {qi['edge_n']}, label shift {qi['label_shift_mm']} mm, status {qi['status']}")
+if qi["edge_n"] < 50 or qi["label_shift_mm"] is None: fail("pial edge agreement not measurable on isotropic voxels")
 print("RESULT qc OK")
