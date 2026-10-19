@@ -69,6 +69,13 @@ echo "[2/4] aligning segmentation to SWI"
 python $SC/align_seg.py $S
 echo "[3/4] detecting cSS candidates"
 python $SC/detect_css.py $S -2.5 85 3
+# v4.19: pial-surface features (incl. curve-vs-patch width) whenever recon-all surfaces exist; recorded only,
+# and a failure here (e.g. the surface/label registration check) never stops the run
+SD=${CSS_SUBJECTS_DIR:-$B/subjects}
+if [ -f $SD/$S/surf/lh.pial ] && [ -f $SD/$S/mri/orig.mgz ] && [ -f $B/work/${S}_swi2t1.lta ]; then
+  echo "[3b] pial-surface features (recon-all surfaces; recorded only)"
+  python $SC/surface_features.py $S || echo "      WARNING: surface_features.py failed - detection results are unaffected"
+fi
 if [ -z "$NOVIEW" ]; then
   echo "[4/4] opening viewer"
   freeview -v $B/data/${S}_swi.nii \

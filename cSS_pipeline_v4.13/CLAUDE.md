@@ -315,6 +315,15 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   (3) P203 stopped silently after '[0/4] importing + skull-stripping' on both routes (set -e, SynthStrip output sent
   to /dev/null): run_css now reports the failing tool and keeps work/ID_synthstrip.log. Cause still to be read there.
 
+- v4.19 dimensionality on the surface (surface_features.py, recorded only): in one slice a vein and a cSS band are
+  both lines; on the pial surface a vein is a curve and cSS a patch. New columns surf_width_mm (core projected area /
+  geodesic length), surf_cross_mm (2 x p95 distance from the diameter path), surf_inradius_mm (largest distance from
+  the footprint edge), surf_aspect (cross / length). run_css.sh now runs surface_features.py after detection when
+  recon-all surfaces exist (failure only warns). PH6: cSS width 4.98-7.61 mm vs surface vein / sinus 0.47-0.93 mm;
+  inradius >= 5.93 vs <= 1.93. Resolution limit (bands cut from lesion 5, 1/2/4/8 slices of 1.2 mm): width 0.65 /
+  1.34 / 2.88 / 3.09 mm - a band only 1-2 slices high measures like a vein, so the feature can only help for cSS
+  covering >= ~4 slices (~5 mm). The phantom cSS are wide by construction; real cSS widths are unknown until labelled.
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.

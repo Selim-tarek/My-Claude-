@@ -159,7 +159,7 @@ yourself, draw the haematoma including its haemosiderin rim in freeview, save as
 ## 6. Surface steps (recon-all cases only)
 
 ```zsh
-python ~/css_project/scripts/surface_features.py P012     # pial-surface features for candidates + excluded
+python ~/css_project/scripts/surface_features.py P012     # pial-surface features (run_css.sh does this automatically since v4.19 when recon-all surfaces exist); surf_width_mm / surf_inradius_mm: curve (vein) vs patch (cSS)
 python ~/css_project/scripts/surface_overlay.py P012      # candidates (red) / excluded (blue) on the surface
 ```
 - Both scripts build the surface→SWI transform from `subjects/P012/mri/orig.mgz` and `work/P012_swi2t1.lta`,

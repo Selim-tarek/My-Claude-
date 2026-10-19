@@ -76,4 +76,36 @@ if not (np.allclose(F1.surf_curv.dropna(), 0.1, atol=1e-3) and np.allclose(F1.su
     fail("surface morphometry (curv / thickness) not read back")
 if F1.surf_sulc.isna().all() or not F1.surf_sulcal_frac.between(0, 1).all(): fail("surf_sulc / surf_sulcal_frac missing")
 print(f"morphometry: curv 0.1 / thickness 2.5 mm read back; surf_sulc range {F1.surf_sulc.min():.1f}..{F1.surf_sulc.max():.1f}")
+
+# 3. v4.19 dimensionality on the surface: phantom cSS are patches, veins / sinus pieces are curves
+fv2 = F[F.kind.isin(["surface vein", "sinus"]) & F.surf_width_mm.notna()]
+print(f"surface width (area / length): cSS {fc.surf_width_mm.min():.2f}-{fc.surf_width_mm.max():.2f} mm, surface vein / "
+      f"sinus {fv2.surf_width_mm.min():.2f}-{fv2.surf_width_mm.max():.2f} mm; inradius cSS >= {fc.surf_inradius_mm.min():.2f}, "
+      f"veins <= {fv2.surf_inradius_mm.max():.2f} mm")
+if fc.surf_width_mm.isna().any() or fc.surf_width_mm.min() < 2 * fv2.surf_width_mm.max():
+    fail("phantom cSS patches should be > 2x wider on the surface than the surface vein / sinus")
+if fc.surf_inradius_mm.min() <= fv2.surf_inradius_mm.max(): fail("surf_inradius_mm does not separate patch from curve")
+# resolution limit: bands cut from convexity lesion 5, 1 / 2 / 4 / 8 slices high, measured as fake candidates.
+# Width must grow with height; a 1-slice band is as narrow as a vein (it IS a curve on the surface).
+import shutil
+keep = {f: open(f"{B}/review/PH6_{f}", "rb").read() for f in ("candidates.csv", "candidates.nii.gz", "excluded.csv")}
+cd = pd.read_csv(f"{B}/review/PH6_candidates.csv"); ref = nib.load(f"{B}/review/PH6_candidates.nii.gz")
+m5 = tr == 5; ks = np.unique(np.nonzero(m5)[2]); N = np.zeros(tr.shape, np.int16); rows = []
+for i, (k0, h) in enumerate([(0, 1), (2, 2), (5, 4), (10, 8)], 1):
+    sel = m5.copy(); sel[:, :, :ks[0] + k0] = False; sel[:, :, ks[0] + k0 + h:] = False; N[sel] = i
+    rr = cd.iloc[0].copy(); rr["cand_id"] = i; rr["hemi"] = ""
+    rr["vox_i"], rr["vox_j"], rr["vox_k"] = np.argwhere(sel).mean(0).round().astype(int); rows.append(rr)
+pd.DataFrame(rows).to_csv(f"{B}/review/PH6_candidates.csv", index=False)
+pd.read_csv(f"{B}/review/PH6_excluded.csv").iloc[:0].to_csv(f"{B}/review/PH6_excluded.csv", index=False)
+nib.save(nib.Nifti1Image(N, ref.affine), f"{B}/review/PH6_candidates.nii.gz")
+run(f"{S}/surface_features.py", "PH6")
+W = pd.read_csv(f"{B}/review/PH6_surface_features.csv").sort_values("obj_id")
+for f, b in keep.items(): open(f"{B}/review/PH6_{f}", "wb").write(b)
+run(f"{S}/surface_features.py", "PH6")                     # restore the real feature table
+dz = abs(ref.affine[2, 2])
+print("band height -> surface width / inradius: " + ", ".join(
+    f"{h * dz:.1f} mm -> {w:.2f} / {r_:.2f}" for h, w, r_ in zip((1, 2, 4, 8), W.surf_width_mm, W.surf_inradius_mm)))
+if not (np.diff(W.surf_width_mm.values) > 0).all() or not (np.diff(W.surf_inradius_mm.values) >= 0).all():
+    fail("surface width should grow with the band height")
+if W.surf_width_mm.iloc[0] > 1.5 * fv2.surf_width_mm.max(): fail("a 1-slice band should measure as narrow as a vein")
 print("RESULT surfvein OK")

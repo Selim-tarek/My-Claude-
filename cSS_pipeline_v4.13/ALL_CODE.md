@@ -1,4 +1,4 @@
-# All code — cSS pipeline v4.18
+# All code — cSS pipeline v4.19
 
 Generated from the files below; the files are authoritative.
 
@@ -76,6 +76,13 @@ echo "[2/4] aligning segmentation to SWI"
 python $SC/align_seg.py $S
 echo "[3/4] detecting cSS candidates"
 python $SC/detect_css.py $S -2.5 85 3
+# v4.19: pial-surface features (incl. curve-vs-patch width) whenever recon-all surfaces exist; recorded only,
+# and a failure here (e.g. the surface/label registration check) never stops the run
+SD=${CSS_SUBJECTS_DIR:-$B/subjects}
+if [ -f $SD/$S/surf/lh.pial ] && [ -f $SD/$S/mri/orig.mgz ] && [ -f $B/work/${S}_swi2t1.lta ]; then
+  echo "[3b] pial-surface features (recon-all surfaces; recorded only)"
+  python $SC/surface_features.py $S || echo "      WARNING: surface_features.py failed - detection results are unaffected"
+fi
 if [ -z "$NOVIEW" ]; then
   echo "[4/4] opening viewer"
   freeview -v $B/data/${S}_swi.nii \
@@ -228,7 +235,11 @@ if ls $B/scripts/*.py >/dev/null 2>&1; then
   BK=$B/scripts/backup_$(date +%Y%m%d_%H%M); mkdir -p $BK; cp $B/scripts/*.py $B/scripts/*.sh $BK/ 2>/dev/null
   echo "old scripts backed up to $BK"
 fi
-cp $SRC/*.py $SRC/*.sh $B/scripts/ && chmod +x $B/scripts/*.sh $B/scripts/*.py
+# v4.18.3: copy to a temporary name, then rename - a batch that is running keeps reading its old file
+# (cp over a running zsh script changes it under the shell's feet)
+for f in $SRC/*.py $SRC/*.sh; do
+  t=$B/scripts/.$(basename $f).new; cp $f $t && chmod +x $t && mv -f $t $B/scripts/$(basename $f) || { echo "install FAILED at $f"; exit 1; }
+done
 grep -q 'css_project/scripts' ~/.zshrc || echo 'export PATH="$HOME/css_project/scripts:$PATH"' >> ~/.zshrc
 echo "installed to $B/scripts  - open a new Terminal window"
 ```
@@ -3740,6 +3751,17 @@ Features (each object is projected onto its nearest pial vertices, <= --near-mm 
   surf_thickness_mm       crown) and ?h.curv (mean curvature) and ?h.thickness over the projected vertices;
   surf_sulcal_frac        share of projected vertices with sulc > 0. NaN when the file is missing. Both cSS and
                           sulcal veins sit in sulci: context for the ranking model, not a separator on its own.
+  (v4.19) DIMENSIONALITY ON THE SURFACE. In one slice a vein and a cSS band both look like a line; on the pial
+  surface a vein stays a thin curve (as wide as the vessel) and cSS is a patch (subpial deposit over several mm
+  of cortex, across several slices). Measured on the largest surface piece:
+  surf_width_mm          projected area (core vertices, no ring) / geodesic length = mean width of the footprint
+  surf_cross_mm          2 x the 95th percentile geodesic distance from the footprint's centre line (the
+                         diameter path), inside the piece incl. its 1-vertex ring = width at the wide parts
+  surf_inradius_mm       largest geodesic distance from the edge of the piece = half the widest part; a curve
+                         stays at ~1 ring (mesh spacing ~0.7-1 mm) however long it is, a patch grows
+  surf_aspect            surf_cross_mm / geo_length_mm (0 = curve, ~1 = round patch)
+  All NaN when the piece is shorter than 2 mm. A vein lying on a cSS patch, or cSS confined to one line of
+  cortex, breaks the rule of thumb - recorded only, read with the images.
 This replaces the uploaded geodesic_vein_features.py prototype: there, "continuation" was measured on the
 bare mesh (always the search limit, 25 mm) and "branches" were mesh vertices with >= 6 neighbours."""
 import sys, os, json, argparse, numpy as np, nibabel as nib, pandas as pd
@@ -3803,6 +3825,15 @@ def sub_dist(sf, nodes, src, limit=np.inf):
     out = np.full(len(nodes), np.inf); out[idx] = d
     return out
 
+def sub_path(sf, nodes, a_, b_):
+    """vertex indices of the shortest path a_ -> b_ inside the vertex subset `nodes`"""
+    idx = np.nonzero(nodes)[0]; pos = -np.ones(len(nodes), int); pos[idx] = np.arange(len(idx))
+    _, pred = dijkstra(sf.G[idx][:, idx], indices=pos[a_], return_predecessors=True)
+    path, k = [], pos[b_]
+    while k >= 0:
+        path.append(idx[k]); k = pred[k]
+    return np.array(path[::-1], int)
+
 def features(m, hemi):
     pts = np.argwhere(m); Pw = apply(aff, pts.astype(float))
     sf = S.get(hemi) or min(S.values(), key=lambda s_: np.median(s_.tree.query(Pw)[0]))
@@ -3833,6 +3864,22 @@ def features(m, hemi):
     r["geo_length_mm"] = round(float(d1[e2]), 1)
     eu = float(np.linalg.norm(sf.V[e1] - sf.V[e2]))
     r["geo_euclid_ratio"] = round(float(d1[e2] / eu), 2) if eu > 1.0 else np.nan
+    # v4.19 dimensionality on the surface: curve (vein) vs patch (cSS)
+    L = float(d1[e2])
+    if L >= 2.0:
+        r["surf_width_mm"] = round(float(sf.area[P & big].sum() / L), 2)
+        dpath = sub_dist(sf, big, sub_path(sf, big, e1, e2))
+        r["surf_cross_mm"] = round(float(2 * np.percentile(dpath[big & np.isfinite(dpath)], 95)), 2)
+        bi = np.nonzero(big)[0]
+        edge = bi[np.array([(~big[sf.G[v].indices]).any() for v in bi])]
+        if len(edge) and len(edge) < len(bi):
+            de = sub_dist(sf, big, edge)
+            r["surf_inradius_mm"] = round(float(de[big & np.isfinite(de)].max()), 2)
+        else:
+            r["surf_inradius_mm"] = np.nan
+        r["surf_aspect"] = round(r["surf_cross_mm"] / L, 2)
+    else:
+        r.update(surf_width_mm=np.nan, surf_cross_mm=np.nan, surf_inradius_mm=np.nan, surf_aspect=np.nan)
     # dark pial surface beyond the projection, and how many separate dark paths leave it
     D = sf.dark | P1
     dc = sub_dist(sf, D, np.nonzero(P1)[0], limit=a.reach_mm)
@@ -3861,7 +3908,8 @@ for lst, idc in (("candidate", "cand_id"), ("excluded", "excl_id")):
                          **features(m, str(rr.get("hemi", "")))))
 cols = ["list", "obj_id"] + FP + ["surf_valid", "surf_normal_dist_mm", "surf_normal_iqr_mm", "surf_area_mm2",
         "surf_pieces", "surf_band_continuity", "geo_length_mm", "geo_euclid_ratio", "surf_dark_cont_mm",
-        "surf_exit_paths", "surf_sulc", "surf_curv", "surf_thickness_mm", "surf_sulcal_frac"]
+        "surf_exit_paths", "surf_sulc", "surf_curv", "surf_thickness_mm", "surf_sulcal_frac",
+        "surf_width_mm", "surf_cross_mm", "surf_inradius_mm", "surf_aspect"]
 pd.DataFrame(rows, columns=cols).to_csv(f"{base}/review/{subj}_surface_features.csv", index=False)
 json.dump(dict(subject=subj, transform_source=tsrc, label_agreement_mm=checks, tkras_to_swi=T.tolist(),
                near_mm=a.near_mm, reach_mm=a.reach_mm, note="recorded only; not validated"),
