@@ -68,7 +68,7 @@ if [ -f $T1SEG ] && [ ! $B/data/${S}_swi.nii -nt $T1SEG ]; then
 elif [ ! -f $B/synthseg/${S}_seg.nii.gz ] || [ $B/data/${S}_swi.nii -nt $B/synthseg/${S}_seg.nii.gz ]; then
   echo "      SynthSeg on the SWI (no T1 labels - consider --t1 for better anatomy)"
   mri_synthseg --i $B/data/${S}_swi.nii --o $B/synthseg/${S}_seg.nii.gz \
-    --parc --robust --threads 8 > /dev/null
+    --parc --robust --threads ${CSS_THREADS:-8} > /dev/null
 else
   echo "      SynthSeg on the SWI (already done, skipping)"
 fi
@@ -149,7 +149,7 @@ if [ $RECON -eq 1 ] || [ -f $SUBJECTS_DIR/$S/mri/aparc.a2009s+aseg.mgz ]; then
       echo "    moved the unfinished $SUBJECTS_DIR/$S aside (${S}_failed_<date>)"
     fi
     echo "[b] recon-all -all (1-3 h; log: $W/${S}_recon.log)"
-    recon-all -s $S -i $B/data/${S}_t1.nii.gz -all -threads 8 > $W/${S}_recon.log 2>&1 \
+    recon-all -s $S -i $B/data/${S}_t1.nii.gz -all -threads ${CSS_THREADS:-8} > $W/${S}_recon.log 2>&1 \
       || die "recon-all failed (see $W/${S}_recon.log)"
   else
     echo "[b] recon-all already finished for $S - re-using it"
@@ -166,7 +166,7 @@ if [ $RECON -eq 1 ] || [ -f $SUBJECTS_DIR/$S/mri/aparc.a2009s+aseg.mgz ]; then
   [ -n "$COST" ] && echo "    bbregister min cost $COST (FreeSurfer: < ~0.6 is typical for a good fit)"
 else
   echo "[b] SynthSeg --parc --robust on the T1"
-  mri_synthseg --i $B/data/${S}_t1.nii.gz --o $W/${S}_t1synthseg.nii.gz --parc --robust --threads 8 > /dev/null || die "mri_synthseg failed"
+  mri_synthseg --i $B/data/${S}_t1.nii.gz --o $W/${S}_t1synthseg.nii.gz --parc --robust --threads ${CSS_THREADS:-8} > /dev/null || die "mri_synthseg failed"
   LAB=$W/${S}_t1synthseg.nii.gz
   echo "[c] register SWI -> T1 (mri_coreg, rigid, mutual information)"
   mri_coreg --mov $SWI --ref $W/${S}_t1_brain.nii.gz --reg $W/${S}_swi2t1.lta --dof 6 > $W/${S}_coreg.log 2>&1 \
@@ -4396,7 +4396,8 @@ print(f"{os.path.basename(a.out)}: SWI = magnitude x phase-mask^{a.power}; phase
 # usage: run_lemon.sh LEMON_DIR [--download] [--parallel N] [--subjects "sub-010239 sub-010255"] [--summary]
 #   LEMON_DIR   folder with sub-XXXXXX/ses-01/anat/ (created by --download); no spaces in the path
 #   --download  fetch the 4 files per subject from the public OpenNeuro S3 bucket (curl; skips files present)
-#   --parallel  subjects processed at the same time (default 2; recon-all uses 8 threads each)
+#   --parallel  subjects processed at the same time (default 1 since v4.19.1; 2 crashed a laptop)
+#   --threads   CPU threads per subject for recon-all / SynthSeg (default 4; CSS_THREADS)
 #   --subjects  default: the 26 volunteers aged 55-75 with GRE + 3-D FLAIR
 #   --summary   only print the summary table of finished subjects
 #   --force     re-run subjects that already finished (default: skipped, so an interrupted batch can be restarted)
@@ -4445,11 +4446,12 @@ fi
 
 L=$1; shift 2>/dev/null || true
 [ -n "$L" ] || { sed -n 2,14p $0; exit 1; }
-DL=0; PAR=2; SUBS=$DEFAULT; SUMONLY=0
+DL=0; PAR=1; SUBS=$DEFAULT; SUMONLY=0; export CSS_THREADS=${CSS_THREADS:-4}
 while [ $# -gt 0 ]; do
   case "$1" in
     --download) DL=1; shift;;
     --parallel) PAR=$2; shift 2;;
+    --threads) export CSS_THREADS=$2; shift 2;;
     --subjects) SUBS=$2; shift 2;;
     --summary) SUMONLY=1; shift;;
     --force) export LEMON_FORCE=1; shift;;
@@ -4476,8 +4478,8 @@ if [ $SUMONLY -eq 0 ]; then
       [ -s $o ] || curl -fsSL -o $o $URL/$s/ses-01/anat/${s}_ses-01_${f}.nii.gz || { echo "download FAILED: $s $f"; rm -f $o; }
     done; done
   fi
-  echo "LEMON: $(echo $SUBS | wc -w | tr -d ' ') subjects, $PAR at a time; recon-all ~1-3 h each (progress: tail -f $B/logs/<ID>_run.log)"
-  for s in $(echo $SUBS); do echo "$s $(grep ",ds000221,$s\$" $MAP | cut -d, -f1)"; done | xargs -n 2 -P $PAR zsh $0 --one
+  echo "LEMON: $(echo $SUBS | wc -w | tr -d ' ') subjects, $PAR at a time, $CSS_THREADS threads, low priority (nice); recon-all ~1-3 h each (progress: tail -f $B/logs/<ID>_run.log)"
+  for s in $(echo $SUBS); do echo "$s $(grep ",ds000221,$s\$" $MAP | cut -d, -f1)"; done | xargs -n 2 -P $PAR nice -n 15 zsh $0 --one
 fi
 
 python - "$B" $(echo $SUBS) <<'EOF'

@@ -61,7 +61,7 @@ if [ -f $T1SEG ] && [ ! $B/data/${S}_swi.nii -nt $T1SEG ]; then
 elif [ ! -f $B/synthseg/${S}_seg.nii.gz ] || [ $B/data/${S}_swi.nii -nt $B/synthseg/${S}_seg.nii.gz ]; then
   echo "      SynthSeg on the SWI (no T1 labels - consider --t1 for better anatomy)"
   mri_synthseg --i $B/data/${S}_swi.nii --o $B/synthseg/${S}_seg.nii.gz \
-    --parc --robust --threads 8 > /dev/null
+    --parc --robust --threads ${CSS_THREADS:-8} > /dev/null
 else
   echo "      SynthSeg on the SWI (already done, skipping)"
 fi

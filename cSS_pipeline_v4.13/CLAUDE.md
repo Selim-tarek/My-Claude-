@@ -324,6 +324,9 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   1.34 / 2.88 / 3.09 mm - a band only 1-2 slices high measures like a vein, so the feature can only help for cSS
   covering >= ~4 slices (~5 mm). The phantom cSS are wide by construction; real cSS widths are unknown until labelled.
 
+- v4.19.1: the 2-at-a-time LEMON batch (8 threads each) crashed the user's laptop; only P201 finished. run_lemon now
+  runs 1 subject at a time, CSS_THREADS (default 4, --threads N) for recon-all / SynthSeg, under nice -n 15.
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.

@@ -51,7 +51,7 @@ if [ $RECON -eq 1 ] || [ -f $SUBJECTS_DIR/$S/mri/aparc.a2009s+aseg.mgz ]; then
       echo "    moved the unfinished $SUBJECTS_DIR/$S aside (${S}_failed_<date>)"
     fi
     echo "[b] recon-all -all (1-3 h; log: $W/${S}_recon.log)"
-    recon-all -s $S -i $B/data/${S}_t1.nii.gz -all -threads 8 > $W/${S}_recon.log 2>&1 \
+    recon-all -s $S -i $B/data/${S}_t1.nii.gz -all -threads ${CSS_THREADS:-8} > $W/${S}_recon.log 2>&1 \
       || die "recon-all failed (see $W/${S}_recon.log)"
   else
     echo "[b] recon-all already finished for $S - re-using it"
@@ -68,7 +68,7 @@ if [ $RECON -eq 1 ] || [ -f $SUBJECTS_DIR/$S/mri/aparc.a2009s+aseg.mgz ]; then
   [ -n "$COST" ] && echo "    bbregister min cost $COST (FreeSurfer: < ~0.6 is typical for a good fit)"
 else
   echo "[b] SynthSeg --parc --robust on the T1"
-  mri_synthseg --i $B/data/${S}_t1.nii.gz --o $W/${S}_t1synthseg.nii.gz --parc --robust --threads 8 > /dev/null || die "mri_synthseg failed"
+  mri_synthseg --i $B/data/${S}_t1.nii.gz --o $W/${S}_t1synthseg.nii.gz --parc --robust --threads ${CSS_THREADS:-8} > /dev/null || die "mri_synthseg failed"
   LAB=$W/${S}_t1synthseg.nii.gz
   echo "[c] register SWI -> T1 (mri_coreg, rigid, mutual information)"
   mri_coreg --mov $SWI --ref $W/${S}_t1_brain.nii.gz --reg $W/${S}_swi2t1.lta --dof 6 > $W/${S}_coreg.log 2>&1 \
