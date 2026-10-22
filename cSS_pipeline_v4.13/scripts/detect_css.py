@@ -174,6 +174,40 @@ z = (Ic - local_ref(cortex)) / sd
 # regionally dark NORMAL cortex (iron-rich motor cortex) is not locally dark, so it stays in
 z = (Ic - local_ref(cortex & (z > Z_LOW))) / sd
 z_glob = (Ic - mu) / sd
+# v4.19.2 regional + contralateral reference (recorded only). LEMON P201 (healthy): 5 of 6 candidates were
+# naturally dark cortex (motor strip, cuneus/precuneus: iron/myelin), patch-shaped like cSS. Physiological
+# darkness covers much of its anatomical region and is roughly symmetric; cSS is focal and usually one-sided.
+_ci = np.nonzero(cortex & brain); _cl = seg[_ci]; _cv = Ic[_ci].astype(np.float32); del _ci
+_o = np.argsort(_cl, kind="stable"); _cl, _cv = _cl[_o], _cv[_o]
+_u, _st = np.unique(_cl, return_index=True); _en = np.r_[_st[1:], len(_cl)]
+REG = {}
+for _c, _a, _b in zip(_u, _st, _en):
+    _v = np.sort(_cv[_a:_b])
+    if len(_v) >= 200:
+        _m = float(np.median(_v)); REG[int(_c)] = (_v, _m, float(1.4826 * np.median(np.abs(_v - _m)) + 1e-6))
+del _cl, _cv, _o
+def mirror_code(c):
+    if 1000 <= c < 2000: return c + 1000
+    if 2000 <= c < 3000: return c - 1000
+    return {3: 42, 42: 3}.get(c, -1)
+def region_ref(code, vals_c, own_vals):
+    """vals_c: candidate intensities; own_vals: the candidate's voxels that are in its own label's cortex"""
+    nan = dict(region_z=np.nan, region_dark_frac=np.nan, mirror_region_z=np.nan, cand_mirror_z=np.nan)
+    if code not in REG or not len(vals_c): return nan
+    v, m, sd_ = REG[code]; cm_ = float(np.median(vals_c))
+    out = dict(nan, region_z=round((cm_ - m) / sd_, 2))
+    # share of the region's cortex (candidate itself left out) at least half as dark as the candidate, measured
+    # from the whole-brain cortex median: high = the region is broadly dark (physiological pattern)
+    thr = mu + 0.5 * (cm_ - mu)
+    n_all = int(np.searchsorted(v, thr, side="right")) - int((own_vals <= thr).sum())
+    n_tot = len(v) - len(own_vals)
+    if cm_ < mu and n_tot > 0: out["region_dark_frac"] = round(max(n_all, 0) / n_tot, 3)
+    mc = mirror_code(code)
+    if mc in REG:
+        vm, mm_, sdm = REG[mc]
+        out["mirror_region_z"] = round((m - mm_) / np.sqrt((sd_ ** 2 + sdm ** 2) / 2), 2)
+        out["cand_mirror_z"] = round((cm_ - mm_) / sdm, 2)
+    return out
 
 # ---- 2. search zone: pial band minus skull-strip rim, white matter and deep nuclei
 dist_mm = ndi.distance_transform_edt(brain, sampling=vox)
@@ -556,6 +590,8 @@ for p in regionprops(lab, spacing=vox):
     vt = css_vessel.local_tracking(cm, VES[vb], vox, VES_REACH_MM, band=(pial_sd[vb] > -PIAL_IN_MM) & ~np.isin(seg[vb], WM + DEEP),
                                    dark=DARKS[vb], midline=dmid[vb] < MIDLINE_END_MM)
     mdark = mirror_dark(pts)
+    _own = mm & (seg[pad] == code) & cortex[pad]
+    rref = region_ref(code, Ic[pad][mm], Ic[pad][_own])
     # v4.18 thickness (recorded only): half-width along the candidate's centre line
     rp = radius_profile(mm, vox)
     rad = dict(cand_radius_med_mm=round(float(np.median(rp)), 2) if len(rp) else np.nan,
@@ -634,7 +670,7 @@ for p in regionprops(lab, spacing=vox):
                      basal_frac=round(float((d_basal[pad][mm] <= BASAL_MM).mean()), 2),
                      vessel_ext_mm=round(ves_ext, 1), vessel_wm_mm=round(ves_wm, 1), vessel_run_mm=round(min(ves_run, VES_REACH_MM), 1), axis_normal=round(axn, 2),
                      score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label,
-                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1, **vt, **rad))
+                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1, **vt, **rad, **rref))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
 cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongation",
@@ -651,7 +687,8 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "cand_geodesic_mm", "local_cont_max_mm", "local_cont_min_mm", "local_cont_total_mm",  # v4.16,
         "terminal_ends", "local_net_mm", "local_branch_points", "local_branch_per10mm",       # recorded only
         "end_type_max", "end_type_min", "review_tier", "tier_reason",
-        "cand_radius_med_mm", "cand_radius_p95_mm", "cand_radius_cv", "net_radius_med_mm", "net_radius_p95_mm"]                        # v4.18, recorded only
+        "cand_radius_med_mm", "cand_radius_p95_mm", "cand_radius_cv", "net_radius_med_mm", "net_radius_p95_mm",                        # v4.18, recorded only
+        "region_z", "region_dark_frac", "mirror_region_z", "cand_mirror_z"]                         # v4.19.2, recorded only
 
 # ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason
 # height is measured within the CEREBRUM (cortex + cerebral WM), so 0 = floor of the temporal/frontal

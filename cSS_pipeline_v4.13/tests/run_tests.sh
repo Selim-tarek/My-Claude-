@@ -144,6 +144,9 @@ grep -q "RESULT labels OK" $T/labels.log || { echo "FAIL: v4.15 label checks"; e
 echo "== v4.17 two-reader consensus, adjudication, kappa"
 python $ROOT/tests/check_consensus.py | tee $T/consensus.log | grep -v "^RESULT"
 grep -q "RESULT consensus OK" $T/consensus.log || { echo "FAIL: v4.17 consensus checks"; exit 1; }
+echo "== v4.19.2 regional + contralateral reference (dark gyrus vs focal cSS)"
+python $ROOT/tests/check_region.py | tee $T/region.log | grep -E "^PH"
+grep -q "RESULT region OK" $T/region.log || { cat $T/region.log; echo "FAIL: v4.19.2 region checks"; exit 1; }
 echo "== v4.16 surface-following branching vein draining to a sinus (PH6): vein tracking + pial-surface features"
 python $ROOT/tests/phantom_surfvein.py; python $S/align_seg.py PH6 > /dev/null
 python $ROOT/tests/check_surfvein.py | tee $T/surfvein.log | grep -E "^(vein tracking|surface features)"

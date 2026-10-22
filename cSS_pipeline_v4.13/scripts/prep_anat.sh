@@ -61,7 +61,6 @@ if [ $RECON -eq 1 ] || [ -f $SUBJECTS_DIR/$S/mri/aparc.a2009s+aseg.mgz ]; then
   echo "[c] register SWI -> T1 (bbregister, boundary-based, T2*-like contrast)"
   bbregister --s $S --mov $SWI --reg $W/${S}_swi2t1.lta --t2 --init-coreg > $W/${S}_bbreg.log 2>&1 \
     || die "bbregister failed (see $W/${S}_bbreg.log)"
-  grep -i "min cost" $W/${S}_bbreg.log | tail -1 || true
   # FreeSurfer 8 bbregister names its side files after an internal .dat (ID_swi2t1.dat.mincost), older ones .lta.mincost
   MC=$(ls $W/${S}_swi2t1.lta.mincost $W/${S}_swi2t1.dat.mincost 2>/dev/null | head -1)
   REGM=bbregister; COST=$( [ -n "$MC" ] && awk 'NR==1{print $1}' $MC 2>/dev/null || true)

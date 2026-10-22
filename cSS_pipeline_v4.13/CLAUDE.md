@@ -327,6 +327,19 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
 - v4.19.1: the 2-at-a-time LEMON batch (8 threads each) crashed the user's laptop; only P201 finished. run_lemon now
   runs 1 subject at a time, CSS_THREADS (default 4, --threads N) for recon-all / SynthSeg, under nice -n 15.
 
+- LEMON P201 with v4.19.1 (user's Mac): QC fix works on real data (label shift 0.22 mm, bias -0.09, scatter 1.51,
+  edge measured); bbregister cost 0.96 read (> 0.8 -> low_confidence although the edge fit says aligned; limit not
+  changed from one scan). 6 candidates in this presumed-healthy scan; user's visual read: 1, 2, 4, 5, 6 dark cortex /
+  artifact, none veins (pre/postcentral, cuneus, precuneus). Surface width 1.6-5.6 mm, subpial: patch-shaped like cSS,
+  so surf_width does NOT separate them. freeview default window shows this SWI white: use :grayscale=p1,p99.
+- v4.19.2 regional + contralateral reference (detect_css.py, recorded only): region_z (candidate median vs its own
+  cortical label's median, label MAD units), region_dark_frac (share of the label's cortex outside the candidate at
+  least half as dark as the candidate, from the whole-cortex median), mirror_region_z (label vs the same label in the
+  other hemisphere), cand_mirror_z (candidate vs that mirror label). tests/check_region.py: PH3 + a gyrus darkened
+  25 % with its own label: cSS region_z -6.9..-9.2, dark frac <= 0.02; bilateral dark gyrus -0.45 / 0.78 / mirror 0;
+  left-only dark gyrus -0.09 / 0.46 / mirror -3.6. Limits: real physiological darkness covers only part of a label
+  (posterior precentral bank), receive-coil bias can make hemispheres differ, and cSS can be bilateral.
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.

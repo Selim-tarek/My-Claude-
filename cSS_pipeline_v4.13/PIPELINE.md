@@ -88,6 +88,7 @@ scale, Radiopaedia):
 | **Tram-track**: both banks of a sulcus | `tram_frac`: walks across the sulcus and tests the opposite bank, with brighter CSF between them | > 0 | ≈ 0 (one central line) |
 | Not part of the venous tree | `vein_tree_mm`: extent of the connected dark-tube network (**recorded only**: on real SWI the network merges brain-wide) | short | long, branching |
 | Asymmetric | `mirror_dark_frac`: darkness at the mirror point in the other hemisphere | low | high (normal veins are paired) |
+| Focal, not regional (v4.19.2, recorded only) | `region_z`, `region_dark_frac`: candidate vs its own cortical label; `mirror_region_z`, `cand_mirror_z`: vs the same label in the other hemisphere | far darker than its region, region not broadly dark | naturally dark cortex (motor strip, visual cortex): region broadly dark, symmetric |
 | **Remote from lobar ICH** | `ich_dist_mm`, `near_ich_suggest` (≤ 5 mm) | far | near → reader presses **i** |
 | **Supratentorial** | `infratentorial` | 0 | 1 → classical superficial siderosis, reported separately |
 | Chronic: **no FLAIR hyperintensity** | `flair_csf_z`, `flair_bright` (only with FLAIR) | not bright | bright → acute convexity SAH |
