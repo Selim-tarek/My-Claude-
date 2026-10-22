@@ -352,6 +352,13 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
 - v4.19.3 css_qc: bbregister cost > 0.8 lowers the status only when the edge fit could not be measured; otherwise it
   is a note (qc["notes"]). check_qc test 7: cost 0.96 + measured edge fit -> ok with the note.
 
+- LEMON GRE header (checked on P202): sform_code 2, qform 0; world box x -167..-1, y -195..9, z -162..-34 vs the
+  MP2RAGE's x -85..90, y -131..108, z -122..133 (same session) - the GRE is NOT in scanner space, so freeview shows
+  nothing when GRE and T1 are overlaid. Axis DIRECTIONS are correct: in SWI world coordinates of the registered labels,
+  cerebellum below cerebrum, frontal in front of occipital, left on the left (P201/P202/P204 all True). Detection only
+  uses relative positions; registration (mri_coreg init) copes. The right inferior parietal false positive sits at the
+  same voxel position in P201/P202/P204 (44-46, 64-65, 43-48); user's read: dark cortex. Cause not established.
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.
