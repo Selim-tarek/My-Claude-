@@ -1,0 +1,17 @@
+# conda environment for the cSS pipeline (v4.17).  Create:  conda env create -f environment.yml
+# Minimum versions are what the code needs (scikit-image >= 0.20: regionprops spacing; 3-D skeletonize).
+# Tested in this release with: python 3.13.16, numpy 2.5.4, scipy 1.18.1, nibabel 5.4.2, pandas 3.0.6,
+# scikit-image 0.26.0, matplotlib 3.11.2 (not yet with python 3.11 itself). Every detector run records the versions actually used in
+# review/<ID>_manifest.json ("environment"), together with the FreeSurfer build stamp.
+# FreeSurfer (8.x, with its licence) is installed separately and is not part of this environment.
+name: css
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy>=1.26
+  - scipy>=1.11
+  - nibabel>=5.0
+  - pandas>=2.0
+  - scikit-image>=0.22
+  - matplotlib>=3.7

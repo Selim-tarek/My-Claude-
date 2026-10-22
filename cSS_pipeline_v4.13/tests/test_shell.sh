@@ -1,0 +1,93 @@
+#!/bin/bash
+# Shell-flow test for run_css.sh + prep_anat.sh with STUBBED FreeSurfer tools and python
+# (checks argument parsing, which tools run in which order, and the re-use / staleness logic).
+# usage: bash tests/test_shell.sh        Uses real zsh if installed, else bash as a stand-in.
+set -e
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+T=$(mktemp -d); mkdir -p $T/bin $T/base/scripts; cp $ROOT/scripts/*.py $ROOT/scripts/*.sh $T/base/scripts/
+cat > $T/bin/fsstub <<'EOS'
+#!/bin/bash
+n=$(basename $0); echo "$n $*" >> $STUBLOG
+out=""; in=""; targ=""
+while [ $# -gt 0 ]; do case "$1" in
+  -o|--o) out=$2; shift 2;; -i|--i|--mov) [ -z "$in" ] && in=$2; shift 2;; --targ) targ=$2; shift 2;;
+  --reg) touch $2; shift 2;;
+  -s) [ "$n" = recon-all ] && mkdir -p $SUBJECTS_DIR/$2/mri && touch $SUBJECTS_DIR/$2/mri/aparc+aseg.mgz $SUBJECTS_DIR/$2/mri/aparc.a2009s+aseg.mgz; shift 2;;
+  *) [ "$n" = mri_convert ] && { [ -z "$in" ] && in=$1 || out=$1; }; shift;; esac; done
+[ -n "$out" ] && [ -n "$in" ] && cp "$in" "$out" 2>/dev/null || true
+EOS
+chmod +x $T/bin/fsstub
+for t in mri_convert mri_synthstrip mri_synthseg mri_coreg mri_vol2vol bbregister recon-all freeview; do ln -s fsstub $T/bin/$t; done
+printf '#!/bin/bash\necho "python $(basename $1) ${*:2}" >> $STUBLOG\n' > $T/bin/python; chmod +x $T/bin/python
+command -v zsh >/dev/null || { printf '#!/bin/bash\nexec bash "$@"\n' > $T/bin/zsh; chmod +x $T/bin/zsh; echo "(zsh not installed: using bash as a stand-in)"; }
+echo swi > $T/swi.nii; echo t1 > $T/t1.nii; echo fl > $T/fl.nii
+export PATH=$T/bin:$PATH STUBLOG=$T/log CSS_BASE=$T/base NOVIEW=1 SUBJECTS_DIR=/somewhere/else  # must be ignored
+SH="zsh"
+fail() { echo "FAIL: $1"; cat $T/log; exit 1; }
+seen() { grep -q "$1" $T/log || fail "expected call: $1"; }
+notseen() { ! grep -q "$1" $T/log || fail "unexpected call: $1"; }
+
+echo "== 1. SWI only"
+: > $T/log; $SH $T/base/scripts/run_css.sh P1 $T/swi.nii > /dev/null
+seen "mri_synthstrip -i $T/base/work/P1_raw"; seen "mri_synthseg --i $T/base/data/P1_swi.nii"
+seen "python align_seg.py P1"; seen "python detect_css.py P1 -2.5 85 3"; notseen mri_coreg
+echo "== 2. re-run: SynthSeg re-used"
+: > $T/log; $SH $T/base/scripts/run_css.sh P1 > /dev/null; notseen mri_synthseg; seen "detect_css.py P1"
+echo "== 3. SWI re-imported -> stale SynthSeg is redone"
+sleep 1; : > $T/log; $SH $T/base/scripts/run_css.sh P1 $T/swi.nii > /dev/null; seen "mri_synthseg --i $T/base/data/P1_swi.nii"
+echo "== 4. SWI + T1 + FLAIR (SynthSeg on T1, mri_coreg)"
+: > $T/log; $SH $T/base/scripts/run_css.sh P2 $T/swi.nii --t1 $T/t1.nii --flair $T/fl.nii > /dev/null
+seen "mri_synthseg --i $T/base/data/P2_t1.nii.gz"; seen "mri_coreg --mov $T/base/data/P2_swi.nii --ref $T/base/work/P2_t1_brain"
+seen "mri_vol2vol --mov $T/base/data/P2_swi.nii --targ $T/base/work/P2_t1synthseg.nii.gz --lta $T/base/work/P2_swi2t1.lta --inv --interp nearest"
+seen "mri_coreg --mov $T/base/work/P2_flair_brain.nii.gz --ref $T/base/data/P2_swi.nii"
+seen "mri_vol2vol --mov $T/base/work/P2_flair_brain.nii.gz --targ $T/base/data/P2_swi.nii"
+notseen "mri_synthseg --i $T/base/data/P2_swi.nii"; notseen recon-all; notseen bbregister
+grep -q '"method": "mri_coreg", "cost": null' $T/base/work/P2_reg.json || fail "registration QC record (mri_coreg)"
+echo "== 5. --recon (recon-all, bbregister, Destrieux)"
+: > $T/log; $SH $T/base/scripts/run_css.sh P3 $T/swi.nii --t1 $T/t1.nii --recon > /dev/null
+seen "recon-all -s P3"; seen "bbregister --s P3 --mov $T/base/data/P3_swi.nii --reg $T/base/work/P3_swi2t1.lta --t2 --init-coreg"
+seen "aparc.a2009s+aseg.mgz --lta $T/base/work/P3_swi2t1.lta --inv --interp nearest --o $T/base/work/P3_a2009s_swispace"
+grep -q '"method": "bbregister", "cost": null' $T/base/work/P3_reg.json || fail "registration QC record (bbregister, no mincost)"
+echo "== 6. recon-all already done -> re-used without --recon; bbregister mincost recorded"
+printf '#!/bin/bash\necho "bbregister $*" >> $STUBLOG\necho "0.512 1 2 3" > %s/base/work/P3_swi2t1.lta.mincost\n' $T > $T/bin/bbregister.new
+chmod +x $T/bin/bbregister.new; mv -f $T/bin/bbregister.new $T/bin/bbregister
+: > $T/log; $SH $T/base/scripts/prep_anat.sh P3 --t1 $T/t1.nii > /dev/null; notseen "recon-all"; seen bbregister
+grep -q '"cost": 0.512' $T/base/work/P3_reg.json || fail "bbregister mincost not recorded"
+echo "== 6a. v4.17.2: a missing --t1 file stops prep_anat and run_css before anything runs"
+: > $T/log; out=$($SH $T/base/scripts/prep_anat.sh P3 --t1 PATH_TO_T1 2>&1) && fail "prep_anat accepted a missing T1"
+echo "$out" | grep -q "T1 file not found" || fail "no clear message for a missing T1"; notseen mri_convert
+: > $T/log; $SH $T/base/scripts/run_css.sh P3 --t1 PATH_TO_T1 > /dev/null 2>&1 && fail "run_css went on after prep_anat failed"
+notseen "detect_css.py P3"
+echo "== 6a2. the imported copy data/ID_t1.nii.gz can be given as --t1"
+: > $T/log; $SH $T/base/scripts/prep_anat.sh P2 --t1 $T/base/data/P2_t1.nii.gz > /dev/null
+[ -s $T/base/data/P2_t1.nii.gz ] || fail "re-import of data/P2_t1.nii.gz lost the file"; seen "mri_coreg --mov"
+echo "== 6c. v4.18 run_lemon.sh: GRE -> SWI -> recon route for each subject, fixed P2xx ids, re-run keeps ids"
+for x in sub-1 sub-2 sub-3; do mkdir -p $T/lemon/$x/ses-01/anat; for f in acq-mag_GRE acq-phase_GRE acq-mp2rage_T1w inv-1_mp2rage inv-2_mp2rage acq-highres_FLAIR; do
+  echo $f > $T/lemon/$x/ses-01/anat/${x}_ses-01_${f}.nii.gz; done; done
+printf '#!/bin/bash\necho "python $(basename $1) ${*:2}" >> $STUBLOG\n[ "$(basename $1)" = make_swi.py ] && echo swi > $4\n[ "$(basename $1)" = mp2rage_robust.py ] && echo t1 > $5\nexit 0\n' > $T/bin/python
+: > $T/log; $SH $T/base/scripts/run_lemon.sh $T/lemon --subjects "sub-1 sub-2" --parallel 2 > $T/lemon.out 2>&1
+grep -q "OK     P201 (sub-1)" $T/lemon.out && grep -q "OK     P202 (sub-2)" $T/lemon.out || { cat $T/lemon.out; fail "run_lemon did not finish both subjects"; }
+seen "make_swi.py $T/lemon/sub-1/ses-01/anat/sub-1_ses-01_acq-mag_GRE.nii.gz"; seen "recon-all -s P202"
+seen "bbregister --s P201 --mov $T/base/data/P201_swi.nii"; seen "python detect_css.py P202"; seen "python study_meta.py P201 --split dev"
+seen "python mp2rage_robust.py $T/lemon/sub-1/ses-01/anat/sub-1_ses-01_acq-mp2rage_T1w.nii.gz"
+seen "mri_convert $T/base/work/P201_t1_robust.nii.gz"
+echo "== 6c2. recon-all fails (P203): unfinished subject folder moved aside, SynthSeg fallback on the T1, still OK"
+mkdir -p $T/base/subjects/P203/mri; mv $T/bin/recon-all $T/bin/recon-all.ok
+printf '#!/bin/bash\necho "recon-all $*" >> $STUBLOG\nexit 1\n' > $T/bin/recon-all; chmod +x $T/bin/recon-all
+: > $T/log; $SH $T/base/scripts/run_lemon.sh $T/lemon --subjects "sub-3" > $T/lemon3.out 2>&1
+rm $T/bin/recon-all; mv $T/bin/recon-all.ok $T/bin/recon-all
+grep -q "OK     P203 (sub-3)" $T/lemon3.out || { cat $T/lemon3.out; cat $T/base/logs/P203_run.log; fail "fallback did not finish P203"; }
+grep -q "falling back to SynthSeg" $T/base/logs/P203_run.log || fail "no fallback message"
+seen "mri_synthseg --i $T/base/data/P203_t1.nii.gz"; ls -d $T/base/subjects/P203_failed_* > /dev/null 2>&1 || fail "unfinished folder not kept aside"
+: > $T/log; $SH $T/base/scripts/run_lemon.sh $T/lemon --subjects "sub-2 sub-1" --summary > /dev/null 2>&1
+$SH $T/base/scripts/run_lemon.sh $T/lemon --subjects "sub-1" > $T/lemon2.out 2>&1
+grep -q "SKIP   P201" $T/lemon2.out || { cat $T/lemon2.out; fail "finished subject not skipped on restart"; }
+[ "$(grep -c ds000221 $T/base/labels/id_map.csv)" = 3 ] && grep -q "P201,ds000221,sub-1" $T/base/labels/id_map.csv || fail "id map changed on re-run"
+printf '#!/bin/bash\necho "python $(basename $1) ${*:2}" >> $STUBLOG\n' > $T/bin/python; chmod +x $T/bin/python
+echo "== 6b. --phase is imported for the reviewer"
+echo ph > $T/ph.nii; : > $T/log; $SH $T/base/scripts/run_css.sh P4 $T/swi.nii --phase $T/ph.nii > /dev/null
+seen "mri_convert $T/ph.nii $T/base/data/P4_phase.nii.gz"
+echo "== 7. batch run_all.sh reaches detection for every subject"
+: > $T/log; $SH $T/base/scripts/run_all.sh P1 P2 > /dev/null || true   # stub python prints no summary
+[ $(grep -c "detect_css.py" $T/log) -eq 2 ] || fail "run_all.sh did not run detection for both subjects"
+echo "SHELL TESTS PASSED"
