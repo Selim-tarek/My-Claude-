@@ -345,6 +345,13 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   lose 2 of 6 known lesions: region_z must NOT become a rule. Likely reason: cSS in naturally dark cortex, and
   extensive cSS darkens its own label. mirror_region_z ~0 everywhere (-1.0..+1.0), also in P006: uninformative so far.
 
+- LEMON P202 / P204 (v4.19.1 batch, 1 at a time, 4 threads): both recon-all OK; 15 / 16 candidates (P201: 6); label
+  shift 0.11 / 0.12 mm; QC low_confidence only from bbregister cost 0.964 / 0.954 (P201 0.962). False positives by
+  region, 3 scans: inferior parietal 6, cuneus/pericalcarine 4, superior parietal 2, temporal 4, pre/postcentral 2 ...
+  region_z medians -2.64 / -2.74 / -3.18 (33-56 % below -3) - inside the P006 known-cSS range, as expected.
+- v4.19.3 css_qc: bbregister cost > 0.8 lowers the status only when the edge fit could not be measured; otherwise it
+  is a note (qc["notes"]). check_qc test 7: cost 0.96 + measured edge fit -> ok with the note.
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.

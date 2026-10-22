@@ -106,4 +106,10 @@ aff_i = aff.copy(); aff_i[:3, 2] = aff[:3, 2] / np.linalg.norm(aff[:3, 2]) * zoo
 qi = make_case("PHI", I0, seg0, aff_i)
 print(f"isotropic {zoom[0]:.2f} mm voxels: edge_n {qi['edge_n']}, label shift {qi['label_shift_mm']} mm, status {qi['status']}")
 if qi["edge_n"] < 50 or qi["label_shift_mm"] is None: fail("pial edge agreement not measurable on isotropic voxels")
+# 7. high bbregister cost with a measured edge fit: recorded as a note, status unchanged (v4.19.3)
+json.dump({"method": "bbregister", "cost": 0.96}, open(f"{B}/work/PHI_reg.json", "w"))
+qh = make_case("PHI", I0, seg0, aff_i)
+if qh["status"] != "ok" or not any("not used" in n for n in qh.get("notes", [])):
+    fail(f"cost 0.96 with a measured edge fit: status {qh['status']}, notes {qh.get('notes')}")
+print(f"registration cost 0.96 + edge fit measured: status {qh['status']}, note kept")
 print("RESULT qc OK")

@@ -112,7 +112,7 @@ def shift_fit(If, brain, normal, vox, sel, rng, iters=6):
 def case_qc(base, subj, swi, I, If, seg, brain, tissue, cortex, pial_sd, normal, rim, hemiL, vox,
             t1_anat, full_bottom):
     rng = np.random.default_rng(0)
-    qc = dict(subject=subj, qc_version="v4.18.3")
+    qc = dict(subject=subj, qc_version="v4.19.3")
     qc["acquisition"] = read_acq(base, subj)
     qc["voxel_mm"] = [round(v, 3) for v in vox]
     qc["orientation"] = "".join(nib.aff2axcodes(swi.affine))
@@ -186,8 +186,16 @@ def case_qc(base, subj, swi, I, If, seg, brain, tissue, cortex, pial_sd, normal,
             why_low.append(f"label pial boundary {qc['edge_bias_mm']:+.2f} mm from the SWI cortex edge on average "
                            f"({'labels too small' if qc['edge_bias_mm'] > 0 else 'labels too large'})")
     cost = (qc["registration"] or {}).get("cost")
+    # v4.19.3: the bbregister cost only lowers the status when the direct edge fit could not be measured. LEMON GRE
+    # (P201/P202/P204): cost 0.95-0.96 every time while the labels sat 0.11-0.22 mm from the SWI cortex edge -
+    # the T2*-weighted GRE contrast gives high costs even when aligned. The cost is still recorded.
+    qc["notes"] = []
     if isinstance(cost, (int, float)) and cost > REG_COST_LOW_CONF:
-        why_low.append(f"registration cost {cost}")
+        if qc["label_shift_mm"] is None:
+            why_low.append(f"registration cost {cost}")
+        else:
+            qc["notes"].append(f"registration cost {cost} above {REG_COST_LOW_CONF} - not used, the edge fit was measured "
+                               f"(label shift {qc['label_shift_mm']} mm)")
     if max(vox) > THICK_SLICE_MM:
         why_low.append(f"thick slices ({max(vox):.1f} mm)")
     qc["status"] = "insufficient_quality" if why_bad else ("low_confidence_review" if why_low else "ok")
