@@ -339,6 +339,11 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   25 % with its own label: cSS region_z -6.9..-9.2, dark frac <= 0.02; bilateral dark gyrus -0.45 / 0.78 / mirror 0;
   left-only dark gyrus -0.09 / 0.46 / mirror -3.6. Limits: real physiological darkness covers only part of a label
   (posterior precentral bank), receive-coil bias can make hemispheres differ, and cSS can be bilateral.
+  Real data (v4.19.2, user's Mac): P006 known cSS (6/6 kept) region_z -3.64, -4.68, -4.37, -3.21, but the two in
+  POSTCENTRAL cortex -2.35 / -2.18 (dark frac 0.25 each) - the same range as P201's normal motor-strip candidates
+  (-1.43 / -1.79, 0.31 / 0.41) and P201 1/6 (-2.6). P201 3/5 at -3.65/-3.61 sit inside the cSS range. A -3 cut would
+  lose 2 of 6 known lesions: region_z must NOT become a rule. Likely reason: cSS in naturally dark cortex, and
+  extensive cSS darkens its own label. mirror_region_z ~0 everywhere (-1.0..+1.0), also in P006: uninformative so far.
 
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
