@@ -359,6 +359,50 @@ Validation: make_synthetic.py → eval_synthetic.py → stress_test.py; feature_
   uses relative positions; registration (mri_coreg init) copes. The right inferior parietal false positive sits at the
   same voxel position in P201/P202/P204 (44-46, 64-65, 43-48); user's read: dark cortex. Cause not established.
 
+## v5.0: three-layer architecture, Stage A (v5.0.0) - what changed and what did not
+Spec: user's v5.0 rewrite brief (Stages A-F). Decisions with the user: starter code (mimic_rules, train_ranker,
+rank_candidates, check_mimic, 6 patch points) was NOT supplied - written here from the spec; deprecated columns
+(vein_tree_mm, mirror_dark_frac, branch_per10mm) stay COMPUTED as in v4.19 (comment "DEPRECATED: will be NaN'd in
+v5.1") but are not ranker features; Stage A only, then stop for the user's real-data regression (RUNBOOK 13a).
+- Changed (all opt-in; with no switch the phantom outputs equal v4.19.3: full-suite diff of 130 CSV files, every
+  v4.19 column identical, only new columns appended at the end, timestamps aside):
+  - mimic_rules.py (Layer 1): phase = orientation-aware dipole-template fit (NOT the spec's "opposite median sign,
+    |phase| > 0.3 rad": in css_common's own dipole model a PARAMAGNETIC sheet flat to B0 has median phase -0.94 rad
+    and a tube perpendicular to B0 -0.54 rad, so that rule calls real cSS calcium). Scanner sign convention fitted on
+    the vessel map. Fit on the 2-voxel shell around the candidate, voxels with |phase| >= 2.5 rad left out: inside
+    the object the phase wraps (0.5 ppm flat sheet: 5.5 rad) and the homodyne filter flips its sign - before this,
+    that case read diamagnetic (phase_z -3.6). check_mimic: 20 objects (sheets flat/vertical, tubes ||/_|_ B0,
+    blobs; +-0.15 / +-0.5 ppm, wrapped) all correct sign; both scanner conventions recovered (t 84-87).
+    FLAIR rule = soft penalty (score x0.5) only, classes acute / thrombosis / mixed at z > 3 (the v4 flag
+    cut-offs); no FLAIR exclusion (cSAH and cSS co-exist in CAA). Microbleed cluster: 6-neighbour erosion (3-D
+    cube erosion shrank a 3.2 mm microbleed at 0.8 mm to 1 voxel), in-plane only when slices > 1.5x in-plane
+    (0.5x0.5x2 mm: 3-D erosion erased every microbleed < 5 mm), on the DARK voxels within 2 voxels of the candidate
+    (the candidate mask is ridge-thinned): 4 blobs -> 4 at 0.8 iso / 0.8x0.8x1.2 / 0.5x0.5x2; bands 1-4 voxels
+    thick -> 0. Integration phantom PHM (PH3 + physics phase; lesion 5 made diamagnetic): calcified band phase_z
+    -12.8, paramagnetic cSS +12..+25; CSS_USE_MIMIC=1 -> E10 excludes it, cSS 1/2/3/6 kept. Microbleeds placed at
+    the cortex-WM junction are NOT generated as candidates (search zone = pial band minus WM), so E11 rarely has
+    anything to act on; at the surface (half in CSF) they are not "parenchymal" and correctly not counted.
+  - detect_css.py: columns mimic_score, mimic_class, mimic_reason, phase_z, mb_cluster_n, phase_r (last in both
+    CSVs; excluded: after exclusion_confidence); E10@v5.0 / E11@v5.0 only with CSS_USE_MIMIC=1, checked after
+    E1-E9; RULE_CONF low; CSS_QC_STRICT=1 + insufficient_quality -> header-only CSV, exit 3; manifest records
+    use_mimic, qc_strict and the phase note. RULESET string unchanged (v4.18): no v4 rule changed.
+  - css_common.phase_to_radians / homodyne_highpass moved from make_swi.py (bit-identical SWI and HP phase).
+  - train_ranker.py / rank_candidates.py (Layer 3): balanced L2 logistic regression, LOPO with in-fold
+    imputation/scaling, AUC of model AND score_v4 on the same objects with patient-bootstrap CIs; --split test
+    refused; >= 3 patients; rank_candidates refuses training studies, appends score_model / rank_model.
+    check_ranker: perfect feature -> LOPO AUC 1.0; noise labels -> 0.507 [0.458, 0.561].
+  - run_css.sh ranks automatically only when review/ranker_model.json exists AND the study's split is dev;
+    reports "case cannot be scored" on exit 3. align_seg.py: stale T1 labels -> error under CSS_QC_STRICT=1.
+    review_css.py --by-model / --by-legacy, QC banner (strict + low confidence); keys and panels unchanged.
+    score_css.py prints the model order (JSON / css_scores.csv unchanged).
+  - tests: check_mimic.py, check_ranker.py, check_qc_strict.py (in run_tests.sh); test_shell 8 / 8b.
+  - check_qc.py column contract changed: v4.14 required exclusion_confidence to be the LAST excluded column; v5.0
+    appends its columns after it (append-only: every v4.19 column keeps its position), so the test now requires
+    exclusion_confidence followed by exactly the v5.0 columns. No script reads the excluded CSV by position.
+- NOT changed: E1-E9, score_v4, cand_id order, score_css scales and JSON, the validation modules, the reviewer's
+  keys. Not done (later stages): feature_*.py refactor (B), surface_sampler.py (C), training on real labels (D),
+  surface as primary (F). No real-data result yet for any v5.0 rule: RUNBOOK 13a must pass first.
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.

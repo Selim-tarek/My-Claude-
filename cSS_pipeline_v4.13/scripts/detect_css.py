@@ -2,6 +2,17 @@
 """cSS candidate detector v4 (v4.17) - definition-driven.
 usage: detect_css.py SUBJECT [z_thr=-2.5] [ridge_pct=85] [rim_mm=3]
 env:   CSS_RANK=v3 ranks with the old v3 score (both scores are always written)
+       CSS_USE_MIMIC=1 (v5.0) mimic layer acts: score x0.5 with FLAIR evidence, exclusions E10 / E11 (see below)
+       CSS_QC_STRICT=1 (v5.0) case QC insufficient_quality -> header-only candidates CSV, exit 3
+       Both unset (default) = v4.19 candidates, exclusions and order; the new columns are written either way.
+v5.0 Layer 1 (mimic_rules.py), columns appended to candidates and excluded: mimic_score, mimic_class, mimic_reason,
+  phase_z, mb_cluster_n, phase_r. Phase (data/ID_phase.nii.gz, same grid, newer than the SWI): the dipole pattern of
+  the candidate's own shape is fitted to the 4 mm high-pass phase (orientation-aware; the scanner sign is fitted on
+  the vessel map) -> phase_z < 0 = diamagnetic (calcification). E10@v5.0: calcification, mimic_score >= 0.7.
+  E11@v5.0: >= 3 compact parenchymal blobs (microbleed cluster), mimic_score >= 0.5. FLAIR (acute cSAH / cortical
+  vein thrombosis) is a soft penalty only. Laminar necrosis / haemorrhagic infarct are not handled (no DWI / T1 sign).
+  Deprecated, still computed for regression integrity (to be NaN in v5.1): vein_tree_mm, mirror_dark_frac,
+  branch_per10mm.
 
 cSS (STRIVE-2 / Charidimou): curvilinear hypointensity in the SUBPIAL cortex / subarachnoid
 space that follows the gyral surface, often on both banks of a sulcus ("tram-track"),
@@ -62,7 +73,7 @@ from skimage.measure import regionprops
 from skimage.morphology import skeletonize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from css_common import base as _base, load_lut, fresh, sha256, update_manifest, environment_record, skeleton_length, radius_profile
-import css_qc, css_vessel
+import css_qc, css_vessel, mimic_rules
 
 subj   = sys.argv[1]
 z_thr  = float(sys.argv[2]) if len(sys.argv) > 2 else -2.5
@@ -88,6 +99,12 @@ MERGE_MAX_MM = 40.0     # ...but only while the merged object stays focus-sized:
 MIN_EXTENT_MM = 6.0     # specks: smaller than this overall are not curvilinear cSS
 MIN_EDGE_SD = 0.75      # "well-defined": candidate must be darker than its 1-2 mm surroundings by this
 KEEP_ALL = os.environ.get("CSS_KEEP_ALL", "") == "1"
+# v5.0 opt-in layers (default off = v4.19 behaviour; the new columns are written either way):
+#   CSS_USE_MIMIC=1  mimic layer acts: score x0.5 with FLAIR evidence, exclusions E10 (calcification) / E11 (MB cluster)
+#   CSS_QC_STRICT=1  case QC gates: insufficient_quality -> no candidates, exit 3
+USE_MIMIC = os.environ.get("CSS_USE_MIMIC", "") == "1"
+QC_STRICT = os.environ.get("CSS_QC_STRICT", "") == "1"
+MIMIC_CALC_EXCL, MIMIC_MB_EXCL = 0.7, 0.5   # E10 / E11 mimic_score cut-offs (not validated)
 HESS_SIGMAS_MM = (0.8, 1.6)            # 3-D shape analysis scales
 # v4.11 vessel exclusion: a dark line that continues as a TUBE beyond the cortical band (into the white
 # matter = medullary / transcortical vein) and runs perpendicular to the cortex is a vessel, not cSS
@@ -359,6 +376,8 @@ for n, sl_ in enumerate(ndi.find_objects(_dl), 1):
     if sl_ is not None:
         _ok[n] = np.sqrt(sum(((s_.stop - s_.start) * v) ** 2 for s_, v in zip(sl_, vox))) >= VES_MIN_MM
 DARKS = _ok[_dl]; del _dl, _ok
+# v5.0 Layer 1: mimic evidence (mimic_rules.py). Phase: filtered phase + scanner sign convention fitted on VES.
+MIM = mimic_rules.MimicRejector(base, subj, swi, brain, vox, _si, ves=VES)
 nib.save(nib.Nifti1Image(VES.astype(np.uint8), swi.affine), f"{base}/work/{subj}_vessels.nii.gz")   # for freeview
 vl, nv = ndi.label(vnet | (lab > 0), structure=s3)
 vext = np.zeros(nv + 1, np.float32)
@@ -527,6 +546,7 @@ for p in regionprops(lab, spacing=vox):
     depth     = float(-z[pad][mm].mean())
     cfrac     = float(cortex[pad][mm].mean())
     cdist     = float(np.median(cortex_dist[pad][mm]))
+    # DEPRECATED: will be NaN'd in v5.1, use local_branch_per10mm (css_vessel.py) instead
     bdens     = branches_per_10mm(mm)
     nbh = ndi.binary_dilation(mm, structure=s2d, iterations=4) & cortex[pad]
     dp = pial_depth[pad]; zz = z[pad]
@@ -540,6 +560,7 @@ for p in regionprops(lab, spacing=vox):
     aln = float(np.nanmedian(ALIGN[pad][mm])) if np.isfinite(ALIGN[pad][mm]).any() else np.nan
     tram, _ = tram_track(pts)
     comps = np.unique(vl[pad][ndi.binary_dilation(mm, structure=s3)]); comps = comps[comps > 0]
+    # DEPRECATED: will be NaN'd in v5.1 (saturates brain-wide on real SWI), use local_cont_max_mm instead
     vtree = float(vext[comps].max()) if len(comps) else 0.0
     # long axis vs the cortical surface normal: cSS runs ALONG the cortex (~0), penetrating / bridging
     # vessels and veins running down the middle of a sulcus run ALONG the normal (~1)
@@ -589,6 +610,7 @@ for p in regionprops(lab, spacing=vox):
     # v4.16 bounded local vein tracking along the vessel map (recorded only, css_vessel.py)
     vt = css_vessel.local_tracking(cm, VES[vb], vox, VES_REACH_MM, band=(pial_sd[vb] > -PIAL_IN_MM) & ~np.isin(seg[vb], WM + DEEP),
                                    dark=DARKS[vb], midline=dmid[vb] < MIDLINE_END_MM)
+    # DEPRECATED: will be NaN'd in v5.1, use mirror_surf_z (surface-mesh symmetry, v5.0.2) instead
     mdark = mirror_dark(pts)
     _own = mm & (seg[pad] == code) & cortex[pad]
     rref = region_ref(code, Ic[pad][mm], Ic[pad][_own])
@@ -616,6 +638,7 @@ for p in regionprops(lab, spacing=vox):
         if ring.sum() >= 5: fz = float(np.median((FL[pad][ring] - f_mu) / f_sd))
         ctxn = near3 & cortex[pad]                                # cortex: oedema of cortical vein thrombosis
         if ctxn.sum() >= 5: fcz = float(np.median((FL[pad][ctxn] - fc_mu) / f_sd))
+    mim = MIM.evaluate(mm, pad, tissue[pad], fz, fcz, dark_pad=z[pad] < Z_LOW)   # v5.0, recorded; acts only with CSS_USE_MIMIC=1
     artz      = any(a in region for a in ARTIFACT_ZONES)
     midz      = bool(np.median(dmid[pad][mm]) < 5.0)
     # off-surface tube. vein_tree_mm is recorded only: on real SWI (P006) the dark tubular network
@@ -636,6 +659,8 @@ for p in regionprops(lab, spacing=vox):
     for flag, f in ((artz, 0.5), (midz, 0.7),
                     (longs, 0.5), (infra, 0.3)):
         if flag: s4 *= f
+    if USE_MIMIC and mim["_flair_class"] != "none":            # v5.0 soft penalty: possible acute cSAH / thrombosis
+        s4 *= 0.5; mim["mimic_reason"] += " [score x0.5, CSS_USE_MIMIC=1]"
     # two separate, rule-based evidence summaries for the reader (0-1, NOT probabilities -
     # untrained; to be replaced by a model fitted on expert labels):
     #  cSS  = on the surface, sheet-like, parallel to the cortex, tram-track, on a bank
@@ -670,7 +695,7 @@ for p in regionprops(lab, spacing=vox):
                      basal_frac=round(float((d_basal[pad][mm] <= BASAL_MM).mean()), 2),
                      vessel_ext_mm=round(ves_ext, 1), vessel_wm_mm=round(ves_wm, 1), vessel_run_mm=round(min(ves_run, VES_REACH_MM), 1), axis_normal=round(axn, 2),
                      score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label,
-                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1, **vt, **rad, **rref))
+                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1, **vt, **rad, **rref, **{k: v for k, v in mim.items() if not k.startswith('_')}))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
 cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongation",
@@ -689,6 +714,9 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "end_type_max", "end_type_min", "review_tier", "tier_reason",
         "cand_radius_med_mm", "cand_radius_p95_mm", "cand_radius_cv", "net_radius_med_mm", "net_radius_p95_mm",                        # v4.18, recorded only
         "region_z", "region_dark_frac", "mirror_region_z", "cand_mirror_z"]                         # v4.19.2, recorded only
+# v5.0 columns: appended LAST in both files (the excluded CSV ends with exclusion_confidence before them)
+V50_COLS = ["mimic_score", "mimic_class", "mimic_reason", "phase_z", "mb_cluster_n", "phase_r"]   # mimic_rules.py
+cols = cols + V50_COLS
 
 # ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason
 # height is measured within the CEREBRUM (cortex + cerebral WM), so 0 = floor of the temporal/frontal
@@ -709,7 +737,8 @@ FULL_BOTTOM = bool(len(_nz) and _area[_bot] < 0.2 * _area.max())
 # confidence for the excluded list. Confidence is a reading aid, not validated: "low" marks rules with
 # little real-data support or a case whose QC status is not ok (see review/ID_qc.json).
 RULE_CONF = {"E1": "high" if T1_ANAT else "medium", "E2": "medium", "E3": "medium", "E4": "high",
-             "E5": "medium", "E6": "medium", "E7": "medium", "E8": "low", "E9": "medium"}
+             "E5": "medium", "E6": "medium", "E7": "medium", "E8": "low", "E9": "medium",
+             "E10": "low", "E11": "low"}                       # v5.0 mimic rules: no real-data support yet
 def exclusion(r):
     """-> (rule_version, reason); ("", "") = kept"""
     if KEEP_ALL: return "", ""
@@ -736,10 +765,27 @@ def exclusion(r):
         return "E8@v4.17", "skull-base susceptibility artifact zone"
     if np.isfinite(r["edge_contrast"]) and r["edge_contrast"] < MIN_EDGE_SD:
         return "E9@v4.8", "faint / ill-defined (normal dark cortex)"
+    # v5.0 mimic rules (opt-in, CSS_USE_MIMIC=1; checked last, so the v4 reason wins where both apply)
+    if USE_MIMIC and r["mimic_class"] == "calcification" and r["mimic_score"] >= MIMIC_CALC_EXCL:
+        return "E10@v5.0", "calcification: diamagnetic on the phase (" + r["mimic_reason"].split(";")[0] + ")"
+    if USE_MIMIC and r["mimic_class"] == "mb_cluster" and r["mimic_score"] >= MIMIC_MB_EXCL:
+        return "E11@v5.0", f"cluster of microbleeds ({int(r['mb_cluster_n'])} compact parenchymal blobs), not a band"
     return "", ""
 # ---- 11b. case QC (v4.14, reported only - changes no candidate)
 QC = css_qc.case_qc(base, subj, swi, I, If, seg, brain, tissue, cortex, pial_sd, normal, rim, hemiL, vox,
                     T1_ANAT, FULL_BOTTOM)
+if QC_STRICT and QC["status"] == "insufficient_quality":
+    # v5.0 CSS_QC_STRICT=1: the detector's assumptions do not hold -> no candidates are offered for this case
+    os.makedirs(f"{base}/review", exist_ok=True)
+    pd.DataFrame(columns=cols).to_csv(f"{base}/review/{subj}_candidates.csv", index=False)
+    pd.DataFrame(columns=["excl_id", "reason"]).to_csv(f"{base}/review/{subj}_excluded.csv", index=False)
+    for f_ in ("candidates", "excluded"):
+        nib.save(nib.Nifti1Image(np.zeros(I.shape, np.int16), swi.affine), f"{base}/review/{subj}_{f_}.nii.gz")
+    update_manifest(base, subj, "detect", dict(pipeline_version=RULESET, args=sys.argv[1:], qc_status=QC["status"],
+                    qc_strict=True, n_candidates=0, note="CSS_QC_STRICT=1: case cannot be scored"))
+    print(f"{subj}: QC insufficient_quality ({'; '.join(QC['reasons'])}) - CSS_QC_STRICT=1: case cannot be scored, "
+          f"no candidates written [review/{subj}_qc.json]")
+    sys.exit(3)
 for r in rows:
     rv, r["_excl"] = exclusion(r)
     r["qc_status"] = QC["status"]
@@ -760,8 +806,9 @@ if excluded:
     xdf = pd.DataFrame(excluded).sort_values("score", ascending=False).reset_index(drop=True)
     xdf.insert(0, "excl_id", np.arange(1, len(xdf) + 1))
     xr = np.zeros(lab.max() + 1, np.int16); xr[xdf["_lab"].values] = xdf["excl_id"].values; xl = xr[lab]
-    xdf.rename(columns={"_excl": "reason"})[["excl_id", "reason"] + [c for c in cols if c not in ("cand_id", "accept")]
-                                            + ["exclusion_confidence"]] \
+    xdf.rename(columns={"_excl": "reason"})[["excl_id", "reason"] + [c for c in cols if c not in ("cand_id", "accept")
+                                                                      and c not in V50_COLS]
+                                            + ["exclusion_confidence"] + V50_COLS] \
         .to_csv(f"{base}/review/{subj}_excluded.csv", index=False)
 else:
     pd.DataFrame(columns=["excl_id", "reason"]).to_csv(f"{base}/review/{subj}_excluded.csv", index=False)
@@ -807,6 +854,9 @@ if fl_note: print(f"{subj}: {fl_note}")
 print(f"{subj}: QC {QC['status']}" + (f" ({'; '.join(QC['reasons'])})" if QC["reasons"] else "")
       + f", label shift {QC['label_shift_mm']} mm, edge bias {QC['edge_bias_mm']} mm, scatter {QC['edge_scatter_mm']} mm, {len(dropped)} components below the generation gates"
       + " [review/" + subj + "_qc.json; reported only]")
+_mc = pd.Series([r["mimic_class"] for r in rows + excluded]).value_counts().to_dict() if rows or excluded else {}
+print(f"{subj}: mimic layer ({'ACTIVE' if USE_MIMIC else 'recorded only'}): "
+      + (", ".join(f"{v} {k}" for k, v in _mc.items() if k != "none") or "no mimic evidence") + f"; {MIM.phase_note}")
 print(f"{subj}: review tier (recorded only) 1: {sum(r['review_tier'] == 1 for r in rows)}, "
       f"2: {sum(r['review_tier'] == 2 for r in rows)}\n")
 if len(df):
@@ -822,6 +872,7 @@ _inputs = {k: p_ for k, p_ in (("swi", f"{base}/data/{subj}_swi.nii"), ("labels"
 update_manifest(base, subj, "detect", dict(
     pipeline_version=RULESET, run_at=pd.Timestamp.now().isoformat(timespec="seconds"), args=sys.argv[1:],
     parameters=dict(z_thr=z_thr, ridge_pct=r_pct, rim_mm=RIM_MM, rank=RANK, keep_all=KEEP_ALL,
+                    use_mimic=USE_MIMIC, qc_strict=QC_STRICT, phase=MIM.phase_note,
                     sato_sigmas_mm=list(SATO_SIGMAS_MM), sato_sigmas_px=[round(v, 2) for v in SATO_PX]),
     anatomy="T1" if T1_ANAT else "SWI-only", flair_used=FL is not None, qc_status=QC["status"],
     n_candidates=int(len(df)), n_excluded=len(excluded), n_dropped=len(dropped),

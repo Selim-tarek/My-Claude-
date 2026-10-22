@@ -123,6 +123,29 @@ Also changed in v4:
 
 ---
 
+## 0a. v5.0 architecture (Stage A: v5.0.0)
+
+v4.19 reached a documented ceiling: 6-16 candidates per healthy LEMON scan, almost all naturally dark cortex, and
+hand-made features (surface width, regional darkness) that separate on phantoms but not on real scans. v5.0 adds
+decision layers, each behind a switch so it can be compared with v4.19 on the same scans:
+
+1. **Mimic layer** (`mimic_rules.py`, `CSS_USE_MIMIC=1` to act). Calcification by **phase**: the dipole pattern of
+   the candidate's own shape is fitted to the 4 mm high-pass phase; the sign of the fitted susceptibility decides.
+   The sign of the median phase is NOT used: inside a paramagnetic sheet lying flat to B0 it is negative (pipeline's
+   own forward model), so it would call real cSS on horizontal cortex "calcium". The scanner's sign convention is
+   fitted the same way on the vessel map. Voxels whose phase may have wrapped are left out. **FLAIR** evidence
+   (bright sulcal CSF = acute cSAH, bright cortex = vein thrombosis) is a soft penalty only: cSAH and cSS co-exist
+   in CAA. **Microbleed clusters**: compact parenchymal blobs left after one erosion of the dark voxels around the
+   candidate. Not handled: laminar necrosis, haemorrhagic infarct (no DWI / T1 sign).
+2. **Pial-surface sampling** (planned, v5.0.2): sample the SWI along the pial normal per vertex and detect patches
+   on the mesh, next to the volumetric candidates.
+3. **Trained ranking** (`train_ranker.py`, `rank_candidates.py`): L2 logistic regression on the recorded features,
+   leave-one-patient-out, compared with score_v4 on the same objects; dev split only.
+
+All thresholds of the new layers are provisional (phantoms only). Limits found while building it: the phase
+statistic assumes noise correlated over ~2 voxels and is optimistic near veins; on the phantom, microbleeds at the
+cortex-white-matter junction are not generated as candidates at all, so E11 will rarely have anything to act on.
+
 ## 1. One-time setup (Mac)
 
 ```zsh

@@ -38,7 +38,12 @@ c = list(pd.read_csv(f"{B}/review/PH3_candidates.csv").columns)
 if c[:len(V413)] != V413: fail(f"candidate columns changed: {c[:len(V413)]}")
 if c[len(V413):len(V413) + 3] != ["qc_status", "rule_version", "n_pieces"]: fail(f"new columns: {c[len(V413):]}")
 x = pd.read_csv(f"{B}/review/PH3_excluded.csv")
-if list(x.columns[:2]) != ["excl_id", "reason"] or x.columns[-1] != "exclusion_confidence": fail("excluded columns")
+# v5.0: exclusion_confidence ends the v4.x columns; the v5.0 mimic columns are appended after it (append-only contract)
+V50 = ["mimic_score", "mimic_class", "mimic_reason", "phase_z", "mb_cluster_n", "phase_r"]
+xc = list(x.columns)
+if xc[:2] != ["excl_id", "reason"] or "exclusion_confidence" not in xc or xc[xc.index("exclusion_confidence") + 1:] != V50:
+    fail(f"excluded columns {xc[-8:]}")
+if c[-len(V50):] != V50: fail(f"candidate columns do not end with the v5.0 columns: {c[-8:]}")
 if len(x) and not x.rule_version.str.match(r"E\d@v4\.\d").all(): fail("excluded rows without rule id")
 print(f"columns: v4.13 order kept, appended {c[len(V413):]}; excluded rows carry rule ids {sorted(x.rule_version.unique())}")
 

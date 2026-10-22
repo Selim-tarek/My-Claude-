@@ -1,4 +1,4 @@
-# All code — cSS pipeline v4.19
+# All code — cSS pipeline v5.0
 
 Generated from the files below; the files are authoritative.
 
@@ -75,13 +75,27 @@ fi
 echo "[2/4] aligning segmentation to SWI"
 python $SC/align_seg.py $S
 echo "[3/4] detecting cSS candidates"
-python $SC/detect_css.py $S -2.5 85 3
+python $SC/detect_css.py $S -2.5 85 3 || { rc=$?
+  [ $rc -eq 3 ] && echo "== $S: case cannot be scored (QC insufficient_quality, CSS_QC_STRICT=1) - see review/${S}_qc.json"
+  exit $rc; }
 # v4.19: pial-surface features (incl. curve-vs-patch width) whenever recon-all surfaces exist; recorded only,
 # and a failure here (e.g. the surface/label registration check) never stops the run
 SD=${CSS_SUBJECTS_DIR:-$B/subjects}
 if [ -f $SD/$S/surf/lh.pial ] && [ -f $SD/$S/mri/orig.mgz ] && [ -f $B/work/${S}_swi2t1.lta ]; then
   echo "[3b] pial-surface features (recon-all surfaces; recorded only)"
   python $SC/surface_features.py $S || echo "      WARNING: surface_features.py failed - detection results are unaffected"
+fi
+# v5.0: trained ranking model, only when one exists AND the study is in the dev split (labels/study_meta.csv).
+# Test-split studies are ranked by hand with the frozen model; studies without a split are not ranked.
+if [ -f $B/review/ranker_model.json ]; then
+  SPLIT=$(python -c "import pandas as pd,sys; m=pd.read_csv(sys.argv[1],dtype=str); m=m[m.study_id==sys.argv[2]]; print(m.split.iloc[0] if len(m) else '')" \
+          $B/labels/study_meta.csv $S 2>/dev/null || true)
+  if [ "$SPLIT" = "dev" ]; then
+    echo "[3c] trained ranking model (rank_candidates.py; dev split)"
+    python $SC/rank_candidates.py $S || echo "      WARNING: rank_candidates.py did not rank $S - the score_v4 order stands"
+  else
+    echo "[3c] ranking model not applied: $S split is '${SPLIT:-unassigned}' (only dev studies are ranked automatically)"
+  fi
 fi
 if [ -z "$NOVIEW" ]; then
   echo "[4/4] opening viewer"
@@ -352,8 +366,12 @@ subj = sys.argv[1]
 base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project"))
 swi = nib.load(f"{base}/data/{subj}_swi.nii")
 t1p = f"{base}/work/{subj}_t1seg_swispace.nii.gz"
-src = t1p if os.path.exists(t1p) and os.path.getmtime(t1p) >= os.path.getmtime(f"{base}/data/{subj}_swi.nii") \
-    else f"{base}/synthseg/{subj}_seg.nii.gz"
+_t1_fresh = os.path.exists(t1p) and os.path.getmtime(t1p) >= os.path.getmtime(f"{base}/data/{subj}_swi.nii")
+if os.environ.get("CSS_QC_STRICT") == "1" and os.path.exists(t1p) and not _t1_fresh:
+    # v5.0 CSS_QC_STRICT=1: stale T1 labels are an error, not a silent fall-back to SynthSeg on the SWI
+    sys.exit(f"ERROR: {t1p} is older than the SWI (re-run prep_anat.sh / run_css.sh with --t1); CSS_QC_STRICT=1 "
+             f"does not fall back to SynthSeg on the SWI")
+src = t1p if _t1_fresh else f"{base}/synthseg/{subj}_seg.nii.gz"
 seg = nib.load(src)
 seg_swi = resample_from_to(seg, swi, order=0).get_fdata().astype(np.int32)
 n_before = (seg_swi > 0).sum()
@@ -765,6 +783,31 @@ def susceptibility_signal(chi_ppm, vox, affine, b0_t=3.0, te_s=0.020, pad=16):
         g = np.gradient(phase, vox[ax], axis=ax)                                # rad / mm
         att *= np.abs(np.sinc(g * vox[ax] / (2 * np.pi)))
     return phase.astype(np.float32), att.astype(np.float32)
+
+
+# ---- v5.0 phase helpers (moved unchanged from make_swi.py so the detector's mimic layer uses the same filter)
+def phase_to_radians(P):
+    """phase image -> (radians float32, description). Scanner units (range wider than 2 pi + 0.5, e.g.
+    -4096..4095 or 0..4095) are rescaled linearly to -pi..pi; anything else is taken to be radians already."""
+    import numpy as np
+    P = np.asarray(P, np.float32)
+    lo, hi = float(np.nanmin(P)), float(np.nanmax(P))
+    if hi - lo > 2 * np.pi + 0.5:
+        return (P - lo) / (hi - lo) * 2 * np.pi - np.pi, f"scanner units {lo:g}..{hi:g} -> radians"
+    return P, "radians"
+
+
+def homodyne_highpass(P_rad, vox, si, sigma_mm=4.0):
+    """wrap-safe homodyne high-pass, slice by slice in the plane perpendicular to array axis `si` (the S-I axis):
+    angle(z * conj(lowpass z)), Gaussian low-pass sigma_mm in-plane, 0 along si (as in make_swi.py since v4.18)"""
+    import numpy as np
+    from scipy import ndimage as ndi
+    z = np.exp(1j * np.asarray(P_rad).astype(np.float64))
+    sig = [0.0, 0.0, 0.0]
+    for ax in range(3):
+        if ax != si: sig[ax] = sigma_mm / vox[ax]
+    lp = ndi.gaussian_filter(z.real, sig) + 1j * ndi.gaussian_filter(z.imag, sig)
+    return np.angle(z * np.conj(lp)).astype(np.float32)
 ```
 
 ## scripts/css_qc.py
@@ -1238,6 +1281,17 @@ def local_tracking(cm, ves, vox, reach_mm, band=None, dark=None, midline=None):
 """cSS candidate detector v4 (v4.17) - definition-driven.
 usage: detect_css.py SUBJECT [z_thr=-2.5] [ridge_pct=85] [rim_mm=3]
 env:   CSS_RANK=v3 ranks with the old v3 score (both scores are always written)
+       CSS_USE_MIMIC=1 (v5.0) mimic layer acts: score x0.5 with FLAIR evidence, exclusions E10 / E11 (see below)
+       CSS_QC_STRICT=1 (v5.0) case QC insufficient_quality -> header-only candidates CSV, exit 3
+       Both unset (default) = v4.19 candidates, exclusions and order; the new columns are written either way.
+v5.0 Layer 1 (mimic_rules.py), columns appended to candidates and excluded: mimic_score, mimic_class, mimic_reason,
+  phase_z, mb_cluster_n, phase_r. Phase (data/ID_phase.nii.gz, same grid, newer than the SWI): the dipole pattern of
+  the candidate's own shape is fitted to the 4 mm high-pass phase (orientation-aware; the scanner sign is fitted on
+  the vessel map) -> phase_z < 0 = diamagnetic (calcification). E10@v5.0: calcification, mimic_score >= 0.7.
+  E11@v5.0: >= 3 compact parenchymal blobs (microbleed cluster), mimic_score >= 0.5. FLAIR (acute cSAH / cortical
+  vein thrombosis) is a soft penalty only. Laminar necrosis / haemorrhagic infarct are not handled (no DWI / T1 sign).
+  Deprecated, still computed for regression integrity (to be NaN in v5.1): vein_tree_mm, mirror_dark_frac,
+  branch_per10mm.
 
 cSS (STRIVE-2 / Charidimou): curvilinear hypointensity in the SUBPIAL cortex / subarachnoid
 space that follows the gyral surface, often on both banks of a sulcus ("tram-track"),
@@ -1298,7 +1352,7 @@ from skimage.measure import regionprops
 from skimage.morphology import skeletonize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from css_common import base as _base, load_lut, fresh, sha256, update_manifest, environment_record, skeleton_length, radius_profile
-import css_qc, css_vessel
+import css_qc, css_vessel, mimic_rules
 
 subj   = sys.argv[1]
 z_thr  = float(sys.argv[2]) if len(sys.argv) > 2 else -2.5
@@ -1324,6 +1378,12 @@ MERGE_MAX_MM = 40.0     # ...but only while the merged object stays focus-sized:
 MIN_EXTENT_MM = 6.0     # specks: smaller than this overall are not curvilinear cSS
 MIN_EDGE_SD = 0.75      # "well-defined": candidate must be darker than its 1-2 mm surroundings by this
 KEEP_ALL = os.environ.get("CSS_KEEP_ALL", "") == "1"
+# v5.0 opt-in layers (default off = v4.19 behaviour; the new columns are written either way):
+#   CSS_USE_MIMIC=1  mimic layer acts: score x0.5 with FLAIR evidence, exclusions E10 (calcification) / E11 (MB cluster)
+#   CSS_QC_STRICT=1  case QC gates: insufficient_quality -> no candidates, exit 3
+USE_MIMIC = os.environ.get("CSS_USE_MIMIC", "") == "1"
+QC_STRICT = os.environ.get("CSS_QC_STRICT", "") == "1"
+MIMIC_CALC_EXCL, MIMIC_MB_EXCL = 0.7, 0.5   # E10 / E11 mimic_score cut-offs (not validated)
 HESS_SIGMAS_MM = (0.8, 1.6)            # 3-D shape analysis scales
 # v4.11 vessel exclusion: a dark line that continues as a TUBE beyond the cortical band (into the white
 # matter = medullary / transcortical vein) and runs perpendicular to the cortex is a vessel, not cSS
@@ -1595,6 +1655,8 @@ for n, sl_ in enumerate(ndi.find_objects(_dl), 1):
     if sl_ is not None:
         _ok[n] = np.sqrt(sum(((s_.stop - s_.start) * v) ** 2 for s_, v in zip(sl_, vox))) >= VES_MIN_MM
 DARKS = _ok[_dl]; del _dl, _ok
+# v5.0 Layer 1: mimic evidence (mimic_rules.py). Phase: filtered phase + scanner sign convention fitted on VES.
+MIM = mimic_rules.MimicRejector(base, subj, swi, brain, vox, _si, ves=VES)
 nib.save(nib.Nifti1Image(VES.astype(np.uint8), swi.affine), f"{base}/work/{subj}_vessels.nii.gz")   # for freeview
 vl, nv = ndi.label(vnet | (lab > 0), structure=s3)
 vext = np.zeros(nv + 1, np.float32)
@@ -1763,6 +1825,7 @@ for p in regionprops(lab, spacing=vox):
     depth     = float(-z[pad][mm].mean())
     cfrac     = float(cortex[pad][mm].mean())
     cdist     = float(np.median(cortex_dist[pad][mm]))
+    # DEPRECATED: will be NaN'd in v5.1, use local_branch_per10mm (css_vessel.py) instead
     bdens     = branches_per_10mm(mm)
     nbh = ndi.binary_dilation(mm, structure=s2d, iterations=4) & cortex[pad]
     dp = pial_depth[pad]; zz = z[pad]
@@ -1776,6 +1839,7 @@ for p in regionprops(lab, spacing=vox):
     aln = float(np.nanmedian(ALIGN[pad][mm])) if np.isfinite(ALIGN[pad][mm]).any() else np.nan
     tram, _ = tram_track(pts)
     comps = np.unique(vl[pad][ndi.binary_dilation(mm, structure=s3)]); comps = comps[comps > 0]
+    # DEPRECATED: will be NaN'd in v5.1 (saturates brain-wide on real SWI), use local_cont_max_mm instead
     vtree = float(vext[comps].max()) if len(comps) else 0.0
     # long axis vs the cortical surface normal: cSS runs ALONG the cortex (~0), penetrating / bridging
     # vessels and veins running down the middle of a sulcus run ALONG the normal (~1)
@@ -1825,6 +1889,7 @@ for p in regionprops(lab, spacing=vox):
     # v4.16 bounded local vein tracking along the vessel map (recorded only, css_vessel.py)
     vt = css_vessel.local_tracking(cm, VES[vb], vox, VES_REACH_MM, band=(pial_sd[vb] > -PIAL_IN_MM) & ~np.isin(seg[vb], WM + DEEP),
                                    dark=DARKS[vb], midline=dmid[vb] < MIDLINE_END_MM)
+    # DEPRECATED: will be NaN'd in v5.1, use mirror_surf_z (surface-mesh symmetry, v5.0.2) instead
     mdark = mirror_dark(pts)
     _own = mm & (seg[pad] == code) & cortex[pad]
     rref = region_ref(code, Ic[pad][mm], Ic[pad][_own])
@@ -1852,6 +1917,7 @@ for p in regionprops(lab, spacing=vox):
         if ring.sum() >= 5: fz = float(np.median((FL[pad][ring] - f_mu) / f_sd))
         ctxn = near3 & cortex[pad]                                # cortex: oedema of cortical vein thrombosis
         if ctxn.sum() >= 5: fcz = float(np.median((FL[pad][ctxn] - fc_mu) / f_sd))
+    mim = MIM.evaluate(mm, pad, tissue[pad], fz, fcz, dark_pad=z[pad] < Z_LOW)   # v5.0, recorded; acts only with CSS_USE_MIMIC=1
     artz      = any(a in region for a in ARTIFACT_ZONES)
     midz      = bool(np.median(dmid[pad][mm]) < 5.0)
     # off-surface tube. vein_tree_mm is recorded only: on real SWI (P006) the dark tubular network
@@ -1872,6 +1938,8 @@ for p in regionprops(lab, spacing=vox):
     for flag, f in ((artz, 0.5), (midz, 0.7),
                     (longs, 0.5), (infra, 0.3)):
         if flag: s4 *= f
+    if USE_MIMIC and mim["_flair_class"] != "none":            # v5.0 soft penalty: possible acute cSAH / thrombosis
+        s4 *= 0.5; mim["mimic_reason"] += " [score x0.5, CSS_USE_MIMIC=1]"
     # two separate, rule-based evidence summaries for the reader (0-1, NOT probabilities -
     # untrained; to be replaced by a model fitted on expert labels):
     #  cSS  = on the surface, sheet-like, parallel to the cortex, tram-track, on a bank
@@ -1906,7 +1974,7 @@ for p in regionprops(lab, spacing=vox):
                      basal_frac=round(float((d_basal[pad][mm] <= BASAL_MM).mean()), 2),
                      vessel_ext_mm=round(ves_ext, 1), vessel_wm_mm=round(ves_wm, 1), vessel_run_mm=round(min(ves_run, VES_REACH_MM), 1), axis_normal=round(axn, 2),
                      score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label,
-                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1, **vt, **rad, **rref))
+                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1, **vt, **rad, **rref, **{k: v for k, v in mim.items() if not k.startswith('_')}))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
 cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongation",
@@ -1925,6 +1993,9 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "end_type_max", "end_type_min", "review_tier", "tier_reason",
         "cand_radius_med_mm", "cand_radius_p95_mm", "cand_radius_cv", "net_radius_med_mm", "net_radius_p95_mm",                        # v4.18, recorded only
         "region_z", "region_dark_frac", "mirror_region_z", "cand_mirror_z"]                         # v4.19.2, recorded only
+# v5.0 columns: appended LAST in both files (the excluded CSV ends with exclusion_confidence before them)
+V50_COLS = ["mimic_score", "mimic_class", "mimic_reason", "phase_z", "mb_cluster_n", "phase_r"]   # mimic_rules.py
+cols = cols + V50_COLS
 
 # ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason
 # height is measured within the CEREBRUM (cortex + cerebral WM), so 0 = floor of the temporal/frontal
@@ -1945,7 +2016,8 @@ FULL_BOTTOM = bool(len(_nz) and _area[_bot] < 0.2 * _area.max())
 # confidence for the excluded list. Confidence is a reading aid, not validated: "low" marks rules with
 # little real-data support or a case whose QC status is not ok (see review/ID_qc.json).
 RULE_CONF = {"E1": "high" if T1_ANAT else "medium", "E2": "medium", "E3": "medium", "E4": "high",
-             "E5": "medium", "E6": "medium", "E7": "medium", "E8": "low", "E9": "medium"}
+             "E5": "medium", "E6": "medium", "E7": "medium", "E8": "low", "E9": "medium",
+             "E10": "low", "E11": "low"}                       # v5.0 mimic rules: no real-data support yet
 def exclusion(r):
     """-> (rule_version, reason); ("", "") = kept"""
     if KEEP_ALL: return "", ""
@@ -1972,10 +2044,27 @@ def exclusion(r):
         return "E8@v4.17", "skull-base susceptibility artifact zone"
     if np.isfinite(r["edge_contrast"]) and r["edge_contrast"] < MIN_EDGE_SD:
         return "E9@v4.8", "faint / ill-defined (normal dark cortex)"
+    # v5.0 mimic rules (opt-in, CSS_USE_MIMIC=1; checked last, so the v4 reason wins where both apply)
+    if USE_MIMIC and r["mimic_class"] == "calcification" and r["mimic_score"] >= MIMIC_CALC_EXCL:
+        return "E10@v5.0", "calcification: diamagnetic on the phase (" + r["mimic_reason"].split(";")[0] + ")"
+    if USE_MIMIC and r["mimic_class"] == "mb_cluster" and r["mimic_score"] >= MIMIC_MB_EXCL:
+        return "E11@v5.0", f"cluster of microbleeds ({int(r['mb_cluster_n'])} compact parenchymal blobs), not a band"
     return "", ""
 # ---- 11b. case QC (v4.14, reported only - changes no candidate)
 QC = css_qc.case_qc(base, subj, swi, I, If, seg, brain, tissue, cortex, pial_sd, normal, rim, hemiL, vox,
                     T1_ANAT, FULL_BOTTOM)
+if QC_STRICT and QC["status"] == "insufficient_quality":
+    # v5.0 CSS_QC_STRICT=1: the detector's assumptions do not hold -> no candidates are offered for this case
+    os.makedirs(f"{base}/review", exist_ok=True)
+    pd.DataFrame(columns=cols).to_csv(f"{base}/review/{subj}_candidates.csv", index=False)
+    pd.DataFrame(columns=["excl_id", "reason"]).to_csv(f"{base}/review/{subj}_excluded.csv", index=False)
+    for f_ in ("candidates", "excluded"):
+        nib.save(nib.Nifti1Image(np.zeros(I.shape, np.int16), swi.affine), f"{base}/review/{subj}_{f_}.nii.gz")
+    update_manifest(base, subj, "detect", dict(pipeline_version=RULESET, args=sys.argv[1:], qc_status=QC["status"],
+                    qc_strict=True, n_candidates=0, note="CSS_QC_STRICT=1: case cannot be scored"))
+    print(f"{subj}: QC insufficient_quality ({'; '.join(QC['reasons'])}) - CSS_QC_STRICT=1: case cannot be scored, "
+          f"no candidates written [review/{subj}_qc.json]")
+    sys.exit(3)
 for r in rows:
     rv, r["_excl"] = exclusion(r)
     r["qc_status"] = QC["status"]
@@ -1996,8 +2085,9 @@ if excluded:
     xdf = pd.DataFrame(excluded).sort_values("score", ascending=False).reset_index(drop=True)
     xdf.insert(0, "excl_id", np.arange(1, len(xdf) + 1))
     xr = np.zeros(lab.max() + 1, np.int16); xr[xdf["_lab"].values] = xdf["excl_id"].values; xl = xr[lab]
-    xdf.rename(columns={"_excl": "reason"})[["excl_id", "reason"] + [c for c in cols if c not in ("cand_id", "accept")]
-                                            + ["exclusion_confidence"]] \
+    xdf.rename(columns={"_excl": "reason"})[["excl_id", "reason"] + [c for c in cols if c not in ("cand_id", "accept")
+                                                                      and c not in V50_COLS]
+                                            + ["exclusion_confidence"] + V50_COLS] \
         .to_csv(f"{base}/review/{subj}_excluded.csv", index=False)
 else:
     pd.DataFrame(columns=["excl_id", "reason"]).to_csv(f"{base}/review/{subj}_excluded.csv", index=False)
@@ -2043,6 +2133,9 @@ if fl_note: print(f"{subj}: {fl_note}")
 print(f"{subj}: QC {QC['status']}" + (f" ({'; '.join(QC['reasons'])})" if QC["reasons"] else "")
       + f", label shift {QC['label_shift_mm']} mm, edge bias {QC['edge_bias_mm']} mm, scatter {QC['edge_scatter_mm']} mm, {len(dropped)} components below the generation gates"
       + " [review/" + subj + "_qc.json; reported only]")
+_mc = pd.Series([r["mimic_class"] for r in rows + excluded]).value_counts().to_dict() if rows or excluded else {}
+print(f"{subj}: mimic layer ({'ACTIVE' if USE_MIMIC else 'recorded only'}): "
+      + (", ".join(f"{v} {k}" for k, v in _mc.items() if k != "none") or "no mimic evidence") + f"; {MIM.phase_note}")
 print(f"{subj}: review tier (recorded only) 1: {sum(r['review_tier'] == 1 for r in rows)}, "
       f"2: {sum(r['review_tier'] == 2 for r in rows)}\n")
 if len(df):
@@ -2058,6 +2151,7 @@ _inputs = {k: p_ for k, p_ in (("swi", f"{base}/data/{subj}_swi.nii"), ("labels"
 update_manifest(base, subj, "detect", dict(
     pipeline_version=RULESET, run_at=pd.Timestamp.now().isoformat(timespec="seconds"), args=sys.argv[1:],
     parameters=dict(z_thr=z_thr, ridge_pct=r_pct, rim_mm=RIM_MM, rank=RANK, keep_all=KEEP_ALL,
+                    use_mimic=USE_MIMIC, qc_strict=QC_STRICT, phase=MIM.phase_note,
                     sato_sigmas_mm=list(SATO_SIGMAS_MM), sato_sigmas_px=[round(v, 2) for v in SATO_PX]),
     anatomy="T1" if T1_ANAT else "SWI-only", flair_used=FL is not None, qc_status=QC["status"],
     n_candidates=int(len(df)), n_excluded=len(excluded), n_dropped=len(dropped),
@@ -2856,7 +2950,9 @@ subprocess.run([sys.executable, f"{base}/scripts/score_css.py", subj], check=Tru
 ```python
 #!/usr/bin/env python3
 """Interactive cSS review: shows each suspected candidate, you agree or disagree.
-usage: review_css.py SUBJECT [--top N] [--redo] [--by-tier]
+usage: review_css.py SUBJECT [--top N] [--redo] [--by-tier | --by-model | --by-legacy]
+  --by-model (v5.0, opt-in): order by rank_model (rank_candidates.py; trained ranking model). Falls back to the
+  default order, with a message, when the column is missing. --by-legacy = the default order (cand_id = score_v4).
   --by-tier (v4.18, opt-in): tier-1 candidates first, then tier 2 (review_tier, recorded by detect_css.py;
   not validated). Every candidate is still shown; with --top N the cut applies to the reordered list.
   default: ALL candidates (v4). With --top N, candidates below N are recorded as NOT reviewed and
@@ -2900,13 +2996,22 @@ br = I > 0
 lo, hi = np.percentile(I[br], [1, 99]) if br.any() else (I.min(), I.max())
 df = pd.read_csv(csv)
 _qcp = f"{base}/review/{subj}_qc.json"          # v4.14 case QC (detect_css.py)
+QC_BANNER = ""
 if os.path.exists(_qcp):
     import json as _json
     _qc = _json.load(open(_qcp))
+    # v5.0 CSS_QC_STRICT=1: low-confidence cases also carry a banner in the figure title
+    QC_BANNER = ("QC LOW CONFIDENCE (" + "; ".join(_qc.get("reasons", [])) + ")   " if os.environ.get("CSS_QC_STRICT") == "1"
+                 and _qc.get("status") == "low_confidence_review" else "")
     if _qc.get("status") != "ok":
         print(f"WARNING: case QC {_qc.get('status')}: {'; '.join(_qc.get('reasons', []))} - "
               f"anatomy-based features and exclusions are less reliable for this scan")
-if "--by-tier" in sys.argv and "review_tier" in df.columns:
+if "--by-model" in sys.argv and "rank_model" not in df.columns:
+    print("--by-model: no rank_model column (run rank_candidates.py first) - default order")
+if "--by-model" in sys.argv and "rank_model" in df.columns:
+    ids = df.sort_values(["rank_model", "cand_id"], kind="stable").cand_id.astype(int).tolist()[:top]
+    print(f"order: trained model (rank_model), {len(ids)} candidates")
+elif "--by-tier" in sys.argv and "review_tier" in df.columns:
     ids = df.sort_values(["review_tier", "cand_id"], kind="stable").cand_id.astype(int).tolist()[:top]
     print(f"order: tier 1 first ({int((df.review_tier == 1).sum())}), then tier 2 ({int((df.review_tier == 2).sum())})")
 else:
@@ -3036,7 +3141,7 @@ class Reviewer:
                     f"mirror dark {num(r.mirror_dark_frac):.0%}" + ev)
         done = sum(1 for c in ids if c in calls)
         prev = calls.get(cid)
-        self.fig.suptitle(f"{subj}   candidate #{cid}  ({self.pos + 1}/{len(ids)}, {done} decided)   —   "
+        self.fig.suptitle(QC_BANNER + f"{subj}   candidate #{cid}  ({self.pos + 1}/{len(ids)}, {done} decided)   —   "
                           f"{r.hemi} {r.region}   {r.volume_mm3} mm³, {int(r.n_slices)} slices, darkness z {r.darkness_z}"
                           + (f"   [{', '.join(flags)}]" if flags else "") + feat
                           + (f"\nyour previous call: {prev}" if prev else "\nIs the red outline cSS?"),
@@ -3537,6 +3642,14 @@ if ich_check:
 if result["near_ich_candidates"]:
     print(f"  near-ICH siderosis (NOT in score): {result['near_ich_candidates']} candidates, "
           f"{result['near_ich_volume_mm3']} mm3")
+# v5.0: if the trained model ranked this study (rank_candidates.py), show its order next to the score. Printed only -
+# the JSON and css_scores.csv are unchanged; the model's ranking is validated with evaluate.py, not here.
+_cp = f"{base}/review/{subj}_candidates.csv"
+if os.path.exists(_cp):
+    _c = pd.read_csv(_cp)
+    if "rank_model" in _c.columns and len(_c):
+        _o = _c.sort_values("rank_model").cand_id.astype(int).tolist()
+        print(f"  model ranking (rank_candidates.py), top {min(10, len(_o))} by cand_id: {_o[:10]}")
 ```
 
 ## scripts/stress_test.py
@@ -4367,6 +4480,8 @@ protocol: veins must be DARKER on the SWI than on the magnitude (calcium is not 
 Research software, not for clinical reading."""
 import sys, os, argparse, numpy as np, nibabel as nib
 from scipy import ndimage as ndi
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import phase_to_radians, homodyne_highpass
 
 ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 ap.add_argument("mag"); ap.add_argument("phase"); ap.add_argument("out")
@@ -4382,20 +4497,9 @@ if M.ndim == 4 or P.ndim == 4:
     sys.exit("4-D (multi-echo) input: pass one echo (e.g. the longest usable TE) as 3-D images")
 vox = np.array(mi.header.get_zooms()[:3], float)
 si = int(np.argmax(np.abs(mi.affine[2, :3])))          # superior-inferior array axis: slice-wise filter
-lo, hi = float(np.nanmin(P)), float(np.nanmax(P))
-if hi - lo > 2 * np.pi + 0.5:                            # scanner units (e.g. -4096..4095 or 0..4095)
-    P = (P - lo) / (hi - lo) * 2 * np.pi - np.pi
-    unit = f"scanner units {lo:g}..{hi:g} -> radians"
-else:
-    unit = "radians"
-
-# homodyne high-pass, slice by slice in the plane perpendicular to the S-I axis
-z = np.exp(1j * P.astype(np.float64))
-inpl = [ax for ax in range(3) if ax != si]
-sig = [0.0, 0.0, 0.0]
-for ax in inpl: sig[ax] = a.sigma_mm / vox[ax]
-lp = ndi.gaussian_filter(z.real, sig) + 1j * ndi.gaussian_filter(z.imag, sig)     # sigma 0 on the S-I axis
-HP = np.angle(z * np.conj(lp)).astype(np.float32)
+P, unit = phase_to_radians(P)                            # scanner units (e.g. -4096..4095) -> radians
+# homodyne high-pass, slice by slice in the plane perpendicular to the S-I axis (v5.0: shared with the detector)
+HP = homodyne_highpass(P, vox, si, a.sigma_mm)
 
 # brain-ish mask for the sign estimate: bright magnitude, eroded away from the head edge
 thr = 0.15 * float(np.percentile(M[M > 0], 99)) if (M > 0).any() else 0.0
@@ -5011,4 +5115,772 @@ if not (bg_after < 0.05 and bg_before > 0.3 and cor > 0.95 and abs(np.median(O[w
 print(f"   robust MP2RAGE (zero-padded border): speckle 5-15 mm outside the head {bg_before:.0%} -> {bg_after:.1%}, "
       f"brain correlation {cor:.3f}, white matter within 10 %; {r.stdout.strip().split('; ')[0].split(': ')[-1]}")
 print("RESULT mp2rage OK")
+```
+
+## scripts/mimic_rules.py
+
+```python
+"""Mimic evidence for detect_css.py (v5.0, Layer 1). Imported, not run on its own.
+
+Three published cSS mimics, each measured per candidate (Charidimou AJNR 2016; mimics review, Clin Neuroradiol 2020):
+
+  calcification (Sturge-Weber, calcifying angiopathy)   phase: DIAMAGNETIC; cSS / veins are paramagnetic
+  acute convexity SAH / cortical vein thrombosis        FLAIR: bright sulcal CSF / bright adjacent cortex
+  cluster of lobar microbleeds                          shape: several compact parenchymal blobs merged into one object
+
+Columns (detect_css.py appends them to candidates AND excluded):
+  mimic_score   0-1, the strongest of the three pieces of evidence below (0 = none); NOT a probability
+  mimic_class   none / calcification / acute / thrombosis / mixed / mb_cluster
+  mimic_reason  human-readable evidence
+  phase_z       approximate t-statistic of the candidate's fitted susceptibility from the phase (> 0 paramagnetic,
+                < 0 diamagnetic); NaN without a usable phase image
+  phase_r       correlation of the observed filtered phase with the dipole pattern a PARAMAGNETIC object of this
+                candidate's own shape would make (-1..1)
+  mb_cluster_n  compact parenchymal sub-objects left after one erosion (>= 3 -> microbleed cluster)
+
+WHY THE PHASE RULE FITS A DIPOLE PATTERN instead of reading the sign of the median phase: the phase inside a thin
+sheet or tube depends on its orientation to B0. In css_common.susceptibility_signal (the pipeline's own forward
+model), a paramagnetic sheet lying flat to B0 has median filtered phase -0.94 rad and a vertical one +2.09 rad; a
+paramagnetic tube perpendicular to B0 -0.54 rad (tests/check_mimic.py). A sign-of-median rule would call real cSS on
+horizontal cortex "calcium". Fitting the pattern a paramagnetic object of the candidate's own shape would produce
+takes the orientation into account. The scanner's sign convention is fitted the same way on the vessel map (veins are
+paramagnetic), so no vendor table is needed.
+
+Limits (research software, thresholds NOT validated on labelled data):
+  - phase_z treats noise as independent within ~2 voxels; real phase noise and nearby veins make it optimistic.
+  - background fields that survive the 4 mm high-pass are noise here. Calcium next to a large vein can be missed.
+  - FLAIR thresholds (z > 3) are the detector's existing flair_bright / flair_ctx_bright cut-offs (v4.x), not
+    re-derived. Acute cSAH and cSS co-exist in CAA: FLAIR evidence is a SOFT penalty only, never an exclusion.
+  - laminar cortical necrosis and haemorrhagic infarct are not handled (no DWI / T1 hyperintensity feature).
+Only with CSS_USE_MIMIC=1 does any of this change the output: score x 0.5 for FLAIR evidence, exclusion E10
+(calcification, mimic_score >= 0.7) and E11 (microbleed cluster, mimic_score >= 0.5). Default: recorded only."""
+import os, numpy as np, nibabel as nib
+from scipy import ndimage as ndi
+from css_common import phase_to_radians, homodyne_highpass, fresh
+
+HP_SIGMA_MM = 4.0          # same high-pass as make_swi.py
+FIT_SHELL_VOX = 2          # phase fit region = this many voxels around the candidate (inside the brain)
+WRAP_RAD = 2.5             # observed |filtered phase| above this may be wrapped: not used in the fit
+BOX_MARGIN_MM = 12.0       # forward-model box around the candidate
+CORR_VOX = 2.0             # assumed noise correlation length (voxels per axis) for phase_z
+CONV_MIN_T = 3.0           # scanner sign convention must be fitted at least this clearly, else the phase rule is off
+CALC_Z, CALC_R = -3.0, -0.2
+FLAIR_Z = 3.0              # = flair_bright / flair_ctx_bright in detect_css.py
+MB_DIAM_MM, MB_MIN_VOX, MB_MAX_ASPECT, MB_PARENCHYMA = 6.0, 2, 2.5, 0.5
+MB_MIN_N = 3
+
+
+def dipole_field(chi, vox, affine, pad=16):
+    """field perturbation (ppm of B0) of susceptibility map chi: the same unit-dipole kernel as
+    css_common.susceptibility_signal, D(k) = 1/3 - (k.b0)^2/|k|^2, B0 = world z through the affine; lean memory
+    (broadcast frequencies, complex64) so a whole-brain fit fits on a laptop"""
+    c = np.pad(np.asarray(chi, np.float32), pad)
+    vox = np.asarray(vox, float)
+    R = np.asarray(affine, float)[:3, :3] / vox[None, :]
+    b0 = R.T @ np.array([0.0, 0.0, 1.0]); b0 /= np.linalg.norm(b0)
+    f = [np.fft.fftfreq(n, d=v).astype(np.float32) for n, v in zip(c.shape, vox)]
+    kx, ky, kz = f[0][:, None, None], f[1][None, :, None], f[2][None, None, :]
+    k2 = kx ** 2 + ky ** 2 + kz ** 2
+    kb = kx * b0[0] + ky * b0[1] + kz * b0[2]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        D = (np.float32(1 / 3) - np.where(k2 > 0, kb ** 2 / k2, 0)).astype(np.float32)
+    D[0, 0, 0] = 0
+    from scipy import fft as sfft                                  # keeps complex64 (numpy.fft upcasts)
+    out = np.real(sfft.ifftn(sfft.fftn(c.astype(np.complex64), workers=-1) * D, workers=-1)).astype(np.float32)
+    return out[pad:-pad, pad:-pad, pad:-pad]
+
+
+def highpass_linear(field, vox, si, sigma_mm=HP_SIGMA_MM):
+    """the linear (small-phase) equivalent of homodyne_highpass, applied to a predicted field"""
+    sig = [0.0 if ax == si else sigma_mm / vox[ax] for ax in range(3)]
+    return field - ndi.gaussian_filter(field, sig)
+
+
+def fit_amplitude(obs, pred, n_corr=CORR_VOX ** 3):
+    """least-squares a in obs = a * pred over the given voxels -> (a, t, r); t uses n / n_corr effective samples"""
+    obs = np.asarray(obs, float); pred = np.asarray(pred, float)
+    ss = float((pred ** 2).sum())
+    if len(obs) < 10 or ss <= 0: return np.nan, np.nan, np.nan
+    a = float((obs * pred).sum() / ss)
+    res = obs - a * pred
+    # var(a) = sigma^2 / sum(pred^2) for independent noise; noise correlated over n_corr voxels inflates it n_corr-fold
+    se = float(np.sqrt((res ** 2).sum() / max(len(obs) - 1, 1)) * np.sqrt(n_corr / ss))
+    r = float(np.corrcoef(obs, pred)[0, 1]) if obs.std() > 0 and pred.std() > 0 else np.nan
+    return a, (a / se if se > 0 else np.nan), r
+
+
+def flair_rule(fz, fcz):
+    """FLAIR evidence -> (score 0-1, class, reason). fz = sulcal-CSF FLAIR z, fcz = adjacent-cortex FLAIR z
+    (detect_css.py flair_csf_z / flair_ctx_z; NaN without FLAIR)"""
+    s = lambda z: float(np.clip(0.5 + (z - FLAIR_Z) / 6.0, 0, 1)) if np.isfinite(z) and z > FLAIR_Z else 0.0
+    sc, sx = s(fz), s(fcz)
+    if sc and sx: return max(sc, sx), "mixed", f"FLAIR bright sulcal CSF (z {fz:.1f}) and cortex (z {fcz:.1f})"
+    if sc: return sc, "acute", f"FLAIR bright sulcal CSF (z {fz:.1f}): acute convexity SAH?"
+    if sx: return sx, "thrombosis", f"FLAIR bright adjacent cortex (z {fcz:.1f}): cortical vein thrombosis?"
+    return 0.0, "none", ""
+
+
+def mb_cluster_rule(mask, tissue, vox):
+    """candidate support (crop) -> (score, n, reason). Erode once with the 6-neighbour cross (a full 3x3x3 cube
+    shrinks a 3.2 mm microbleed at 0.8 mm voxels to one voxel), in-plane only when slices are > 1.5x the in-plane
+    voxel (at 0.5 x 0.5 x 2 mm a 3D erosion erases every microbleed under 5 mm). A cSS band up to 2 voxels thick
+    erodes away; a 3-voxel band leaves a long flat sliver that fails the aspect test. Count sub-objects that are
+    microbleed-like: >= MB_MIN_VOX voxels across, compact (longest / shortest extent in mm <= MB_MAX_ASPECT), small
+    (equivalent diameter of the re-dilated piece < MB_DIAM_MM) and mostly surrounded by parenchyma (>= MB_PARENCHYMA
+    of a 1-voxel shell in labelled tissue). Microbleeds under ~3 mm erode to one voxel and are not counted."""
+    vox = np.asarray(vox, float)
+    s3 = np.ones((3, 3, 3), bool); s1 = ndi.generate_binary_structure(3, 1)
+    if vox[2] > 1.5 * min(vox[0], vox[1]): s1[:, :, 0] = s1[:, :, 2] = False      # in-plane cross only
+    er = ndi.binary_erosion(mask, structure=s1)
+    lab, n = ndi.label(er, structure=s3)
+    good = 0
+    for i, sl in enumerate(ndi.find_objects(lab), 1):
+        if sl is None: continue
+        nv = np.array([s_.stop - s_.start for s_ in sl]); ext = nv * vox
+        if nv.max() < MB_MIN_VOX or ext.max() / ext.min() > MB_MAX_ASPECT: continue
+        piece = ndi.binary_dilation(lab == i, structure=s1) & mask
+        diam = float((6 * piece.sum() * np.prod(vox) / np.pi) ** (1 / 3))
+        if diam >= MB_DIAM_MM: continue
+        shell = ndi.binary_dilation(piece, structure=s3) & ~mask
+        if shell.any() and tissue[shell].mean() >= MB_PARENCHYMA: good += 1
+    if good >= MB_MIN_N:
+        return float(min(1.0, 0.5 + 0.1 * (good - MB_MIN_N))), good, f"{good} compact parenchymal blobs: microbleed cluster?"
+    return 0.0, good, ""
+
+
+class MimicRejector:
+    """Per-scan state (filtered phase, scanner sign convention) + evaluate() per candidate."""
+
+    def __init__(self, base, subj, swi, brain, vox, si, ves=None):
+        self.vox = np.asarray(vox, float); self.si = si; self.aff = swi.affine; self.brain = brain
+        self.hp = None; self.conv = 0; self.phase_note = "no phase image (data/ID_phase.nii.gz)"
+        p = f"{base}/data/{subj}_phase.nii.gz"
+        if not os.path.exists(p): return
+        swi_p = f"{base}/data/{subj}_swi.nii"
+        ph = nib.load(p)
+        if ph.shape[:3] != swi.shape[:3] or not np.allclose(ph.affine, swi.affine, atol=1e-3):
+            self.phase_note = "phase image is not on the SWI grid - phase rule off"; return
+        if not fresh(p, swi_p):
+            self.phase_note = "phase image is older than the SWI - phase rule off (re-import with --phase)"; return
+        P, unit = phase_to_radians(np.asarray(ph.dataobj, np.float32))
+        if P.ndim == 4: self.phase_note = "4-D phase - phase rule off"; return
+        self.hp = homodyne_highpass(P, self.vox, si, HP_SIGMA_MM)
+        self.hp[~brain] = 0
+        # scanner sign convention: veins are paramagnetic -> fit the dipole pattern of the whole vessel map
+        if ves is None or ves.sum() < 200:
+            self.hp = None; self.phase_note = "vessel map too small to fit the phase sign convention - phase rule off"; return
+        pred = highpass_linear(dipole_field(ves.astype(np.float32), self.vox, self.aff), self.vox, si)
+        a, t, r = fit_amplitude(self.hp[ves], pred[ves])
+        self.conv_t, self.conv_r = t, r
+        if not np.isfinite(t) or abs(t) < CONV_MIN_T:
+            self.hp = None
+            self.phase_note = f"phase sign convention unclear on the vessel map (t {t:.1f}) - phase rule off"; return
+        self.conv = 1 if a > 0 else -1
+        self.phase_note = f"phase used ({unit}); paramagnetic sign {self.conv:+d} fitted on the vessel map (t {t:.1f}, r {r:.2f})"
+
+    def phase_evidence(self, mm, pad):
+        """-> (phase_z, phase_r) for the candidate mask mm (crop at slices pad); NaN without phase"""
+        if self.hp is None: return np.nan, np.nan
+        m = int(np.ceil(BOX_MARGIN_MM / self.vox.min()))
+        idx = np.argwhere(mm) + [s.start for s in pad]
+        lo = np.maximum(idx.min(0) - m, 0); hi = np.minimum(idx.max(0) + m + 1, self.hp.shape)
+        box = tuple(slice(a, b) for a, b in zip(lo, hi))
+        cm = np.zeros(tuple(hi - lo), bool); q = idx - lo; cm[tuple(q.T)] = True
+        aff = self.aff.copy(); aff[:3, 3] = (self.aff @ np.r_[lo, 1])[:3]
+        pred = highpass_linear(dipole_field(cm.astype(np.float32), self.vox, aff), self.vox, self.si)
+        # fit on the shell AROUND the candidate: inside a strong deposit the phase wraps past pi (a paramagnetic sheet
+        # flat to B0 at 0.5 ppm reaches 5.5 rad at 3 T, TE 20 ms) and the homodyne filter folds it to the wrong sign;
+        # the field outside is weaker. Voxels already near +-pi are left out as possibly wrapped.
+        reg = ndi.binary_dilation(cm, iterations=FIT_SHELL_VOX) & ~cm & self.brain[box] \
+            & (np.abs(self.hp[box]) < WRAP_RAD)
+        a, t, r = fit_amplitude(self.hp[box][reg], pred[reg])
+        return (self.conv * t if np.isfinite(t) else np.nan), (self.conv * r if np.isfinite(r) else np.nan)
+
+    def evaluate(self, mm, pad, tissue_pad, fz, fcz, dark_pad=None):
+        """one candidate -> dict of the mimic columns. dark_pad: dark voxels (detector z < Z_LOW) in the same crop.
+        The microbleed rule looks at the dark voxels within 2 voxels of the candidate, not at the candidate mask
+        itself: the detector's mask is the ridge-filtered (thinned) dark region, in which round microbleeds no
+        longer look round (PHM phantom: a row of 4 microbleeds became one candidate with 0 countable blobs)."""
+        pz, pr = self.phase_evidence(mm, pad)
+        support = mm if dark_pad is None else (mm | (ndi.binary_dilation(mm, iterations=2) & dark_pad))
+        calc = 0.0; why = []
+        if np.isfinite(pz) and pz <= CALC_Z and np.isfinite(pr) and pr <= CALC_R:
+            calc = float(min(1.0, 0.7 + 0.05 * (CALC_Z - pz)))
+            why.append(f"diamagnetic on phase (phase_z {pz:.1f}, r {pr:.2f}): calcification?")
+        fs, fcls, fwhy = flair_rule(fz, fcz)
+        ms, mn, mwhy = mb_cluster_rule(support, tissue_pad, self.vox)
+        if fwhy: why.append(fwhy)
+        if mwhy: why.append(mwhy)
+        cls, sc = max((("calcification", calc), (fcls, fs), ("mb_cluster", ms)), key=lambda t: t[1])
+        return dict(mimic_score=round(sc, 2), mimic_class=cls if sc > 0 else "none", mimic_reason="; ".join(why),
+                    phase_z=round(pz, 2) if np.isfinite(pz) else np.nan,
+                    phase_r=round(pr, 2) if np.isfinite(pr) else np.nan, mb_cluster_n=int(mn),
+                    _flair_class=fcls)
+```
+
+## scripts/train_ranker.py
+
+```python
+#!/usr/bin/env python3
+"""Fit the candidate ranking model on expert labels (v5.0, Layer 3) -> review/ranker_model.json.
+usage: train_ranker.py [--split dev] [--source consensus|reader:NAME] [--l2 1.0] [--min-patients 3] [--boot 500]
+                       [--out review/ranker_model.json]
+What it does:
+  - training rows = shown candidates AND excluded objects (from expert sheets made with --include-excluded) that
+    carry an expert label in labels/consensus.csv (or one reader's latest session in candidate_labels.csv),
+    matched by cand_uid fingerprint, from studies of the given split ONLY (labels/study_meta.csv). The default
+    split is dev, and --split test is refused: test studies are for reporting with evaluate.py.
+  - target: 1 = called cSS, 0 = called anything else; 'uncertain' rows are left out.
+  - features: FEATURES below, read from review/ID_candidates|excluded.csv plus review/ID_surface_features.csv
+    (recon-all route) when present. A feature missing from every training row is dropped with a warning;
+    missing values are filled with the training median. Deprecated columns (vein_tree_mm, mirror_dark_frac,
+    branch_per10mm) and the scores (score, score_v3, score_v4) are NOT features.
+  - model: L2-regularised logistic regression (scipy.optimize.minimize, L-BFGS), class-balanced weights,
+    features median-imputed and standardised. Leave-one-patient-out (LOPO) cross-validation: imputation and
+    standardisation are refitted inside every fold. Reported: pooled LOPO AUC of the model AND of score_v4 on
+    the same rows (the baseline it must beat), each with a patient-bootstrap 95 % interval, and per-patient
+    numbers. The final model is then fitted on all training rows.
+Needs >= --min-patients labelled patients with >= 1 positive and >= 1 negative row overall; stops otherwise.
+With fewer than ~10 patients every number here is noisy: read the intervals, not the point estimates.
+rank_candidates.py applies the model. Research software, not for clinical use."""
+import sys, os, json, argparse, numpy as np, pandas as pd
+from scipy.optimize import minimize
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import base as _base, cand_uid, label_class, FP
+
+FEATURES = [
+    # darkness and pial position
+    "darkness_z", "edge_contrast", "pial_dist_mm", "surface_contact", "cortex_frac", "cortex_dist_mm", "bank_frac",
+    # shape
+    "volume_mm3", "n_slices", "elongation", "extent_mm", "tube_ratio", "surface_alignment", "tram_frac",
+    "parenchyma_frac", "n_pieces",
+    # vessel continuation (bounded)
+    "vessel_wm_mm", "vessel_ext_mm", "vessel_run_mm", "axis_normal", "local_cont_max_mm", "local_cont_min_mm",
+    "terminal_ends", "local_branch_per10mm", "net_radius_med_mm",
+    # thickness
+    "cand_radius_med_mm", "cand_radius_p95_mm", "cand_radius_cv",
+    # regional / contralateral reference
+    "region_z", "region_dark_frac", "mirror_region_z", "cand_mirror_z",
+    # FLAIR and mimic evidence
+    "flair_csf_z", "flair_ctx_z", "mimic_score", "phase_z", "mb_cluster_n",
+    # pial surface (recon-all route, review/ID_surface_features.csv)
+    "surf_normal_dist_mm", "surf_width_mm", "surf_inradius_mm", "surf_aspect", "geo_length_mm", "surf_band_continuity",
+    "surf_dark_cont_mm", "surf_exit_paths", "surf_sulc", "surf_curv", "surf_thickness_mm"]
+DEPRECATED = ["vein_tree_mm", "mirror_dark_frac", "branch_per10mm"]       # never features (saturated / uninformative)
+
+
+def load_labels(L, source):
+    if source == "consensus":
+        lab = pd.read_csv(f"{L}/consensus.csv"); lab = lab[lab.method != "pending"]
+        return lab.assign(cls=lab.consensus_class)[["study_id", "cand_uid", "cls"]]
+    if source.startswith("reader:"):
+        rd = source.split(":", 1)[1]; lab = pd.read_csv(f"{L}/candidate_labels.csv"); lab = lab[lab.reader_id == rd]
+        lab = lab[lab.session == lab.groupby("study_id").session.transform("max")]
+        return lab.assign(cls=lab.label.map(label_class))[["study_id", "cand_uid", "cls"]]
+    sys.exit("--source consensus or reader:NAME")
+
+
+def study_table(B, s):
+    """candidates + excluded of one study (with surface features merged on the fingerprint when present)"""
+    parts = []
+    for lst in ("candidates", "excluded"):
+        p = f"{B}/review/{s}_{lst}.csv"
+        if os.path.exists(p):
+            d = pd.read_csv(p)
+            if len(d): parts.append(d.assign(_list=lst))
+    if not parts: return None
+    d = pd.concat(parts, ignore_index=True)
+    sp = f"{B}/review/{s}_surface_features.csv"
+    if os.path.exists(sp):
+        sf = pd.read_csv(sp).drop(columns=["list", "obj_id"], errors="ignore").drop_duplicates(FP)
+        d = d.merge(sf, on=FP, how="left", suffixes=("", "_surf"))
+    d["cand_uid"] = [cand_uid(s, r) for _, r in d.iterrows()]
+    return d
+
+
+def prep(X, med=None, mu=None, sd=None):
+    """median imputation + standardisation; parameters from X unless given"""
+    X = np.asarray(X, float)
+    if med is None: med = np.nanmedian(X, axis=0); med = np.where(np.isfinite(med), med, 0.0)
+    X = np.where(np.isfinite(X), X, med)
+    if mu is None: mu = X.mean(0); sd = X.std(0); sd = np.where(sd > 1e-9, sd, 1.0)
+    return (X - mu) / sd, med, mu, sd
+
+
+def fit_lr(Z, y, l2):
+    """class-balanced L2 logistic regression -> (w, b)"""
+    w_pos = 0.5 / max(y.mean(), 1e-9); w_neg = 0.5 / max(1 - y.mean(), 1e-9)
+    cw = np.where(y == 1, w_pos, w_neg)
+    def f(p):
+        w, b = p[:-1], p[-1]; t = Z @ w + b
+        ll = cw * (np.logaddexp(0, t) - y * t)
+        g = cw * (1 / (1 + np.exp(-t)) - y)
+        return ll.sum() / len(y) + 0.5 * l2 * (w @ w) / len(y), \
+            np.r_[Z.T @ g / len(y) + l2 * w / len(y), g.sum() / len(y)]
+    r = minimize(f, np.zeros(Z.shape[1] + 1), jac=True, method="L-BFGS-B")
+    return r.x[:-1], float(r.x[-1])
+
+
+def auc(y, s):
+    y = np.asarray(y); s = np.asarray(s, float); pos, neg = s[y == 1], s[y == 0]
+    if not len(pos) or not len(neg): return np.nan
+    return float(((pos[:, None] > neg[None, :]).sum() + 0.5 * (pos[:, None] == neg[None, :]).sum()) / (len(pos) * len(neg)))
+
+
+def boot_auc(df, col, n, rng):
+    pats = df.study_id.unique(); vals = []
+    for _ in range(n):
+        pick = rng.choice(pats, len(pats), replace=True)
+        d = pd.concat([df[df.study_id == p] for p in pick]); vals.append(auc(d.y, d[col]))
+    v = np.array([x for x in vals if np.isfinite(x)])
+    return [round(float(np.percentile(v, 2.5)), 3), round(float(np.percentile(v, 97.5)), 3)] if len(v) else [None, None]
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--split", default="dev", choices=["dev", "all"])   # test is refused: reporting only
+    ap.add_argument("--source", default="consensus"); ap.add_argument("--l2", type=float, default=1.0)
+    ap.add_argument("--min-patients", type=int, default=3); ap.add_argument("--boot", type=int, default=500)
+    ap.add_argument("--seed", type=int, default=1); ap.add_argument("--out", default="")
+    a = ap.parse_args(); B = _base(); L = f"{B}/labels"
+    out = a.out or f"{B}/review/ranker_model.json"
+    meta = pd.read_csv(f"{L}/study_meta.csv", dtype=str)
+    studies = meta[meta.split == "dev"] if a.split == "dev" else meta[meta.split != "test"]
+    if (meta.split == "test").any() and a.split == "all":
+        print(f"note: {int((meta.split == 'test').sum())} test-split studies are left out (never trained on)")
+    lab = load_labels(L, a.source)
+    rows = []
+    for s in studies.study_id:
+        d = study_table(B, s)
+        ls = lab[(lab.study_id == s) & lab.cls.isin([c for c in lab.cls.unique() if c != "uncertain"])]
+        if d is None or not len(ls): continue
+        m = d.merge(ls[["cand_uid", "cls"]], on="cand_uid", how="inner")
+        if len(m) < len(ls): print(f"warning: {s}: {len(ls) - len(m)} labels no longer match the detector output")
+        if len(m): rows.append(m.assign(study_id=s, y=(m.cls == "cSS").astype(int)))
+    if not rows: sys.exit("no labelled candidates in the requested split - label some studies first (expert_sheet.py)")
+    T = pd.concat(rows, ignore_index=True)
+    n_pat = T.study_id.nunique()
+    print(f"train_ranker: {len(T)} labelled objects ({int(T.y.sum())} cSS, {int((1 - T.y).sum())} other) "
+          f"from {n_pat} patients, split {a.split}, source {a.source}")
+    if n_pat < a.min_patients: sys.exit(f"need >= {a.min_patients} labelled patients, have {n_pat} - not fitted")
+    if T.y.sum() == 0 or T.y.sum() == len(T): sys.exit("need both cSS and non-cSS labels - not fitted")
+    feats = [f for f in FEATURES if f in T.columns and T[f].notna().any()]
+    gone = [f for f in FEATURES if f not in feats]
+    if gone: print(f"warning: {len(gone)} features not available in any training row, dropped: {', '.join(gone)}")
+    X = T[feats].apply(pd.to_numeric, errors="coerce").values.astype(float); y = T.y.values
+    # leave-one-patient-out: imputation + scaling refitted inside every fold
+    T["score_lopo"] = np.nan
+    for p in T.study_id.unique():
+        tr, te = (T.study_id != p).values, (T.study_id == p).values
+        if y[tr].min() == y[tr].max(): continue
+        Ztr, med, mu, sd = prep(X[tr]); w, b = fit_lr(Ztr, y[tr], a.l2)
+        T.loc[te, "score_lopo"] = 1 / (1 + np.exp(-(prep(X[te], med, mu, sd)[0] @ w + b)))
+    base_col = "score_v4" if "score_v4" in T.columns else "score"
+    rng = np.random.default_rng(a.seed); ok = T.score_lopo.notna()
+    auc_m, auc_b = auc(T.y[ok], T.score_lopo[ok]), auc(T.y[ok], T[base_col][ok])
+    ci_m = boot_auc(T[ok], "score_lopo", a.boot, rng); ci_b = boot_auc(T[ok], base_col, a.boot, rng)
+    per = [dict(study_id=p, n=int((T.study_id == p).sum()), n_css=int(T.y[T.study_id == p].sum()),
+                auc_model=auc(T.y[T.study_id == p], T.score_lopo[T.study_id == p]),
+                auc_score_v4=auc(T.y[T.study_id == p], T[base_col][T.study_id == p])) for p in T.study_id.unique()]
+    Z, med, mu, sd = prep(X); w, b = fit_lr(Z, y, a.l2)
+    model = dict(model="logistic_l2_balanced", version="v5.0", fitted_at=pd.Timestamp.now().isoformat(timespec="seconds"),
+                 features=feats, weights=[round(float(v), 6) for v in w], bias=round(b, 6),
+                 impute_median=[float(v) for v in med], mean=[float(v) for v in mu], sd=[float(v) for v in sd],
+                 l2=a.l2, split=a.split, source=a.source, training_studies=sorted(T.study_id.unique().tolist()),
+                 n_objects=int(len(T)), n_css=int(T.y.sum()), n_patients=int(n_pat),
+                 lopo_auc=None if not np.isfinite(auc_m) else round(auc_m, 3), lopo_auc_ci95=ci_m,
+                 baseline=base_col, baseline_auc=None if not np.isfinite(auc_b) else round(auc_b, 3), baseline_auc_ci95=ci_b,
+                 per_patient=[{k: (round(v, 3) if isinstance(v, float) and np.isfinite(v) else (None if isinstance(v, float) else v))
+                               for k, v in r.items()} for r in per],
+                 dropped_features=gone,
+                 note="research software; pooled LOPO AUC over few patients is noisy - read the intervals")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    json.dump(model, open(out, "w"), indent=2)
+    top = sorted(zip(feats, w), key=lambda t: -abs(t[1]))[:8]
+    print(f"LOPO AUC model {model['lopo_auc']} {ci_m} vs {base_col} {model['baseline_auc']} {ci_b} (patient bootstrap 95 %)")
+    print("largest standardised weights: " + ", ".join(f"{f} {v:+.2f}" for f, v in top))
+    print(f"-> {out}   (apply: rank_candidates.py SUBJECT; never trained on test-split studies)")
+```
+
+## scripts/rank_candidates.py
+
+```python
+#!/usr/bin/env python3
+"""Apply the trained ranking model to one study (v5.0, Layer 3).
+usage: rank_candidates.py SUBJECT [--model review/ranker_model.json] [--allow-training-study]
+Adds two columns at the END of review/ID_candidates.csv (replaced if present; nothing else changes - cand_id and
+the existing score / score_v4 order stay, so both rankings are visible):
+  score_model   model output 0-1 (NOT a calibrated probability of cSS)
+  rank_model    1 = highest score_model
+Features the model needs but this study lacks are filled with the training median (named in the output).
+Refuses a study the model was trained on (its ranking would be optimistic) unless --allow-training-study.
+CSS_QC_STRICT=1 and case QC low_confidence_review (review/ID_qc.json): score_model x 0.8 (a soft penalty that
+keeps the order within the case; it matters only when candidates of several cases are pooled).
+run_css.sh calls this only when the model exists and the study is not in the test split; a test-split study is
+scored by running this script by hand with the frozen model. Research software, not for clinical use."""
+import sys, os, json, argparse, numpy as np, pandas as pd
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import base as _base, FP
+
+ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+ap.add_argument("subject"); ap.add_argument("--model", default="")
+ap.add_argument("--allow-training-study", action="store_true")
+a = ap.parse_args(); B = _base(); s = a.subject
+mp = a.model or f"{B}/review/ranker_model.json"
+if not os.path.exists(mp): sys.exit(f"no model ({mp}) - train one with train_ranker.py first")
+M = json.load(open(mp))
+if s in M.get("training_studies", []) and not a.allow_training_study:
+    sys.exit(f"{s} was used to train {os.path.basename(mp)} - its model ranking would be optimistic "
+             f"(--allow-training-study to rank anyway)")
+cp = f"{B}/review/{s}_candidates.csv"
+if not os.path.exists(cp): sys.exit(f"no {cp} - run detect_css.py {s} first")
+d = pd.read_csv(cp).drop(columns=["score_model", "rank_model"], errors="ignore")
+if not len(d):
+    print(f"{s}: no candidates - nothing to rank"); d.assign(score_model=[], rank_model=[]).to_csv(cp, index=False); sys.exit(0)
+X = pd.DataFrame(index=d.index)
+sp = f"{B}/review/{s}_surface_features.csv"
+sf = pd.read_csv(sp).drop(columns=["list", "obj_id"], errors="ignore").drop_duplicates(FP) if os.path.exists(sp) else None
+full = d.merge(sf, on=FP, how="left", suffixes=("", "_surf")) if sf is not None else d
+missing = [f for f in M["features"] if f not in full.columns]
+for f in M["features"]: X[f] = pd.to_numeric(full[f], errors="coerce").values if f in full.columns else np.nan
+Xv = X.values.astype(float); med = np.array(M["impute_median"])
+Xv = np.where(np.isfinite(Xv), Xv, med)
+t = ((Xv - np.array(M["mean"])) / np.array(M["sd"])) @ np.array(M["weights"]) + M["bias"]
+sc = 1 / (1 + np.exp(-t))
+note = ""
+qp = f"{B}/review/{s}_qc.json"
+if os.environ.get("CSS_QC_STRICT") == "1" and os.path.exists(qp) and json.load(open(qp)).get("status") == "low_confidence_review":
+    sc = sc * 0.8; note = "  [QC low_confidence_review: score_model x0.8, CSS_QC_STRICT=1]"
+d["score_model"] = np.round(sc, 4)
+d["rank_model"] = pd.Series(sc).rank(ascending=False, method="first").astype(int).values
+d.to_csv(cp, index=False)
+order = d.sort_values("rank_model").cand_id.astype(int).tolist()
+print(f"{s}: model ranking added (score_model, rank_model) - model fitted {M.get('fitted_at')} on "
+      f"{M.get('n_patients')} patients, LOPO AUC {M.get('lopo_auc')} vs {M.get('baseline')} {M.get('baseline_auc')}{note}")
+print(f"   order by model (cand_id): {order[:15]}{' ...' if len(order) > 15 else ''}")
+if missing: print(f"   filled with the training median (not in this study's output): {', '.join(missing)}")
+```
+
+## tests/check_mimic.py
+
+```python
+"""v5.0 checks: mimic layer (scripts/mimic_rules.py) and its hooks in detect_css.py.
+usage: check_mimic.py    (unit part needs nothing; the integration part needs PH3 from phantom_v4.py, aligned, in $CSS_BASE)
+1. phase rule: a PARAMAGNETIC sheet / tube / blob in any orientation to B0 gives phase_z > 0, a DIAMAGNETIC one < 0,
+   for weak and phase-wrapping susceptibilities (dipole forward model css_common.susceptibility_signal + noise).
+   Also shows why the sign of the median phase is NOT used: it is negative for a paramagnetic sheet flat to B0.
+2. scanner sign convention fitted on paramagnetic veins, for both conventions.
+3. microbleed-cluster rule: 4 compact parenchymal blobs -> cluster; thin cSS-like bands and a single blob -> not.
+4. FLAIR rule classes.
+5. PHM = PH3 + a physics phase image + one cSS lesion made DIAMAGNETIC (calcified band) + a row of 4 microbleeds:
+   CSS_USE_MIMIC unset -> same candidates and exclusions as without the phase (recorded only);
+   CSS_USE_MIMIC=1 -> the calcified band is excluded as E10, every paramagnetic cSS lesion is kept.
+PHANTOM CHECKS ONLY: they show the rules measure what they are meant to on constructed data, not that the
+thresholds hold on real scans."""
+import os, sys, subprocess, numpy as np, nibabel as nib, pandas as pd
+from scipy import ndimage as ndi
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+import mimic_rules as M
+from css_common import susceptibility_signal, homodyne_highpass
+def fail(m): print("FAIL:", m); sys.exit(1)
+rng = np.random.default_rng(2)
+iso = np.array([0.8, 0.8, 0.8]); aff_iso = np.diag([0.8, 0.8, 0.8, 1.0])
+
+def rejector(hp, shape, conv=1, vox=iso, aff=aff_iso):
+    r = M.MimicRejector.__new__(M.MimicRejector)
+    r.vox, r.si, r.aff, r.brain, r.hp, r.conv = np.asarray(vox, float), 2, aff, np.ones(shape, bool), hp, conv
+    return r
+
+# ---- 1. phase rule across orientations, strengths, shapes
+n = 96; zz, yy, xx = np.mgrid[:n, :n, :n]
+def obj(kind):
+    m = np.zeros((n, n, n), bool)
+    if kind == "sheet flat": m[30:54, 30:54, 48] = True
+    elif kind == "sheet vertical": m[48, 30:54, 30:54] = True
+    elif kind == "tube || B0": m[47:49, 47:49, 30:66] = True
+    elif kind == "tube _|_ B0": m[30:66, 47:49, 47:49] = True
+    else: m[((xx - 48) ** 2 + (yy - 48) ** 2 + (zz - 48) ** 2) <= 4] = True
+    return m
+full = tuple(slice(0, n) for _ in range(3))
+lines, naive_flat = [], None
+for chi in (0.15, -0.15, 0.5, -0.5):
+    for kind in ("sheet flat", "sheet vertical", "tube || B0", "tube _|_ B0", "blob"):
+        m = obj(kind)
+        ph, _ = susceptibility_signal(m * chi, iso, aff_iso, 3.0, 0.02, pad=24)
+        ph = np.angle(np.exp(1j * (ph + rng.normal(0, 0.15, ph.shape))))
+        hp = homodyne_highpass(ph, iso, 2, 4.0)
+        pz, pr = rejector(hp, m.shape).phase_evidence(m, full)
+        if not np.isfinite(pz) or (pz > 0) != (chi > 0):
+            fail(f"phase rule: chi {chi:+} {kind} gave phase_z {pz} (wrong sign)")
+        if chi == 0.5 and kind == "sheet flat": naive_flat = float(np.median(hp[m]))
+        lines.append(f"{chi:+.2f} {kind}: {pz:+.1f}")
+print("phase rule, 20 objects (chi ppm, shape: phase_z): " + "; ".join(lines))
+ph, _ = susceptibility_signal(obj("sheet flat") * 0.5, iso, aff_iso, 3.0, 0.02, pad=24)
+med = float(np.median(homodyne_highpass(ph, iso, 2, 4.0)[obj("sheet flat")]))
+ph0, _ = susceptibility_signal(obj("sheet flat") * 0.15, iso, aff_iso, 3.0, 0.02, pad=24)
+med0 = float(np.median(ph0[obj("sheet flat")]))
+if not med0 < 0: fail("expected the raw phase inside a paramagnetic sheet flat to B0 to be negative")
+print(f"why not the median sign: paramagnetic sheet flat to B0 (+0.15 ppm) has median phase {med0:+.2f} rad (negative); "
+      f"at +0.5 ppm the filtered median is {med:+.2f} rad (wrapped)")
+
+# ---- 2. sign convention fitted on veins
+ves = np.zeros((n, n, n), bool)
+for _ in range(8):
+    c = rng.integers(20, n - 20, 3); d = rng.normal(size=3); d /= np.linalg.norm(d)
+    for t in np.linspace(-14, 14, 70):
+        p = np.round(c + t * d).astype(int); ves[p[0] - 1:p[0] + 1, p[1] - 1:p[1] + 1, p[2] - 1:p[2] + 1] = True
+ph, _ = susceptibility_signal(ves * 0.45, iso, aff_iso, 3.0, 0.02, pad=24)
+for sign in (1, -1):
+    hp = homodyne_highpass(np.angle(np.exp(1j * (sign * ph + rng.normal(0, 0.15, ph.shape)))), iso, 2, 4.0)
+    pred = M.highpass_linear(M.dipole_field(ves.astype(np.float32), iso, aff_iso), iso, 2)
+    a, t, r = M.fit_amplitude(hp[ves], pred[ves])
+    if np.sign(a) != sign or abs(t) < M.CONV_MIN_T: fail(f"sign convention {sign:+d} fitted as {np.sign(a):+.0f} (t {t:.1f})")
+    print(f"scanner convention {sign:+d}: fitted {int(np.sign(a)):+d}, t {t:.1f}, r {r:.2f}")
+
+# ---- 3. microbleed-cluster rule, at 0.8 iso, 0.8 x 0.8 x 1.2 and 0.5 x 0.5 x 2 mm
+for vx in ([0.8, 0.8, 0.8], [0.8, 0.8, 1.2], [0.5, 0.5, 2.0]):
+    vx = np.array(vx); sh = (90, 90, 40); Pm = np.indices(sh).transpose(1, 2, 3, 0) * vx; T = np.ones(sh, bool)
+    c = np.array(sh) * vx / 2; row = np.zeros(sh, bool)
+    for k in range(4): row |= ((Pm - (c + [0, (k - 1.5) * 5, 0])) ** 2).sum(-1) <= 1.6 ** 2
+    s_, n_, _ = M.mb_cluster_rule(row, T, vx)
+    if n_ != 4 or s_ < 0.5: fail(f"{vx}: 4 microbleeds (3.2 mm) counted as {n_} (score {s_})")
+    bands = []
+    for th in (1, 2, 3, 4):
+        flat = np.zeros(sh, bool); flat[10:80, 10:80, 18:18 + th] = True
+        vert = np.zeros(sh, bool); vert[10:80, 44:44 + th, 5:35] = True
+        bands += [M.mb_cluster_rule(flat, T, vx)[1], M.mb_cluster_rule(vert, T, vx)[1]]
+    one = ((Pm - c) ** 2).sum(-1) <= 1.6 ** 2
+    if max(bands) >= 3 or M.mb_cluster_rule(one, T, vx)[1] >= 3: fail(f"{vx}: band or single blob called a cluster {bands}")
+    print(f"microbleed cluster {vx.tolist()} mm: 4 blobs -> {n_} (score {s_}); cSS-like bands 1-4 voxels thick -> max {max(bands)}")
+
+# ---- 4. FLAIR rule
+cases = {"none": (np.nan, np.nan), "acute": (4.0, 1.0), "thrombosis": (1.0, 4.5), "mixed": (5.0, 5.0)}
+for want, (fz, fcz) in cases.items():
+    sc, cls, _ = M.flair_rule(fz, fcz)
+    if cls != want or (want != "none") != (sc > 0): fail(f"FLAIR rule {fz}, {fcz} -> {cls} {sc}, expected {want}")
+print("FLAIR rule: none / acute (CSF z 4) / thrombosis (cortex z 4.5) / mixed - as expected; z <= 3 gives none")
+
+# ---- 5. integration on PHM (PH3 + phase + calcified band + microbleeds)
+B = os.environ.get("CSS_BASE")
+if not B or not os.path.exists(f"{B}/data/PH3_swi.nii"):
+    print("integration part skipped (no PH3 in $CSS_BASE)"); print("RESULT mimic OK"); sys.exit(0)
+S = f"{B}/scripts"; py = sys.executable
+img = nib.load(f"{B}/data/PH3_swi.nii"); I = img.get_fdata().astype(np.float32); aff = img.affine
+vox = np.array(img.header.get_zooms()[:3]); seg = nib.load(f"{B}/synthseg/PH3_seg.nii.gz").get_fdata().astype(np.int32)
+tr = nib.load(f"{B}/work/PH3_truth.nii.gz").get_fdata().astype(int)
+vn = nib.load(f"{B}/work/PH3_veins.nii.gz").get_fdata().astype(int)
+CALC = 5                                                         # convexity crown lesion -> calcified band (4 is never generated on PH3)
+chi = np.zeros(I.shape, np.float32); chi[(tr > 0) & (tr != CALC)] = 0.3; chi[tr == CALC] = -0.3; chi[vn > 0] = 0.45
+# 4 microbleeds (r 1.6 mm, 5 mm apart: separate blobs that the 3 mm merge gap may join into one candidate)
+# at the cortex / white-matter junction (lobar microbleeds are cortico-subcortical; >= half surrounded by parenchyma)
+ctx = (seg >= 1000) & (tr == 0) & (vn == 0) & ~ndi.binary_dilation(tr > 0, iterations=6)
+csf_d = ndi.distance_transform_edt(~np.isin(seg, [0, 24]), sampling=vox)
+cand = np.argwhere(ctx & ndi.binary_dilation(np.isin(seg, [2, 41]), iterations=1) & (csf_d >= 2.5))
+c0 = cand[len(cand) // 3].astype(float)
+gz = np.gradient(ndi.gaussian_filter((seg >= 1000).astype(np.float32), 2))
+tdir = np.cross([g[tuple(c0.astype(int))] for g in gz], [0, 0, 1.0]); tdir /= np.linalg.norm(tdir) + 1e-9
+P = np.argwhere(np.ones(I.shape, bool)).reshape(I.shape + (3,)) * vox
+mb = np.zeros(I.shape, bool)
+for k in range(4):
+    cc = (c0 + tdir * k * 5.0 / vox) * vox
+    mb |= ((P - cc) ** 2).sum(-1) <= 1.6 ** 2
+chi[mb] = 0.8
+I2 = I.copy(); I2[mb] *= 0.35
+ph, att = susceptibility_signal(chi, vox, aff, 3.0, 0.02, pad=16)
+I2 = I2 * att                                                    # blooming, as on a real GRE
+ph = np.angle(np.exp(1j * (ph + rng.normal(0, 0.1, ph.shape)))).astype(np.float32)
+for name in ("PHM0", "PHM"):
+    nib.save(nib.Nifti1Image(I2, aff), f"{B}/data/{name}_swi.nii")
+    nib.save(nib.Nifti1Image(seg, aff), f"{B}/synthseg/{name}_seg.nii.gz")
+    subprocess.run([py, f"{S}/align_seg.py", name], check=True, capture_output=True)
+nib.save(nib.Nifti1Image(ph, aff), f"{B}/data/PHM_phase.nii.gz")      # PHM0: same scan without a phase image
+if os.path.exists(f"{B}/data/PHM0_phase.nii.gz"): os.remove(f"{B}/data/PHM0_phase.nii.gz")
+def det(name, use):
+    env = dict(os.environ); env.pop("CSS_USE_MIMIC", None)
+    if use: env["CSS_USE_MIMIC"] = "1"
+    r = subprocess.run([py, f"{S}/detect_css.py", name], capture_output=True, text=True, env=env)
+    if r.returncode: print(r.stdout[-800:], r.stderr[-1500:]); fail(f"detect_css {name} failed")
+    out = {}
+    for lst, idc in (("candidates", "cand_id"), ("excluded", "excl_id")):
+        d = pd.read_csv(f"{B}/review/{name}_{lst}.csv"); Mk = nib.load(f"{B}/review/{name}_{lst}.nii.gz").get_fdata().astype(int)
+        d["lesion"] = [int(np.bincount(tr[Mk == v][tr[Mk == v] > 0]).argmax()) if (tr[Mk == v] > 0).mean() > 0.2 else 0
+                       for v in d[idc]]
+        d["mb"] = [bool(mb[Mk == v].mean() > 0.3) for v in d[idc]]
+        out[lst] = d
+    return out, r.stdout
+a0, _ = det("PHM0", False); a1, o1 = det("PHM", False); a2, o2 = det("PHM", True)
+key = ["vox_i", "vox_j", "vox_k", "volume_mm3"]
+if not (a0["candidates"][key].equals(a1["candidates"][key]) and a0["excluded"][key + ["reason"]].equals(a1["excluded"][key + ["reason"]])):
+    fail("with CSS_USE_MIMIC unset, adding a phase image changed candidates or exclusions")
+c1 = a1["candidates"]; calc = pd.concat([c1[c1.lesion == CALC], a1["excluded"][a1["excluded"].lesion == CALC]])
+para = c1[(c1.lesion > 0) & (c1.lesion != CALC)]
+print("phase_z, recorded only: calcified band " + ", ".join(f"{v:+.1f}" for v in calc.phase_z)
+      + "; paramagnetic cSS " + ", ".join(f"{v:+.1f}" for v in para.phase_z))
+if not len(calc) or not (calc.phase_z < 0).all(): fail("calcified band not found or not diamagnetic")
+if not len(para) or not (para.phase_z > 0).all(): fail("a paramagnetic cSS lesion read as diamagnetic")
+c2, x2 = a2["candidates"], a2["excluded"]
+kept = sorted(set(c2.lesion) - {0}); lost = sorted(set(c1.lesion) - {0} - set(kept) - {CALC})
+if lost: fail(f"CSS_USE_MIMIC=1 lost paramagnetic cSS lesions {lost}")
+e10 = x2[x2.reason.str.startswith("calcification")]
+if not (e10.lesion == CALC).any() or (c2.lesion == CALC).any(): fail("calcified band not excluded as E10")
+mbo = pd.concat([c1[c1.mb], a1["excluded"][a1["excluded"].mb]])
+mb_note = (f"microbleed row detected as {len(mbo)} object(s), mb_cluster_n {list(mbo.mb_cluster_n)}"
+           + (f", E11 with the flag on: {bool(x2[x2.mb].reason.str.startswith('cluster').any())}" if len(mbo) else
+              " (not generated by the detector on this phantom - covered by the unit test)"))
+print(f"CSS_USE_MIMIC=1: E10 excludes the calcified band ({e10.rule_version.iloc[0]}), paramagnetic cSS kept {kept}; {mb_note}")
+print("RESULT mimic OK")
+```
+
+## tests/check_ranker.py
+
+```python
+"""v5.0 checks: train_ranker.py / rank_candidates.py on synthetic label tables with known answers (no images).
+usage: check_ranker.py    (writes into $CSS_BASE/ranker_check/)
+1. one feature (darkness_z) separates cSS perfectly -> LOPO AUC 1.0, its weight the largest and positive;
+   test-split studies are never trained on; fewer than 3 labelled patients -> refused.
+2. labels unrelated to every feature -> LOPO AUC near 0.5 with a bootstrap interval that includes 0.5 (honest).
+3. rank_candidates.py: score_model / rank_model appended at the END, every other column unchanged; a training
+   study is refused; a feature missing from the study is filled with the training median and named."""
+import os, sys, json, subprocess, numpy as np, pandas as pd
+B0 = os.environ.get("CSS_BASE", "/tmp"); B = f"{B0}/ranker_check"; S = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
+py = sys.executable
+def fail(m): print("FAIL:", m); sys.exit(1)
+def run(*a, ok=True, env=None):
+    e = dict(os.environ, CSS_BASE=B); e.update(env or {})
+    r = subprocess.run([py, *a], capture_output=True, text=True, env=e)
+    if ok and r.returncode: print(r.stdout[-1500:], r.stderr[-1500:]); fail("step failed: " + " ".join(a))
+    return r
+sys.path.insert(0, S)
+from css_common import cand_uid
+
+def make(signal, seed, n_pat=6, n_cand=30, test_pat=1):
+    rng = np.random.default_rng(seed)
+    for d in ("review", "labels"): os.makedirs(f"{B}/{d}", exist_ok=True)
+    for f in os.listdir(f"{B}/review"): os.remove(f"{B}/review/{f}")
+    meta, lab = [], []
+    for p in range(n_pat + test_pat):
+        s = f"Q{p:02d}"; y = (rng.random(n_cand) < 0.3).astype(int); y[0], y[1] = 1, 0
+        dz = (2.5 + 2.0 * y + rng.normal(0, 0.3, n_cand)) if signal else rng.normal(3, 1, n_cand)
+        c = pd.DataFrame(dict(cand_id=np.arange(1, n_cand + 1), vox_i=rng.integers(0, 200, n_cand), vox_j=rng.integers(0, 200, n_cand),
+                              vox_k=np.arange(n_cand), volume_mm3=np.round(rng.uniform(25, 400, n_cand), 1),
+                              darkness_z=np.round(dz, 3), tube_ratio=np.round(rng.uniform(0, 1, n_cand), 3),
+                              region_z=np.round(rng.normal(-3, 1, n_cand), 3), score_v4=np.round(rng.uniform(0, 3, n_cand), 3),
+                              vein_tree_mm=255.0, mirror_dark_frac=rng.uniform(0, 1, n_cand)))
+        c.to_csv(f"{B}/review/{s}_candidates.csv", index=False)
+        meta.append(dict(study_id=s, split="test" if p >= n_pat else "dev", css_status="pos"))
+        for (_, r), yy in zip(c.iterrows(), y):
+            lab.append(dict(study_id=s, cand_uid=cand_uid(s, r), consensus_class="cSS" if yy else "surface_vein", method="agree"))
+    pd.DataFrame(meta).to_csv(f"{B}/labels/study_meta.csv", index=False)
+    pd.DataFrame(lab).to_csv(f"{B}/labels/consensus.csv", index=False)
+
+# 1. perfect signal
+make(True, 1)
+out = run(f"{S}/train_ranker.py", "--boot", "200").stdout
+M = json.load(open(f"{B}/review/ranker_model.json"))
+w = dict(zip(M["features"], M["weights"]))
+if M["lopo_auc"] != 1.0: fail(f"perfect feature: LOPO AUC {M['lopo_auc']}")
+if max(w, key=lambda k: abs(w[k])) != "darkness_z" or w["darkness_z"] <= 0: fail(f"weights {w}")
+if any(s.startswith("Q06") for s in M["training_studies"]): fail("trained on a test-split study")
+if "vein_tree_mm" in M["features"] or "mirror_dark_frac" in M["features"]: fail("deprecated column used as a feature")
+print(f"perfect feature: LOPO AUC {M['lopo_auc']} {M['lopo_auc_ci95']}, darkness_z weight {w['darkness_z']:+.2f} (largest); "
+      f"score_v4 baseline {M['baseline_auc']}; trained on {len(M['training_studies'])} dev studies, test study left out")
+r = run(f"{S}/train_ranker.py", "--split", "test", ok=False)
+if r.returncode == 0: fail("--split test was accepted")
+# 3. rank_candidates
+before = pd.read_csv(f"{B}/review/Q06_candidates.csv")
+pd.read_csv(f"{B}/review/Q06_candidates.csv").drop(columns="region_z").to_csv(f"{B}/review/Q06_candidates.csv", index=False)
+before = before.drop(columns="region_z")
+o = run(f"{S}/rank_candidates.py", "Q06").stdout
+after = pd.read_csv(f"{B}/review/Q06_candidates.csv")
+if list(after.columns) != list(before.columns) + ["score_model", "rank_model"]: fail(f"columns {list(after.columns)}")
+if not after[before.columns].equals(before): fail("rank_candidates changed existing columns")
+if "region_z" not in o: fail("missing feature not reported")
+yq = pd.read_csv(f"{B}/labels/consensus.csv"); yq = yq[yq.study_id == "Q06"].consensus_class.eq("cSS").values
+top = after.sort_values("rank_model").head(int(yq.sum())).cand_id.values
+if not yq[top - 1].all(): fail("model ranking on the test study does not put the cSS first")
+if run(f"{S}/rank_candidates.py", "Q00", ok=False).returncode == 0: fail("a training study was ranked without --allow-training-study")
+print("rank_candidates: columns appended at the end, others unchanged; held-out test study ranked cSS first; "
+      "missing feature filled and named; training study refused")
+# 2. no signal
+make(False, 3, n_pat=8)
+run(f"{S}/train_ranker.py", "--boot", "300")
+M = json.load(open(f"{B}/review/ranker_model.json"))
+lo, hi = M["lopo_auc_ci95"]
+if not (lo <= 0.5 <= hi) or abs(M["lopo_auc"] - 0.5) > 0.15: fail(f"noise labels: LOPO AUC {M['lopo_auc']} {M['lopo_auc_ci95']}")
+print(f"noise labels: LOPO AUC {M['lopo_auc']} {M['lopo_auc_ci95']} (interval includes 0.5)")
+# too few patients
+make(True, 4, n_pat=2, test_pat=0)
+r = run(f"{S}/train_ranker.py", ok=False)
+if r.returncode == 0 or "need >= 3" not in (r.stdout + r.stderr): fail("2 patients were accepted")
+print("2 labelled patients: refused (needs >= 3)")
+print("RESULT ranker OK")
+```
+
+## tests/check_qc_strict.py
+
+```python
+"""v5.0 checks: CSS_QC_STRICT=1 (detect_css.py, align_seg.py, rank_candidates.py). Default (unset) = v4.19 behaviour.
+usage: check_qc_strict.py    (needs PH3 from phantom_v4.py, aligned, in $CSS_BASE)
+1. insufficient_quality (labels cover too few brain slices): strict -> header-only candidates CSV, exit 3;
+   unset -> candidates written as before.
+2. low_confidence_review (SWI-only anatomy): strict -> detection runs (exit 0) and rank_candidates.py multiplies
+   score_model by 0.8; unset -> score_model unchanged.
+3. align_seg.py: T1 labels older than the SWI -> strict stops with an error; unset -> silent SynthSeg fall-back."""
+import os, sys, json, time, subprocess, numpy as np, nibabel as nib, pandas as pd
+B = os.environ["CSS_BASE"]; S = f"{B}/scripts"; py = sys.executable
+def fail(m): print("FAIL:", m); sys.exit(1)
+def run(*a, strict=False, env=None):
+    e = dict(os.environ); e.pop("CSS_QC_STRICT", None); e.update(env or {})
+    if strict: e["CSS_QC_STRICT"] = "1"
+    return subprocess.run([py, *a], capture_output=True, text=True, env=e)
+img = nib.load(f"{B}/data/PH3_swi.nii"); I = img.get_fdata().astype(np.float32); aff = img.affine
+seg = nib.load(f"{B}/synthseg/PH3_seg.nii.gz").get_fdata().astype(np.int32)
+def case(name, sg):
+    nib.save(nib.Nifti1Image(I, aff), f"{B}/data/{name}_swi.nii")
+    nib.save(nib.Nifti1Image(sg, aff), f"{B}/synthseg/{name}_seg.nii.gz")
+    p = f"{B}/work/{name}_t1seg_swispace.nii.gz"
+    if os.path.exists(p): os.remove(p)
+    r = run(f"{S}/align_seg.py", name)
+    if r.returncode: fail(f"align_seg {name}: {r.stderr[-300:]}")
+
+# 1. labels on the lower 40 % of slices only -> label_slice_coverage < 0.9 -> insufficient_quality
+sg = seg.copy(); sg[:, :, int(0.4 * sg.shape[2]):] = 0
+case("PHQ1", sg)
+r0 = run(f"{S}/detect_css.py", "PHQ1")
+q = json.load(open(f"{B}/review/PHQ1_qc.json"))
+if r0.returncode or q["status"] != "insufficient_quality": fail(f"unset: exit {r0.returncode}, QC {q['status']}")
+n0 = len(pd.read_csv(f"{B}/review/PHQ1_candidates.csv"))
+r1 = run(f"{S}/detect_css.py", "PHQ1", strict=True)
+c1 = pd.read_csv(f"{B}/review/PHQ1_candidates.csv")
+if r1.returncode != 3 or len(c1) or "cannot be scored" not in r1.stdout: fail(f"strict: exit {r1.returncode}, {len(c1)} rows")
+if "region_z" not in c1.columns: fail("strict empty CSV lost the column contract")
+print(f"insufficient_quality ({q['reasons'][0]}): unset -> {n0} candidates, exit 0; strict -> 0 rows, exit 3, columns kept")
+
+# 2. low confidence (SWI-only anatomy) + a small hand-made model
+case("PHQ2", seg)
+r = run(f"{S}/detect_css.py", "PHQ2", strict=True)
+q = json.load(open(f"{B}/review/PHQ2_qc.json"))
+if r.returncode or q["status"] != "low_confidence_review": fail(f"low-confidence case: exit {r.returncode}, {q['status']}")
+model = dict(features=["darkness_z", "tube_ratio"], weights=[1.0, -1.0], bias=-2.0, impute_median=[3.0, 0.5],
+             mean=[3.0, 0.5], sd=[1.0, 0.3], training_studies=["XX"], n_patients=3, lopo_auc=None, baseline="score_v4")
+json.dump(model, open(f"{B}/work/qc_model.json", "w"))
+def ranked(strict):
+    rr = run(f"{S}/rank_candidates.py", "PHQ2", "--model", f"{B}/work/qc_model.json", strict=strict)
+    if rr.returncode: fail(f"rank_candidates: {rr.stderr[-300:]}")
+    return pd.read_csv(f"{B}/review/PHQ2_candidates.csv")
+a, b = ranked(False), ranked(True)
+ratio = (b.score_model / a.score_model).round(3).unique()
+if len(ratio) != 1 or abs(ratio[0] - 0.8) > 0.002 or not (a.rank_model == b.rank_model).all():
+    fail(f"strict low-confidence penalty: ratios {ratio}")
+print(f"low_confidence_review: strict detection runs (exit 0); score_model x{ratio[0]} with the order unchanged")
+
+# 3. stale T1 labels
+nib.save(nib.Nifti1Image(seg, aff), f"{B}/work/PHQ2_t1seg_swispace.nii.gz")
+old = time.time() - 3600; os.utime(f"{B}/work/PHQ2_t1seg_swispace.nii.gz", (old, old))
+r0, r1 = run(f"{S}/align_seg.py", "PHQ2"), run(f"{S}/align_seg.py", "PHQ2", strict=True)
+if r0.returncode or "synthseg" not in r0.stdout.lower() and "PHQ2_seg" not in r0.stdout: fail(f"unset: {r0.stdout} {r0.stderr}")
+if r1.returncode == 0 or "older than the SWI" not in r1.stderr: fail(f"strict stale T1 labels accepted: {r1.stdout}")
+print("stale T1 labels: unset -> SynthSeg fall-back as before; strict -> stops with an error")
+print("RESULT qc_strict OK")
 ```

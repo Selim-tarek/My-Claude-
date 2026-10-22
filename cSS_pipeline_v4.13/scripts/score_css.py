@@ -363,3 +363,11 @@ if ich_check:
 if result["near_ich_candidates"]:
     print(f"  near-ICH siderosis (NOT in score): {result['near_ich_candidates']} candidates, "
           f"{result['near_ich_volume_mm3']} mm3")
+# v5.0: if the trained model ranked this study (rank_candidates.py), show its order next to the score. Printed only -
+# the JSON and css_scores.csv are unchanged; the model's ranking is validated with evaluate.py, not here.
+_cp = f"{base}/review/{subj}_candidates.csv"
+if os.path.exists(_cp):
+    _c = pd.read_csv(_cp)
+    if "rank_model" in _c.columns and len(_c):
+        _o = _c.sort_values("rank_model").cand_id.astype(int).tolist()
+        print(f"  model ranking (rank_candidates.py), top {min(10, len(_o))} by cand_id: {_o[:10]}")

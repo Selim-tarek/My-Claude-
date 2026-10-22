@@ -1,4 +1,4 @@
-# cSS pipeline v4.18 — runbook
+# cSS pipeline v5.0 — runbook
 
 Step-by-step operation of the whole pipeline, from DICOM to a validated research score. Method details and
 the reasoning behind each rule are in [PIPELINE.md](PIPELINE.md); the audit and plan in
@@ -27,6 +27,7 @@ Replace `P012` with your study code. Never use names or MRNs. Never commit patie
  9  score                                                  expert_import.py --score  (or review_css.py)
 10  per-case bookkeeping                                   feature_report.py, surface_overlay --color-by expert
 11  across cases: reliability, stress tests, evaluation    agreement.py, stress_test.py   (section 11)
+13  v5.0: mimic layer, model ranking, strict QC             CSS_USE_MIMIC, train_ranker.py, CSS_QC_STRICT  (section 13)
 ```
 
 ---
@@ -328,6 +329,57 @@ zsh ~/css_project/scripts/run_lemon.sh ~/Documents/lemon --summary
 IDs P201... are fixed in `labels/id_map.csv`; every subject is entered in `labels/study_meta.csv` as split dev with
 the note "PRESUMED cSS-negative, not expert-read". Have an expert read a sample before calling any candidate a false
 positive.
+
+---
+
+## 13. v5.0: mimic layer, trained ranking, strict QC (all opt-in)
+
+With no switch set, v5.0 gives the same candidates, exclusions and order as v4.19; the new columns are added at
+the end of every candidates / excluded CSV.
+
+| Switch / script | What changes | Default |
+|---|---|---|
+| `CSS_USE_MIMIC=1` | score x0.5 with FLAIR evidence (acute cSAH / vein thrombosis); exclusions **E10** calcification (phase), **E11** microbleed cluster | off: mimic columns recorded only |
+| `CSS_QC_STRICT=1` | QC `insufficient_quality` -> no candidates, "case cannot be scored" (exit 3); `low_confidence_review` -> reviewer banner, model score x0.8; stale T1 labels stop `align_seg.py` | off |
+| `train_ranker.py` / `rank_candidates.py` | `score_model`, `rank_model` columns; `review_css.py --by-model` | no model until you train one |
+
+The phase rule needs the SWI **phase** imported with the scan (`run_css.sh ... --phase <phase.nii.gz>` ->
+`data/P012_phase.nii.gz`); without it the rule is inert and the FLAIR and microbleed rules still run.
+
+### 13a. Before any switch becomes routine: real-data regression (run on the Mac)
+
+```zsh
+S=~/css_project/scripts
+# 1. defaults: the known lesions are still shown
+python $S/detect_css.py P006 -2.5 85 3 | head -4
+python $S/check_known.py P006 --old ~/css_project/review/v3/P006_candidates.nii.gz --ids 3,4,5,13,18,19
+#    MUST: 6 of 6 known lesions still shown for review
+# 2. the new columns are there, and quiet on the known lesions
+python -c "import pandas as pd; d=pd.read_csv('$HOME/css_project/review/P006_candidates.csv').set_index('cand_id'); print(d.loc[[6,10,18,19,33,44],['mimic_score','mimic_class','phase_z','mb_cluster_n']])"
+#    (use the candidate numbers check_known printed in step 1)
+# 3. mimic layer on: still 6 of 6
+CSS_USE_MIMIC=1 python $S/detect_css.py P006 -2.5 85 3 | head -4
+python $S/check_known.py P006 --old ~/css_project/review/v3/P006_candidates.nii.gz --ids 3,4,5,13,18,19
+# 4. a healthy scan: at most 1-2 candidates with mimic_score > 0.5 (none is expected)
+CSS_USE_MIMIC=1 python $S/detect_css.py P201 -2.5 85 3 | grep "mimic layer"
+python -c "import pandas as pd; d=pd.read_csv('$HOME/css_project/review/P201_candidates.csv'); print(d[d.mimic_score>0.5][['cand_id','region','mimic_class','mimic_reason']])"
+# afterwards: back to the default output
+python $S/detect_css.py P006 -2.5 85 3 > /dev/null; python $S/detect_css.py P201 -2.5 85 3 > /dev/null
+```
+If any step fails, keep the switch off and send the printed lines: they name the candidate and the rule.
+
+### 13b. Expert labels -> trained ranking -> apply
+
+1. Expert reading as in section 7 (sheets, `expert_import.py`, `consensus.py`), on **dev-split** studies.
+   At least 3 labelled patients; with fewer than ~10 the numbers are noisy.
+2. `python $S/train_ranker.py --split dev --source consensus` -> `review/ranker_model.json`. It prints the
+   leave-one-patient-out AUC of the model **and of score_v4 on the same objects**, with patient-bootstrap
+   intervals. Use the model only if it beats score_v4 clearly (intervals, not point estimates).
+3. `python $S/rank_candidates.py P006 --allow-training-study` and compare `rank_model` with `cand_id` for the
+   known lesions. From then on `run_css.sh` ranks **dev** studies automatically; `review_css.py P012 --by-model`
+   shows that order (`--by-legacy` / default = the score_v4 order).
+4. Test-split studies are never trained on (`train_ranker.py` refuses `--split test`) and are not ranked
+   automatically: rank them by hand with the frozen model, then `evaluate.py --split test`.
 
 ---
 

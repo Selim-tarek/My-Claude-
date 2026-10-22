@@ -147,6 +147,13 @@ grep -q "RESULT consensus OK" $T/consensus.log || { echo "FAIL: v4.17 consensus 
 echo "== v4.19.2 regional + contralateral reference (dark gyrus vs focal cSS)"
 python $ROOT/tests/check_region.py | tee $T/region.log | grep -E "^PH"
 grep -q "RESULT region OK" $T/region.log || { cat $T/region.log; echo "FAIL: v4.19.2 region checks"; exit 1; }
+echo "== v5.0 mimic layer (phase dipole fit, microbleed cluster, FLAIR; E10/E11 opt-in), QC strict, ranker"
+python $ROOT/tests/check_mimic.py | tee $T/mimic.log | grep -E "^(why not|scanner|microbleed|FLAIR|phase_z|CSS_USE)"
+grep -q "RESULT mimic OK" $T/mimic.log || { cat $T/mimic.log; echo "FAIL: v5.0 mimic checks"; exit 1; }
+python $ROOT/tests/check_qc_strict.py | tee $T/qcs.log | grep -vE "^RESULT"
+grep -q "RESULT qc_strict OK" $T/qcs.log || { cat $T/qcs.log; echo "FAIL: v5.0 QC strict checks"; exit 1; }
+python $ROOT/tests/check_ranker.py | tee $T/rank.log | grep -vE "^RESULT"
+grep -q "RESULT ranker OK" $T/rank.log || { cat $T/rank.log; echo "FAIL: v5.0 ranker checks"; exit 1; }
 echo "== v4.16 surface-following branching vein draining to a sinus (PH6): vein tracking + pial-surface features"
 python $ROOT/tests/phantom_surfvein.py; python $S/align_seg.py PH6 > /dev/null
 python $ROOT/tests/check_surfvein.py | tee $T/surfvein.log | grep -E "^(vein tracking|surface features)"

@@ -1,4 +1,9 @@
-# cSS grading pipeline v4.18
+# cSS grading pipeline v5.0
+
+Three-layer detection: definition-based candidates, a mimic layer (phase, FLAIR, microbleed clusters) and a ranking
+model trained on expert labels. **v5.0.0 (Stage A):** both new layers are in place but OFF by default
+(`CSS_USE_MIMIC=1`; the ranker needs >= 3 expert-labelled patients and is applied to dev-split studies only);
+with the defaults the output equals v4.19. The pial-surface sampler (layer 2) follows in v5.0.2.
 
 Research software, not clinically validated. **How to run it, step by step: [RUNBOOK.md](RUNBOOK.md).**
 Methods and rationale: [PIPELINE.md](PIPELINE.md). Audit and plan: docs/AUDIT_v4.13_and_FP_plan.md.
@@ -8,6 +13,7 @@ Technical context for Claude Code: CLAUDE.md.
     cd ~/Downloads/cSS_pipeline && zsh install.sh      # backs up old scripts first
 Open a new Terminal. If needed once: `conda install -n css -c conda-forge matplotlib scikit-image -y`
 Check: `bash tests/run_tests.sh` and `bash tests/test_shell.sh` must both pass.
+v5.0 switches (all off by default): `CSS_USE_MIMIC=1`, `CSS_QC_STRICT=1` - see RUNBOOK section 13.
 
 ## Per patient
     dcm2niix -z y -f "%s_%d" -o ~/css_project/raw/P007/SWI   "<SWI DICOM folder>"     # NOT the minIP

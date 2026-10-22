@@ -260,3 +260,29 @@ def susceptibility_signal(chi_ppm, vox, affine, b0_t=3.0, te_s=0.020, pad=16):
         g = np.gradient(phase, vox[ax], axis=ax)                                # rad / mm
         att *= np.abs(np.sinc(g * vox[ax] / (2 * np.pi)))
     return phase.astype(np.float32), att.astype(np.float32)
+
+
+# ---- v5.0 phase helpers (moved unchanged from make_swi.py so the detector's mimic layer uses the same filter)
+def phase_to_radians(P):
+    """phase image -> (radians float32, description). Scanner units (range wider than 2 pi + 0.5, e.g.
+    -4096..4095 or 0..4095) are rescaled linearly to -pi..pi; anything else is taken to be radians already."""
+    import numpy as np
+    P = np.asarray(P, np.float32)
+    lo, hi = float(np.nanmin(P)), float(np.nanmax(P))
+    if hi - lo > 2 * np.pi + 0.5:
+        return (P - lo) / (hi - lo) * 2 * np.pi - np.pi, f"scanner units {lo:g}..{hi:g} -> radians"
+    return P, "radians"
+
+
+def homodyne_highpass(P_rad, vox, si, sigma_mm=4.0):
+    """wrap-safe homodyne high-pass, slice by slice in the plane perpendicular to array axis `si` (the S-I axis):
+    angle(z * conj(lowpass z)), Gaussian low-pass sigma_mm in-plane, 0 along si (as in make_swi.py since v4.18)"""
+    import numpy as np
+    from scipy import ndimage as ndi
+    z = np.exp(1j * np.asarray(P_rad).astype(np.float64))
+    sig = [0.0, 0.0, 0.0]
+    for ax in range(3):
+        if ax != si: sig[ax] = sigma_mm / vox[ax]
+    lp = ndi.gaussian_filter(z.real, sig) + 1j * ndi.gaussian_filter(z.imag, sig)
+    return np.angle(z * np.conj(lp)).astype(np.float32)
+

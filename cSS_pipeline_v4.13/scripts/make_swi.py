@@ -16,6 +16,8 @@ protocol: veins must be DARKER on the SWI than on the magnitude (calcium is not 
 Research software, not for clinical reading."""
 import sys, os, argparse, numpy as np, nibabel as nib
 from scipy import ndimage as ndi
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import phase_to_radians, homodyne_highpass
 
 ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 ap.add_argument("mag"); ap.add_argument("phase"); ap.add_argument("out")
@@ -31,20 +33,9 @@ if M.ndim == 4 or P.ndim == 4:
     sys.exit("4-D (multi-echo) input: pass one echo (e.g. the longest usable TE) as 3-D images")
 vox = np.array(mi.header.get_zooms()[:3], float)
 si = int(np.argmax(np.abs(mi.affine[2, :3])))          # superior-inferior array axis: slice-wise filter
-lo, hi = float(np.nanmin(P)), float(np.nanmax(P))
-if hi - lo > 2 * np.pi + 0.5:                            # scanner units (e.g. -4096..4095 or 0..4095)
-    P = (P - lo) / (hi - lo) * 2 * np.pi - np.pi
-    unit = f"scanner units {lo:g}..{hi:g} -> radians"
-else:
-    unit = "radians"
-
-# homodyne high-pass, slice by slice in the plane perpendicular to the S-I axis
-z = np.exp(1j * P.astype(np.float64))
-inpl = [ax for ax in range(3) if ax != si]
-sig = [0.0, 0.0, 0.0]
-for ax in inpl: sig[ax] = a.sigma_mm / vox[ax]
-lp = ndi.gaussian_filter(z.real, sig) + 1j * ndi.gaussian_filter(z.imag, sig)     # sigma 0 on the S-I axis
-HP = np.angle(z * np.conj(lp)).astype(np.float32)
+P, unit = phase_to_radians(P)                            # scanner units (e.g. -4096..4095) -> radians
+# homodyne high-pass, slice by slice in the plane perpendicular to the S-I axis (v5.0: shared with the detector)
+HP = homodyne_highpass(P, vox, si, a.sigma_mm)
 
 # brain-ish mask for the sign estimate: bright magnitude, eroded away from the head edge
 thr = 0.15 * float(np.percentile(M[M > 0], 99)) if (M > 0).any() else 0.0

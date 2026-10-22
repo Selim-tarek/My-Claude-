@@ -10,8 +10,12 @@ subj = sys.argv[1]
 base = os.environ.get("CSS_BASE", os.path.expanduser("~/css_project"))
 swi = nib.load(f"{base}/data/{subj}_swi.nii")
 t1p = f"{base}/work/{subj}_t1seg_swispace.nii.gz"
-src = t1p if os.path.exists(t1p) and os.path.getmtime(t1p) >= os.path.getmtime(f"{base}/data/{subj}_swi.nii") \
-    else f"{base}/synthseg/{subj}_seg.nii.gz"
+_t1_fresh = os.path.exists(t1p) and os.path.getmtime(t1p) >= os.path.getmtime(f"{base}/data/{subj}_swi.nii")
+if os.environ.get("CSS_QC_STRICT") == "1" and os.path.exists(t1p) and not _t1_fresh:
+    # v5.0 CSS_QC_STRICT=1: stale T1 labels are an error, not a silent fall-back to SynthSeg on the SWI
+    sys.exit(f"ERROR: {t1p} is older than the SWI (re-run prep_anat.sh / run_css.sh with --t1); CSS_QC_STRICT=1 "
+             f"does not fall back to SynthSeg on the SWI")
+src = t1p if _t1_fresh else f"{base}/synthseg/{subj}_seg.nii.gz"
 seg = nib.load(src)
 seg_swi = resample_from_to(seg, swi, order=0).get_fdata().astype(np.int32)
 n_before = (seg_swi > 0).sum()

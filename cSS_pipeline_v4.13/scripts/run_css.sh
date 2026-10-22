@@ -68,13 +68,27 @@ fi
 echo "[2/4] aligning segmentation to SWI"
 python $SC/align_seg.py $S
 echo "[3/4] detecting cSS candidates"
-python $SC/detect_css.py $S -2.5 85 3
+python $SC/detect_css.py $S -2.5 85 3 || { rc=$?
+  [ $rc -eq 3 ] && echo "== $S: case cannot be scored (QC insufficient_quality, CSS_QC_STRICT=1) - see review/${S}_qc.json"
+  exit $rc; }
 # v4.19: pial-surface features (incl. curve-vs-patch width) whenever recon-all surfaces exist; recorded only,
 # and a failure here (e.g. the surface/label registration check) never stops the run
 SD=${CSS_SUBJECTS_DIR:-$B/subjects}
 if [ -f $SD/$S/surf/lh.pial ] && [ -f $SD/$S/mri/orig.mgz ] && [ -f $B/work/${S}_swi2t1.lta ]; then
   echo "[3b] pial-surface features (recon-all surfaces; recorded only)"
   python $SC/surface_features.py $S || echo "      WARNING: surface_features.py failed - detection results are unaffected"
+fi
+# v5.0: trained ranking model, only when one exists AND the study is in the dev split (labels/study_meta.csv).
+# Test-split studies are ranked by hand with the frozen model; studies without a split are not ranked.
+if [ -f $B/review/ranker_model.json ]; then
+  SPLIT=$(python -c "import pandas as pd,sys; m=pd.read_csv(sys.argv[1],dtype=str); m=m[m.study_id==sys.argv[2]]; print(m.split.iloc[0] if len(m) else '')" \
+          $B/labels/study_meta.csv $S 2>/dev/null || true)
+  if [ "$SPLIT" = "dev" ]; then
+    echo "[3c] trained ranking model (rank_candidates.py; dev split)"
+    python $SC/rank_candidates.py $S || echo "      WARNING: rank_candidates.py did not rank $S - the score_v4 order stands"
+  else
+    echo "[3c] ranking model not applied: $S split is '${SPLIT:-unassigned}' (only dev studies are ranked automatically)"
+  fi
 fi
 if [ -z "$NOVIEW" ]; then
   echo "[4/4] opening viewer"

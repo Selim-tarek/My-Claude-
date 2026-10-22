@@ -18,7 +18,16 @@ while [ $# -gt 0 ]; do case "$1" in
 EOS
 chmod +x $T/bin/fsstub
 for t in mri_convert mri_synthstrip mri_synthseg mri_coreg mri_vol2vol bbregister recon-all freeview; do ln -s fsstub $T/bin/$t; done
-printf '#!/bin/bash\necho "python $(basename $1) ${*:2}" >> $STUBLOG\n' > $T/bin/python; chmod +x $T/bin/python
+# python stub: logs the call; v5.0 test hooks: STUB_DETECT_RC = exit code of detect_css.py, STUB_SPLIT = what the
+# split lookup in run_css.sh (python -c ...) prints
+cat > $T/bin/python <<'EOS'
+#!/bin/bash
+echo "python $(basename $1) ${*:2}" >> $STUBLOG
+[ "$1" = "-c" ] && [ -n "$STUB_SPLIT" ] && echo "$STUB_SPLIT"
+[ "$(basename $1)" = detect_css.py ] && [ -n "$STUB_DETECT_RC" ] && exit $STUB_DETECT_RC
+exit 0
+EOS
+chmod +x $T/bin/python; cp $T/bin/python $T/bin/python.std
 command -v zsh >/dev/null || { printf '#!/bin/bash\nexec bash "$@"\n' > $T/bin/zsh; chmod +x $T/bin/zsh; echo "(zsh not installed: using bash as a stand-in)"; }
 echo swi > $T/swi.nii; echo t1 > $T/t1.nii; echo fl > $T/fl.nii
 export PATH=$T/bin:$PATH STUBLOG=$T/log CSS_BASE=$T/base NOVIEW=1 SUBJECTS_DIR=/somewhere/else  # must be ignored
@@ -83,10 +92,21 @@ seen "mri_synthseg --i $T/base/data/P203_t1.nii.gz"; ls -d $T/base/subjects/P203
 $SH $T/base/scripts/run_lemon.sh $T/lemon --subjects "sub-1" > $T/lemon2.out 2>&1
 grep -q "SKIP   P201" $T/lemon2.out || { cat $T/lemon2.out; fail "finished subject not skipped on restart"; }
 [ "$(grep -c ds000221 $T/base/labels/id_map.csv)" = 3 ] && grep -q "P201,ds000221,sub-1" $T/base/labels/id_map.csv || fail "id map changed on re-run"
-printf '#!/bin/bash\necho "python $(basename $1) ${*:2}" >> $STUBLOG\n' > $T/bin/python; chmod +x $T/bin/python
+cp $T/bin/python.std $T/bin/python
 echo "== 6b. --phase is imported for the reviewer"
 echo ph > $T/ph.nii; : > $T/log; $SH $T/base/scripts/run_css.sh P4 $T/swi.nii --phase $T/ph.nii > /dev/null
 seen "mri_convert $T/ph.nii $T/base/data/P4_phase.nii.gz"
+echo "== 8. v5.0: CSS_QC_STRICT exit 3 from detection stops run_css with a message"
+: > $T/log; out=$(STUB_DETECT_RC=3 $SH $T/base/scripts/run_css.sh P1 2>&1) && fail "run_css went on after detect_css exit 3"
+echo "$out" | grep -q "case cannot be scored" || fail "no 'case cannot be scored' message"
+echo "== 8b. v5.0: ranking model applied only to dev-split studies"
+mkdir -p $T/base/review; echo '{}' > $T/base/review/ranker_model.json
+: > $T/log; out=$($SH $T/base/scripts/run_css.sh P1); notseen "rank_candidates.py"
+echo "$out" | grep -q "split is 'unassigned'" || fail "no message for an unassigned split"
+: > $T/log; STUB_SPLIT=test $SH $T/base/scripts/run_css.sh P1 > /dev/null; notseen "rank_candidates.py"
+: > $T/log; STUB_SPLIT=dev $SH $T/base/scripts/run_css.sh P1 > /dev/null; seen "python rank_candidates.py P1"
+rm $T/base/review/ranker_model.json
+: > $T/log; $SH $T/base/scripts/run_css.sh P1 > /dev/null; notseen "rank_candidates.py"; notseen "python -c"
 echo "== 7. batch run_all.sh reaches detection for every subject"
 : > $T/log; $SH $T/base/scripts/run_all.sh P1 P2 > /dev/null || true   # stub python prints no summary
 [ $(grep -c "detect_css.py" $T/log) -eq 2 ] || fail "run_all.sh did not run detection for both subjects"

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Interactive cSS review: shows each suspected candidate, you agree or disagree.
-usage: review_css.py SUBJECT [--top N] [--redo] [--by-tier]
+usage: review_css.py SUBJECT [--top N] [--redo] [--by-tier | --by-model | --by-legacy]
+  --by-model (v5.0, opt-in): order by rank_model (rank_candidates.py; trained ranking model). Falls back to the
+  default order, with a message, when the column is missing. --by-legacy = the default order (cand_id = score_v4).
   --by-tier (v4.18, opt-in): tier-1 candidates first, then tier 2 (review_tier, recorded by detect_css.py;
   not validated). Every candidate is still shown; with --top N the cut applies to the reordered list.
   default: ALL candidates (v4). With --top N, candidates below N are recorded as NOT reviewed and
@@ -44,13 +46,22 @@ br = I > 0
 lo, hi = np.percentile(I[br], [1, 99]) if br.any() else (I.min(), I.max())
 df = pd.read_csv(csv)
 _qcp = f"{base}/review/{subj}_qc.json"          # v4.14 case QC (detect_css.py)
+QC_BANNER = ""
 if os.path.exists(_qcp):
     import json as _json
     _qc = _json.load(open(_qcp))
+    # v5.0 CSS_QC_STRICT=1: low-confidence cases also carry a banner in the figure title
+    QC_BANNER = ("QC LOW CONFIDENCE (" + "; ".join(_qc.get("reasons", [])) + ")   " if os.environ.get("CSS_QC_STRICT") == "1"
+                 and _qc.get("status") == "low_confidence_review" else "")
     if _qc.get("status") != "ok":
         print(f"WARNING: case QC {_qc.get('status')}: {'; '.join(_qc.get('reasons', []))} - "
               f"anatomy-based features and exclusions are less reliable for this scan")
-if "--by-tier" in sys.argv and "review_tier" in df.columns:
+if "--by-model" in sys.argv and "rank_model" not in df.columns:
+    print("--by-model: no rank_model column (run rank_candidates.py first) - default order")
+if "--by-model" in sys.argv and "rank_model" in df.columns:
+    ids = df.sort_values(["rank_model", "cand_id"], kind="stable").cand_id.astype(int).tolist()[:top]
+    print(f"order: trained model (rank_model), {len(ids)} candidates")
+elif "--by-tier" in sys.argv and "review_tier" in df.columns:
     ids = df.sort_values(["review_tier", "cand_id"], kind="stable").cand_id.astype(int).tolist()[:top]
     print(f"order: tier 1 first ({int((df.review_tier == 1).sum())}), then tier 2 ({int((df.review_tier == 2).sum())})")
 else:
@@ -180,7 +191,7 @@ class Reviewer:
                     f"mirror dark {num(r.mirror_dark_frac):.0%}" + ev)
         done = sum(1 for c in ids if c in calls)
         prev = calls.get(cid)
-        self.fig.suptitle(f"{subj}   candidate #{cid}  ({self.pos + 1}/{len(ids)}, {done} decided)   —   "
+        self.fig.suptitle(QC_BANNER + f"{subj}   candidate #{cid}  ({self.pos + 1}/{len(ids)}, {done} decided)   —   "
                           f"{r.hemi} {r.region}   {r.volume_mm3} mm³, {int(r.n_slices)} slices, darkness z {r.darkness_z}"
                           + (f"   [{', '.join(flags)}]" if flags else "") + feat
                           + (f"\nyour previous call: {prev}" if prev else "\nIs the red outline cSS?"),
