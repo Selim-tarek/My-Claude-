@@ -428,6 +428,8 @@ v5.1") but are not ranker features; Stage A only, then stop for the user's real-
   csf_adjacent_frac, csf_depth_mm, sulcal_depth_mm (5 mm closing envelope), esd / compactness_3d / sphericity /
   elongation_3d / flatness_3d, path_length_mm / tortuosity (largest component), darkness_z_p10, dark_frac_z2/3/4,
   flair_csf_bright_frac, phase_valid_frac / phase_polarity_frac, feature_qc_flags. check_v512: spec directions met on PH3.
+- v5.1.3 css_tiers.py review_priority_rank 1-5 (+ name, reason), review_css --by-priority opt-in; tier 3 needs convergent
+  vein evidence; reading order only, placeholders fitted to phantoms (PH3/PH6 cSS tier 1, veins tier 3).
 
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.

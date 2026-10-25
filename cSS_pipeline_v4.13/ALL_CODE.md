@@ -1,4 +1,4 @@
-# All code — cSS pipeline v5.1.2
+# All code — cSS pipeline v5.1.3
 
 Generated from the files below; the files are authoritative.
 
@@ -1402,7 +1402,7 @@ from skimage.measure import regionprops
 from skimage.morphology import skeletonize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from css_common import base as _base, load_lut, fresh, sha256, update_manifest, environment_record, skeleton_length, radius_profile
-import css_qc, css_vessel, mimic_rules, css_pieces, css_features
+import css_qc, css_vessel, mimic_rules, css_pieces, css_features, css_tiers
 
 subj   = sys.argv[1]
 z_thr  = float(sys.argv[2]) if len(sys.argv) > 2 else -2.5
@@ -2091,7 +2091,8 @@ V50_COLS = ["mimic_score", "mimic_class", "mimic_reason", "phase_z", "mb_cluster
             "surface_contact_frac_2mm", "csf_adjacent_frac", "csf_depth_mm", "sulcal_depth_mm",
             "equivalent_sphere_diameter_mm", "compactness_3d", "sphericity", "elongation_3d", "flatness_3d",
             "path_length_mm", "tortuosity", "darkness_z_p10", "dark_frac_z2", "dark_frac_z3", "dark_frac_z4",
-            "flair_csf_bright_frac", "feature_qc_flags", "feature_schema_version"]
+            "flair_csf_bright_frac", "feature_qc_flags", "feature_schema_version",
+            "review_priority_rank", "review_priority", "review_priority_reason"]                # v5.1.3 (css_tiers.py)
 cols = cols + V50_COLS
 
 # ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason
@@ -2184,6 +2185,8 @@ for r in rows:
                           ("microbleed-like", r["cmb_like"]),
                           ("vein evidence > cSS evidence", r["vein_evidence"] > r["css_evidence"])) if f]
     r["review_tier"] = 2 if why else 1; r["tier_reason"] = "; ".join(why)
+    # v5.1.3 review-priority tier (css_tiers.py): reading order only, nothing hidden or excluded by it
+    r["review_priority_rank"], r["review_priority"], r["review_priority_reason"] = css_tiers.review_priority(r, QC["status"])
 excluded = [r for r in rows if r["_excl"]]
 rows = [r for r in rows if not r["_excl"]]
 os.makedirs(f"{base}/review", exist_ok=True)
@@ -3081,7 +3084,9 @@ subprocess.run([sys.executable, f"{base}/scripts/score_css.py", subj], check=Tru
 ```python
 #!/usr/bin/env python3
 """Interactive cSS review: shows each suspected candidate, you agree or disagree.
-usage: review_css.py SUBJECT [--top N] [--redo] [--by-tier | --by-model | --by-legacy]
+usage: review_css.py SUBJECT [--top N] [--redo] [--by-tier | --by-priority | --by-model | --by-legacy]
+  --by-priority (v5.1.3, opt-in): order by review_priority_rank (1 high-priority cSS ... 4 other mimic; css_tiers.py),
+  then cand_id. Every candidate is still shown.
   --by-model (v5.0, opt-in): order by rank_model (rank_candidates.py; trained ranking model). Falls back to the
   default order, with a message, when the column is missing. --by-legacy = the default order (cand_id = score_v4).
   --by-tier (v4.18, opt-in): tier-1 candidates first, then tier 2 (review_tier, recorded by detect_css.py;
@@ -3142,6 +3147,9 @@ if "--by-model" in sys.argv and "rank_model" not in df.columns:
 if "--by-model" in sys.argv and "rank_model" in df.columns:
     ids = df.sort_values(["rank_model", "cand_id"], kind="stable").cand_id.astype(int).tolist()[:top]
     print(f"order: trained model (rank_model), {len(ids)} candidates")
+elif "--by-priority" in sys.argv and "review_priority_rank" in df.columns:
+    ids = df.sort_values(["review_priority_rank", "cand_id"], kind="stable").cand_id.astype(int).tolist()[:top]
+    print("order: review priority " + ", ".join(f"{int(k)}: {v}" for k, v in df.review_priority_rank.value_counts().sort_index().items()))
 elif "--by-tier" in sys.argv and "review_tier" in df.columns:
     ids = df.sort_values(["review_tier", "cand_id"], kind="stable").cand_id.astype(int).tolist()[:top]
     print(f"order: tier 1 first ({int((df.review_tier == 1).sum())}), then tier 2 ({int((df.review_tier == 2).sum())})")
@@ -6651,4 +6659,133 @@ if os.path.exists(f"{B}/review/PHM_candidates.csv"):
         print(f"PHM phase: valid fraction {allp.phase_valid_frac.min():.2f}-{allp.phase_valid_frac.max():.2f}, "
               f"polarity consistency {allp.phase_polarity_frac.min():.2f}-{allp.phase_polarity_frac.max():.2f}")
 print("RESULT v512 OK")
+```
+
+## scripts/css_tiers.py
+
+```python
+"""Review-priority tiers (v5.1.3): a transparent READING ORDER from the recorded evidence. Not a diagnosis, not an
+exclusion: every candidate stays in the list and in the audit trail. Pure function; unit-tested in tests/check_v513.py.
+
+  1 high_priority_cSS_candidate   no strong mimic evidence
+  2 css_vs_mimic_uncertain        mixed merged object; possible calcification (phase); FLAIR context (acute cSAH /
+                                  thrombosis)
+  3 likely_vein                   CONVERGENT vascular evidence (never one feature): white-matter continuation >= 4 mm
+                                  with dark continuation >= 8 mm or a tubular shape (transcortical); reaches the sinus
+                                  zone with >= 10 mm continuation; tubular and continuing at both ends; OFF the cortex
+                                  (pial distance > 0.3 mm) AND in the CSF (>= 0.5 mm from tissue) AND vessel-shaped
+                                  (tube ratio > 0.35, elongation >= 10 or continuation >= 10 mm). cSS in the
+                                  subarachnoid space can sit off the cortex too - one reason this only reorders.
+  4 likely_other_mimic_or_artifact  air-bone artifact zone; microbleed-like (single compact parenchymal focus or cluster)
+  5 case_qc_insufficient          the case failed QC (insufficient_quality): fix the case before reading
+A low_confidence_review case keeps its per-candidate tiers (a case-wide constant would not order anything); the
+case status is in qc_status and the reviewer shows it.
+All cut-offs are PLACEHOLDERS from the v4 rules and phantoms, not validated; compare the order with expert labels
+(evaluate.py) before relying on it."""
+import numpy as np
+
+TIER_NAMES = {1: "high_priority_cSS_candidate", 2: "css_vs_mimic_uncertain", 3: "likely_vein",
+              4: "likely_other_mimic_or_artifact", 5: "case_qc_insufficient"}
+WM_CONT_MM, WM_RUN_MM, SINUS_RUN_MM, TUBE_HI, TUBE_MID, CSF_DEPTH_MM, ELONG_HI = 4.0, 8.0, 10.0, 0.45, 0.35, 0.5, 10.0
+
+
+def _f(r, k, d=np.nan):
+    v = r.get(k, d)
+    try: return float(v)
+    except (TypeError, ValueError): return d
+
+
+def review_priority(r, qc_status):
+    """candidate row (dict) -> (tier 1-5, name, reason)"""
+    if qc_status == "insufficient_quality":
+        return 5, TIER_NAMES[5], "case QC insufficient_quality"
+    if _f(r, "mixed_object", 0) >= 1:
+        return 2, TIER_NAMES[2], "mixed merged object (vein-like and cSS-like pieces)"
+    if str(r.get("mimic_class", "none")) in ("mb_cluster",) or _f(r, "cmb_like", 0) >= 1:
+        return 4, TIER_NAMES[4], "microbleed-like (compact parenchymal focus / cluster)"
+    if _f(r, "artifact_zone", 0) >= 1:
+        return 4, TIER_NAMES[4], "air-bone artifact zone"
+    tube, cont = _f(r, "tube_ratio"), _f(r, "local_cont_max_mm", 0)
+    vein = []
+    if _f(r, "vessel_wm_mm", 0) >= WM_CONT_MM and (cont >= WM_RUN_MM or (np.isfinite(tube) and tube > TUBE_HI)):
+        vein.append("continues into white matter")
+    if "midline" in (str(r.get("end_type_max", "")), str(r.get("end_type_min", ""))) and cont >= SINUS_RUN_MM:
+        vein.append("runs on to the sinus zone")
+    if np.isfinite(tube) and tube > TUBE_HI and _f(r, "terminal_ends", 2) == 0: vein.append("tubular, continues at both ends")
+    shaped = (np.isfinite(tube) and tube > TUBE_MID) or _f(r, "elongation_3d", 0) >= ELONG_HI or cont >= SINUS_RUN_MM
+    if _f(r, "pial_dist_mm", 0) > 0.3 and _f(r, "csf_depth_mm", 0) >= CSF_DEPTH_MM and shaped:
+        vein.append("off the cortex, in the CSF, vessel-shaped")
+    if str(r.get("mimic_class", "none")) == "calcification":
+        return 2, TIER_NAMES[2], "possible calcification (diamagnetic phase)" + (f"; also {vein[0]}" if vein else "")
+    if str(r.get("mimic_class", "none")) in ("acute", "thrombosis", "mixed"):
+        return 2, TIER_NAMES[2], f"FLAIR context ({r.get('mimic_class')})"
+    if vein:
+        return 3, TIER_NAMES[3], "; ".join(vein)
+    return 1, TIER_NAMES[1], "no strong mimic evidence"
+```
+
+## tests/check_v513.py
+
+```python
+"""v5.1.3 checks: review-priority tiers (scripts/css_tiers.py) - a reading order, never an exclusion.
+usage: check_v513.py    (units need nothing; the phantom part needs PH3 / PH6 aligned in $CSS_BASE)
+1. every branch on hand-made rows: QC insufficient -> 5; mixed object -> 2; microbleed-like / artifact zone -> 4;
+   calcification / FLAIR context -> 2; convergent vein evidence -> 3; a single vein-ish feature alone -> still 1.
+2. PH3 / PH6: every true cSS lesion tier 1, every vein (shown or excluded) tier 3 - on these phantoms, whose veins
+   were built to differ; not real-world performance. The tier changes no candidate or exclusion.
+3. review_css.py --by-priority (headless test mode) orders by tier; the files it writes are restored afterwards."""
+import os, sys, subprocess, numpy as np, nibabel as nib, pandas as pd
+HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+from css_tiers import review_priority as T
+def fail(m): print("FAIL:", m); sys.exit(1)
+css = dict(tube_ratio=0.25, pial_dist_mm=-1.1, csf_depth_mm=0.0, local_cont_max_mm=1.0, terminal_ends=2,
+           end_type_max="stops", end_type_min="stops", vessel_wm_mm=0.0, elongation_3d=3.0, mimic_class="none")
+cases = [("css", css, "ok", 1), ("qc", css, "insufficient_quality", 5), ("lowconf keeps tiers", css, "low_confidence_review", 1),
+         ("mixed", dict(css, mixed_object=1), "ok", 2), ("mb", dict(css, mimic_class="mb_cluster"), "ok", 4),
+         ("cmb", dict(css, cmb_like=1), "ok", 4), ("artifact", dict(css, artifact_zone=1), "ok", 4),
+         ("calcium", dict(css, mimic_class="calcification"), "ok", 2), ("flair", dict(css, mimic_class="acute"), "ok", 2),
+         ("transcortical", dict(css, vessel_wm_mm=6.0, local_cont_max_mm=9.0), "ok", 3),
+         ("sinus", dict(css, end_type_max="midline", local_cont_max_mm=12.0), "ok", 3),
+         ("through-running tube", dict(css, tube_ratio=0.5, terminal_ends=0), "ok", 3),
+         ("off-cortex vessel", dict(css, pial_dist_mm=1.2, csf_depth_mm=1.0, elongation_3d=20.0), "ok", 3),
+         ("one feature: off the cortex only", dict(css, pial_dist_mm=1.2), "ok", 1),
+         ("one feature: tubular only", dict(css, tube_ratio=0.6), "ok", 1),
+         ("one feature: WM continuation, short and flat", dict(css, vessel_wm_mm=6.0), "ok", 1)]
+for name, row, qc, want in cases:
+    got = T(row, qc)[0]
+    if got != want: fail(f"{name}: tier {got}, expected {want} ({T(row, qc)[2]})")
+print(f"units: {len(cases)} hand-made rows - each branch as specified; a single vein-ish feature alone stays tier 1")
+
+B = os.environ.get("CSS_BASE")
+if not B or not os.path.exists(f"{B}/data/PH3_swi.nii"):
+    print("phantom part skipped"); print("RESULT v513 OK"); sys.exit(0)
+S = f"{B}/scripts"; py = sys.executable
+ve = nib.load(f"{B}/work/PH3_veins.nii.gz").get_fdata().astype(int); seen = []
+for s in ("PH3", "PH6"):
+    if not os.path.exists(f"{B}/work/{s}_seg_swispace.nii.gz"): continue
+    r = subprocess.run([py, f"{S}/detect_css.py", s], capture_output=True, text=True)
+    if r.returncode: fail(f"detect_css {s}")
+    tr = nib.load(f"{B}/work/{s}_truth.nii.gz").get_fdata().astype(int)
+    sv = nib.load(f"{B}/work/PH6_surfvein.nii.gz").get_fdata().astype(int) if s == "PH6" else np.zeros_like(tr)
+    for lst, idc in (("candidates", "cand_id"), ("excluded", "excl_id")):
+        d = pd.read_csv(f"{B}/review/{s}_{lst}.csv"); M = nib.load(f"{B}/review/{s}_{lst}.nii.gz").get_fdata().astype(int)
+        for _, rr in d.iterrows():
+            m = M == rr[idc]
+            if (tr[m] > 0).mean() > 0.2 and rr.review_priority_rank != 1: fail(f"{s}: a true cSS lesion in tier {rr.review_priority_rank}")
+            if ((ve[m] > 0).mean() > 0.3 or (sv[m] > 0).mean() > 0.5) and (tr[m] > 0).mean() <= 0.2 and rr.review_priority_rank != 3:
+                fail(f"{s}: a phantom vein in tier {rr.review_priority_rank} ({rr.review_priority_reason})")
+    seen.append(s)
+print(f"phantoms {', '.join(seen)}: every cSS lesion tier 1, every vein tier 3 (constructed veins; not performance)")
+env = dict(os.environ, CSS_REVIEW_TEST="1")
+# the headless reviewer writes calls, a mask and a score: keep the shared test folder as it was for later tests
+touched = [f"{B}/review/{f}" for f in ("PH3_calls.csv", "PH3_candidates.csv", "PH3_score.json", "PH3_css_mask.nii.gz",
+                                       "PH3_review_preview.png", "css_scores.csv")]
+saved = {f: open(f, "rb").read() for f in touched if os.path.exists(f)}
+r = subprocess.run([py, f"{S}/review_css.py", "PH3", "--by-priority", "--redo", "--top", "3"], capture_output=True, text=True, env=env)
+for f in touched:
+    if f in saved: open(f, "wb").write(saved[f])
+    elif os.path.exists(f): os.remove(f)
+if "order: review priority" not in r.stdout: fail(f"--by-priority not applied:\n{r.stdout[-500:]}{r.stderr[-500:]}")
+print("review_css.py --by-priority: order by tier applied (" + [l for l in r.stdout.splitlines() if l.startswith("order:")][0] + ")")
+print("RESULT v513 OK")
 ```

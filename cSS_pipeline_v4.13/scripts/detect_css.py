@@ -73,7 +73,7 @@ from skimage.measure import regionprops
 from skimage.morphology import skeletonize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from css_common import base as _base, load_lut, fresh, sha256, update_manifest, environment_record, skeleton_length, radius_profile
-import css_qc, css_vessel, mimic_rules, css_pieces, css_features
+import css_qc, css_vessel, mimic_rules, css_pieces, css_features, css_tiers
 
 subj   = sys.argv[1]
 z_thr  = float(sys.argv[2]) if len(sys.argv) > 2 else -2.5
@@ -762,7 +762,8 @@ V50_COLS = ["mimic_score", "mimic_class", "mimic_reason", "phase_z", "mb_cluster
             "surface_contact_frac_2mm", "csf_adjacent_frac", "csf_depth_mm", "sulcal_depth_mm",
             "equivalent_sphere_diameter_mm", "compactness_3d", "sphericity", "elongation_3d", "flatness_3d",
             "path_length_mm", "tortuosity", "darkness_z_p10", "dark_frac_z2", "dark_frac_z3", "dark_frac_z4",
-            "flair_csf_bright_frac", "feature_qc_flags", "feature_schema_version"]
+            "flair_csf_bright_frac", "feature_qc_flags", "feature_schema_version",
+            "review_priority_rank", "review_priority", "review_priority_reason"]                # v5.1.3 (css_tiers.py)
 cols = cols + V50_COLS
 
 # ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason
@@ -855,6 +856,8 @@ for r in rows:
                           ("microbleed-like", r["cmb_like"]),
                           ("vein evidence > cSS evidence", r["vein_evidence"] > r["css_evidence"])) if f]
     r["review_tier"] = 2 if why else 1; r["tier_reason"] = "; ".join(why)
+    # v5.1.3 review-priority tier (css_tiers.py): reading order only, nothing hidden or excluded by it
+    r["review_priority_rank"], r["review_priority"], r["review_priority_reason"] = css_tiers.review_priority(r, QC["status"])
 excluded = [r for r in rows if r["_excl"]]
 rows = [r for r in rows if not r["_excl"]]
 os.makedirs(f"{base}/review", exist_ok=True)

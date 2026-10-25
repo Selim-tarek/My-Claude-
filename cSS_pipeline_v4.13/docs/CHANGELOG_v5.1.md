@@ -80,3 +80,15 @@ New module `css_features.py` (feature schema css-features/1.0), columns appended
 Tests (check_v512): compactness sphere 1.0 / sheet 0.005 / tube 0.093; tortuosity straight 1.01, half circle 1.59;
 PH3 directions of the spec all met (VT vessel_wm > cSS; VC / VS deeper in CSF than cSS; VS nearer the crowns than VC;
 VT more compact than cSS); PHM phase valid fraction 1.00, polarity 0.57-0.96. Phantom directions only.
+
+## v5.1.3 — review-priority tiers (reading order only)
+
+`css_tiers.py`: `review_priority_rank` 1-5, `review_priority`, `review_priority_reason` appended; `review_css.py
+--by-priority` (opt-in) reads in that order. 1 high-priority cSS candidate; 2 cSS-vs-mimic uncertain (mixed object,
+possible calcification, FLAIR context); 3 likely vein — only on CONVERGENT evidence (WM continuation with a long dark
+run or a tube; sinus zone with >= 10 mm continuation; tubular and continuing at both ends; off the cortex AND in the
+CSF AND vessel-shaped), never one feature; 4 microbleed-like / air-bone artifact zone; 5 case QC insufficient. Every
+object stays in its list. Cut-offs are placeholders (v4 rules + phantoms). PH3 / PH6: every cSS lesion tier 1, every
+constructed vein tier 3; 16 unit rows (a single vein-ish feature alone stays tier 1). The tier-3 phantom criterion was
+restated once during development (shown phantom veins had tube ratio <= 0.44 and first read tier 1): it is fitted to
+phantoms and must be checked against expert labels (evaluate.py) before any use.

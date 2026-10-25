@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Interactive cSS review: shows each suspected candidate, you agree or disagree.
-usage: review_css.py SUBJECT [--top N] [--redo] [--by-tier | --by-model | --by-legacy]
+usage: review_css.py SUBJECT [--top N] [--redo] [--by-tier | --by-priority | --by-model | --by-legacy]
+  --by-priority (v5.1.3, opt-in): order by review_priority_rank (1 high-priority cSS ... 4 other mimic; css_tiers.py),
+  then cand_id. Every candidate is still shown.
   --by-model (v5.0, opt-in): order by rank_model (rank_candidates.py; trained ranking model). Falls back to the
   default order, with a message, when the column is missing. --by-legacy = the default order (cand_id = score_v4).
   --by-tier (v4.18, opt-in): tier-1 candidates first, then tier 2 (review_tier, recorded by detect_css.py;
@@ -61,6 +63,9 @@ if "--by-model" in sys.argv and "rank_model" not in df.columns:
 if "--by-model" in sys.argv and "rank_model" in df.columns:
     ids = df.sort_values(["rank_model", "cand_id"], kind="stable").cand_id.astype(int).tolist()[:top]
     print(f"order: trained model (rank_model), {len(ids)} candidates")
+elif "--by-priority" in sys.argv and "review_priority_rank" in df.columns:
+    ids = df.sort_values(["review_priority_rank", "cand_id"], kind="stable").cand_id.astype(int).tolist()[:top]
+    print("order: review priority " + ", ".join(f"{int(k)}: {v}" for k, v in df.review_priority_rank.value_counts().sort_index().items()))
 elif "--by-tier" in sys.argv and "review_tier" in df.columns:
     ids = df.sort_values(["review_tier", "cand_id"], kind="stable").cand_id.astype(int).tolist()[:top]
     print(f"order: tier 1 first ({int((df.review_tier == 1).sum())}), then tier 2 ({int((df.review_tier == 2).sum())})")

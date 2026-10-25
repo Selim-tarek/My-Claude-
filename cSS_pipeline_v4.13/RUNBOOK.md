@@ -394,6 +394,13 @@ shown) - the counts must add up (`review/P012_audit.json`).
 part cSS-like for review instead of letting a vein rule (E5 / E6 / E7) exclude it (`mixed_object_review` = 1). Without
 the switch, `mixed_object` is recorded only. Check on P006 that 6/6 known lesions stay shown with the switch on.
 
+### 13d. Review-priority tiers (v5.1.3)
+
+`python $S/review_css.py P012 --by-priority` reads tier 1 (no strong mimic evidence) first, then 2 (uncertain), 3
+(likely vein, convergent evidence), 4 (microbleed-like / artifact zone); tier 5 = case QC insufficient. The tier is in
+`review_priority_rank` / `review_priority_reason`. It is a reading order only - read every candidate. Check on P006:
+the 6 known lesions should be tier 1 or 2; if any is tier 3, send its reason.
+
 ---
 
 ## Where things are (`$CSS_BASE`)
