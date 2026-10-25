@@ -170,6 +170,12 @@ grep -q "RESULT v512 OK" $T/v512.log || { cat $T/v512.log; echo "FAIL: v5.1.2 ch
 echo "== v5.1.3 review-priority tiers (reading order only)"
 python $ROOT/tests/check_v513.py | tee $T/v513.log | grep -vE "^RESULT"
 grep -q "RESULT v513 OK" $T/v513.log || { cat $T/v513.log; echo "FAIL: v5.1.3 checks"; exit 1; }
+echo "== v5.2 surface-aligned patches, patch classifier, shared model code (nested LOPO, fold skipping, provenance)"
+python $ROOT/tests/check_v52.py | tee $T/v52.log | grep -vE "^RESULT"
+grep -q "RESULT v52 OK" $T/v52.log || { cat $T/v52.log; echo "FAIL: v5.2 checks"; exit 1; }
+echo "== v5.2 architecture contracts (user-supplied verify_updated_architecture.py)"
+python $ROOT/tests/verify_updated_architecture.py > $T/arch.log 2>&1 || true; grep -E "^(PASS|SKIP|FAIL) " $T/arch.log || true
+grep -q "  FAIL: 0" $T/arch.log || { cat $T/arch.log; echo "FAIL: architecture contracts"; exit 1; }
 echo "== v4.16 surface overlay for freeview (detector list / expert calls, Destrieux sulcus per object)"
 python $ROOT/tests/check_overlay.py | tee $T/overlay.log | grep -v "^RESULT"
 grep -q "RESULT overlay OK" $T/overlay.log || { echo "FAIL: v4.16 overlay checks"; exit 1; }

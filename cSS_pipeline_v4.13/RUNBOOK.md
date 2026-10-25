@@ -401,6 +401,20 @@ the switch, `mixed_object` is recorded only. Check on P006 that 6/6 known lesion
 `review_priority_rank` / `review_priority_reason`. It is a reading order only - read every candidate. Check on P006:
 the 6 known lesions should be tier 1 or 2; if any is tier 3, send its reason.
 
+### 13e. Surface-aligned patches and the patch classifier (v5.2, research)
+
+```zsh
+python $S/detect_css.py P012 -2.5 85 3                 # writes work/P012_pial_sd.nii.gz
+python $S/surface_aligned_patch.py P012                 # review/P012_patches/*.npz + P012_patches.csv
+python $S/classify_surface_patches.py features P012     # review/P012_patch_features.csv
+# once >= 5 dev studies carry expert labels (cSS vs veins):
+python $S/classify_surface_patches.py train --split dev --source consensus      # ablations A-G, model JSON
+python $S/classify_surface_patches.py predict P020      # never a training study
+python $S/train_ranker.py --split dev --source consensus   # now nested LOPO + review/ranker_model_card.md
+```
+Read the ablation table: a channel is worth keeping only if it raises the LOPO AUC beyond the interval of the
+SWI-only model. Neither model changes the reading order until it beats score_v4 on test studies (evaluate.py).
+
 ---
 
 ## Where things are (`$CSS_BASE`)

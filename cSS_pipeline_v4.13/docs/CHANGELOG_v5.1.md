@@ -92,3 +92,7 @@ object stays in its list. Cut-offs are placeholders (v4 rules + phantoms). PH3 /
 constructed vein tier 3; 16 unit rows (a single vein-ish feature alone stays tier 1). The tier-3 phantom criterion was
 restated once during development (shown phantom veins had tube ratio <= 0.44 and first read tier 1): it is fitted to
 phantoms and must be checked against expert labels (evaluate.py) before any use.
+
+## v5.2
+
+See docs/CHANGELOG_v5.2.md (surface-aligned patches, patch classifier, shared model code, ranker upgrade).

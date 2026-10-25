@@ -430,6 +430,13 @@ v5.1") but are not ranker features; Stage A only, then stop for the user's real-
   flair_csf_bright_frac, phase_valid_frac / phase_polarity_frac, feature_qc_flags. check_v512: spec directions met on PH3.
 - v5.1.3 css_tiers.py review_priority_rank 1-5 (+ name, reason), review_css --by-priority opt-in; tier 3 needs convergent
   vein evidence; reading order only, placeholders fitted to phantoms (PH3/PH6 cSS tier 1, veins tier 3).
+- v5.2 (docs/CHANGELOG_v5.2.md): surface_aligned_patch.py (24x12x8 mm, u along / v across / n outward from
+  work/ID_pial_sd.nii.gz, inverse-transpose normals, label-checked sign, missing/stale channels absent not zero, outside
+  brain never valid, < 3 voxels skipped with reason); classify_surface_patches.py features / train (dev only, LOPO nested,
+  ablations A-G) / predict (refuses training studies, schema mismatch, hash mismatch); css_model.py shared LR + LOPO +
+  metrics + hash; train_ranker nested LOPO, PR-AUC / Brier / sens@FP, darkness-only + vessel-only baselines,
+  review/ranker_model_card.md. Synthetic only: G_all (190 features) 0.83 vs A_swi 0.997 -> more channels cost accuracy
+  with few studies. detect_css writes work/ID_pial_sd.nii.gz; outputs otherwise unchanged.
 
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.

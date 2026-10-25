@@ -318,6 +318,8 @@ if MERGE_GAP_MM > 0 and lab.max() > 0:
 os.makedirs(f"{base}/work", exist_ok=True)
 nib.save(nib.Nifti1Image((zone & (z < GROW_Z)).astype(np.uint8), swi.affine),
          f"{base}/work/{subj}_dark.nii.gz")
+# v5.2: signed distance to the labelled pial boundary (mm; < 0 tissue, > 0 CSF / outside) for surface_aligned_patch.py
+nib.save(nib.Nifti1Image(pial_sd.astype(np.float32), swi.affine), f"{base}/work/{subj}_pial_sd.nii.gz")
 
 # ---- 5. 3-D Hessian shape (multi-scale) at dark voxels: plate (cSS) vs tube (vein)
 need = brain & (z < Z_LOW) & (pial_sd > -PIAL_IN_MM)      # candidates + venous network voxels

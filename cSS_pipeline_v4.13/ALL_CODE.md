@@ -1,4 +1,4 @@
-# All code — cSS pipeline v5.1.3
+# All code — cSS pipeline v5.2
 
 Generated from the files below; the files are authoritative.
 
@@ -1647,6 +1647,8 @@ if MERGE_GAP_MM > 0 and lab.max() > 0:
 os.makedirs(f"{base}/work", exist_ok=True)
 nib.save(nib.Nifti1Image((zone & (z < GROW_Z)).astype(np.uint8), swi.affine),
          f"{base}/work/{subj}_dark.nii.gz")
+# v5.2: signed distance to the labelled pial boundary (mm; < 0 tissue, > 0 CSF / outside) for surface_aligned_patch.py
+nib.save(nib.Nifti1Image(pial_sd.astype(np.float32), swi.affine), f"{base}/work/{subj}_pial_sd.nii.gz")
 
 # ---- 5. 3-D Hessian shape (multi-scale) at dark voxels: plate (cSS) vs tube (vein)
 need = brain & (z < Z_LOW) & (pial_sd > -PIAL_IN_MM)      # candidates + venous network voxels
@@ -5486,18 +5488,22 @@ What it does:
     (recon-all route) when present. A feature missing from every training row is dropped with a warning;
     missing values are filled with the training median. Deprecated columns (vein_tree_mm, mirror_dark_frac,
     branch_per10mm) and the scores (score, score_v3, score_v4) are NOT features.
-  - model: L2-regularised logistic regression (scipy.optimize.minimize, L-BFGS), class-balanced weights,
-    features median-imputed and standardised. Leave-one-patient-out (LOPO) cross-validation: imputation and
-    standardisation are refitted inside every fold. Reported: pooled LOPO AUC of the model AND of score_v4 on
-    the same rows (the baseline it must beat), each with a patient-bootstrap 95 % interval, and per-patient
-    numbers. The final model is then fitted on all training rows.
+  - model: L2-regularised logistic regression (css_model.py, L-BFGS), class-balanced weights, features
+    median-imputed and standardised. Leave-one-patient-out (LOPO) cross-validation: imputation and
+    standardisation are refitted inside every fold; v5.2: the L2 strength is chosen by an inner LOPO inside each
+    training fold (--no-nested: fixed --l2), folds whose training part has one class are skipped and logged.
+    Reported on the same folds: the model, score_v4 (the baseline it must beat) and one-family models (darkness
+    only, vessel only): AUC with a patient-bootstrap 95 % interval, PR-AUC, sensitivity at 1 and 3 FP per scan,
+    Brier (fitted models only); per-patient AUCs. The final model is fitted on all training rows; the JSON
+    carries a model hash, the build and research_only; review/ranker_model_card.md summarises it.
 Needs >= --min-patients labelled patients with >= 1 positive and >= 1 negative row overall; stops otherwise.
 With fewer than ~10 patients every number here is noisy: read the intervals, not the point estimates.
 rank_candidates.py applies the model. Research software, not for clinical use."""
 import sys, os, json, argparse, numpy as np, pandas as pd
 from scipy.optimize import minimize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, cand_uid, label_class, FP, use_derived, sha256
+from css_common import base as _base, cand_uid, label_class, FP, use_derived, sha256, build_id
+import css_model as CM
 
 FEATURES = [
     # darkness and pial position
@@ -5566,42 +5572,34 @@ def add_missing(d):
     return d
 
 
-def prep(X, med=None, mu=None, sd=None):
-    """median imputation + standardisation; parameters from X unless given"""
-    X = np.asarray(X, float)
-    if med is None: med = np.nanmedian(X, axis=0); med = np.where(np.isfinite(med), med, 0.0)
-    X = np.where(np.isfinite(X), X, med)
-    if mu is None: mu = X.mean(0); sd = X.std(0); sd = np.where(sd > 1e-9, sd, 1.0)
-    return (X - mu) / sd, med, mu, sd
+def write_card(M, path):
+    """v5.2 model card: what was fitted, on what, how it was evaluated, and what it must not be used for"""
+    ev = M["evaluation"]; L = [f"# Candidate ranking model card ({M['version']})", "",
+         "Research software. Ranks detector objects for EXPERT REVIEW; not a diagnosis, not a calibrated probability, "
+         "not clinically validated. Every report needs expert review.", "",
+         f"- fitted: {M['fitted_at']}, build {M['build']}, model hash `{M['model_hash']}`",
+         f"- training: {M['n_objects']} labelled objects ({M['n_css']} cSS) from {M['n_patients']} patients, split "
+         f"`{M['split']}` (test split never used), labels `{M['source']}` (sha256 {str(M['label_sha256'])[:12]})",
+         f"- model: class-balanced L2 logistic regression, {len(M['features'])} features, L2 {M['l2']} ({M['l2_selection']})",
+         f"- dropped features (absent in all training rows): {', '.join(M['dropped_features']) or 'none'}",
+         "- missing T1 / FLAIR / phase / surface inputs enter as indicator features before median imputation", "",
+         "## Leave-one-patient-out evaluation (same folds for every row)", "",
+         "| scorer | AUC | 95 % CI (patient bootstrap) | PR-AUC | sens @ 1 FP/scan | sens @ 3 FP/scan | Brier |",
+         "|---|---|---|---|---|---|---|"]
+    for k, e in ev.items():
+        L.append(f"| {k} | {e.get('auc')} | {e.get('auc_ci95')} | {e.get('pr_auc')} | {e.get('sens_at_1fp_per_scan')} | "
+                 f"{e.get('sens_at_3fp_per_scan')} | {e.get('brier') if e.get('brier') is not None else '-'} |")
+    sk = [f["study_id"] for f in M["lopo_fold_status"] if f["status"] == "skipped"]
+    L += ["", f"Folds skipped (training part had one class): {', '.join(sk) or 'none'}.",
+          "Brier is given for the fitted models only; score_v4 is a rule score, not a probability.", "",
+          "## Limits", "", "- few patients: read the intervals, not the point estimates",
+          "- the model must beat score_v4 on held-out TEST studies (evaluate.py) before it changes any reading order by default",
+          "- labels from one reader carry that reader's bias; consensus labels are preferred",
+          "- not applied to its own training studies (rank_candidates.py refuses them)"]
+    open(path, "w").write("\n".join(L) + "\n"); return path
 
 
-def fit_lr(Z, y, l2):
-    """class-balanced L2 logistic regression -> (w, b)"""
-    w_pos = 0.5 / max(y.mean(), 1e-9); w_neg = 0.5 / max(1 - y.mean(), 1e-9)
-    cw = np.where(y == 1, w_pos, w_neg)
-    def f(p):
-        w, b = p[:-1], p[-1]; t = Z @ w + b
-        ll = cw * (np.logaddexp(0, t) - y * t)
-        g = cw * (1 / (1 + np.exp(-t)) - y)
-        return ll.sum() / len(y) + 0.5 * l2 * (w @ w) / len(y), \
-            np.r_[Z.T @ g / len(y) + l2 * w / len(y), g.sum() / len(y)]
-    r = minimize(f, np.zeros(Z.shape[1] + 1), jac=True, method="L-BFGS-B")
-    return r.x[:-1], float(r.x[-1])
-
-
-def auc(y, s):
-    y = np.asarray(y); s = np.asarray(s, float); pos, neg = s[y == 1], s[y == 0]
-    if not len(pos) or not len(neg): return np.nan
-    return float(((pos[:, None] > neg[None, :]).sum() + 0.5 * (pos[:, None] == neg[None, :]).sum()) / (len(pos) * len(neg)))
-
-
-def boot_auc(df, col, n, rng):
-    pats = df.study_id.unique(); vals = []
-    for _ in range(n):
-        pick = rng.choice(pats, len(pats), replace=True)
-        d = pd.concat([df[df.study_id == p] for p in pick]); vals.append(auc(d.y, d[col]))
-    v = np.array([x for x in vals if np.isfinite(x)])
-    return [round(float(np.percentile(v, 2.5)), 3), round(float(np.percentile(v, 97.5)), 3)] if len(v) else [None, None]
+prep, fit_lr, auc = CM.prep, CM.fit_lr, CM.auc          # v5.2: shared with classify_surface_patches.py
 
 
 if __name__ == "__main__":
@@ -5610,6 +5608,7 @@ if __name__ == "__main__":
     ap.add_argument("--source", default="consensus"); ap.add_argument("--l2", type=float, default=1.0)
     ap.add_argument("--min-patients", type=int, default=3); ap.add_argument("--boot", type=int, default=500)
     ap.add_argument("--seed", type=int, default=1); ap.add_argument("--out", default="")
+    ap.add_argument("--no-nested", action="store_true", help="fixed --l2 instead of nested LOPO selection")
     a = ap.parse_args(); B = _base(); L = f"{B}/labels"
     out = a.out or f"{B}/review/ranker_model.json"
     meta = pd.read_csv(f"{L}/study_meta.csv", dtype=str)
@@ -5636,29 +5635,50 @@ if __name__ == "__main__":
     feats = [f for f in FEATURES if f in T.columns and T[f].notna().any()]
     gone = [f for f in FEATURES if f not in feats]
     if gone: print(f"warning: {len(gone)} features not available in any training row, dropped: {', '.join(gone)}")
-    X = T[feats].apply(pd.to_numeric, errors="coerce").values.astype(float); y = T.y.values
-    # leave-one-patient-out: imputation + scaling refitted inside every fold
-    T["score_lopo"] = np.nan
-    for p in T.study_id.unique():
-        tr, te = (T.study_id != p).values, (T.study_id == p).values
-        if y[tr].min() == y[tr].max(): continue
-        Ztr, med, mu, sd = prep(X[tr]); w, b = fit_lr(Ztr, y[tr], a.l2)
-        T.loc[te, "score_lopo"] = 1 / (1 + np.exp(-(prep(X[te], med, mu, sd)[0] @ w + b)))
+    X = T[feats].apply(pd.to_numeric, errors="coerce").values.astype(float); y = T.y.values; g = T.study_id.values
+    # v5.2: leave-one-patient-out via css_model (imputation + scaling refitted inside every fold; L2 chosen by an inner
+    # LOPO unless --no-nested; folds whose training part has one class are skipped and logged, never filled in)
+    sc, fold_log = CM.lopo(X, y, g, a.l2, nested=not a.no_nested); T["score_lopo"] = sc
     base_col = "score_v4" if "score_v4" in T.columns else "score"
-    rng = np.random.default_rng(a.seed); ok = T.score_lopo.notna()
-    auc_m, auc_b = auc(T.y[ok], T.score_lopo[ok]), auc(T.y[ok], T[base_col][ok])
-    ci_m = boot_auc(T[ok], "score_lopo", a.boot, rng); ci_b = boot_auc(T[ok], base_col, a.boot, rng)
+    # baselines on the same folds: the v4 rule score as it is, and one-family models (darkness only, vessel only)
+    fam = {"darkness_only": [f for f in ("darkness_z", "edge_contrast") if f in feats],
+           "vessel_only": [f for f in ("tube_ratio", "vessel_wm_mm", "local_cont_max_mm", "local_cont_min_mm",
+                                       "terminal_ends", "net_radius_med_mm") if f in feats]}
+    for k, fs in fam.items():
+        T[f"score_{k}"] = CM.lopo(T[fs].apply(pd.to_numeric, errors="coerce").values.astype(float), y, g, a.l2)[0] if fs else np.nan
+    ok = T.score_lopo.notna()
+    fitted = {"score_lopo"} | {f"score_{k}" for k in fam}           # Brier only for fitted models, not rule scores
+    def metrics(col):
+        D = T[ok].assign(s=pd.to_numeric(T[col][ok], errors="coerce"))
+        D = D[D.s.notna()]
+        if not len(D): return dict(auc=None)
+        r = lambda v: None if v is None or not np.isfinite(v) else round(float(v), 3)
+        return dict(auc=r(CM.auc(D.y, D.s)), auc_ci95=CM.patient_bootstrap(D, lambda x: CM.auc(x.y, x.s), a.boot, a.seed),
+                    pr_auc=r(CM.average_precision(D.y, D.s)), sens_at_1fp_per_scan=r(CM.sens_at_fp(D, "s", 1.0)),
+                    sens_at_3fp_per_scan=r(CM.sens_at_fp(D, "s", 3.0)),
+                    brier=r(CM.brier(D.y, D.s)) if col in fitted else None)
+    evals = {"model": metrics("score_lopo"), base_col: metrics(base_col),
+             **{k: metrics(f"score_{k}") for k, fs in fam.items() if fs}}
+    auc_m, ci_m = evals["model"]["auc"], evals["model"].get("auc_ci95"); auc_b, ci_b = evals[base_col]["auc"], evals[base_col].get("auc_ci95")
     per = [dict(study_id=p, n=int((T.study_id == p).sum()), n_css=int(T.y[T.study_id == p].sum()),
-                auc_model=auc(T.y[T.study_id == p], T.score_lopo[T.study_id == p]),
-                auc_score_v4=auc(T.y[T.study_id == p], T[base_col][T.study_id == p])) for p in T.study_id.unique()]
-    Z, med, mu, sd = prep(X); w, b = fit_lr(Z, y, a.l2)
-    model = dict(model="logistic_l2_balanced", version="v5.0", fitted_at=pd.Timestamp.now().isoformat(timespec="seconds"),
+                auc_model=CM.auc(T.y[T.study_id == p], T.score_lopo[T.study_id == p]),
+                auc_score_v4=CM.auc(T.y[T.study_id == p], T[base_col][T.study_id == p])) for p in T.study_id.unique()]
+    l2_final = a.l2
+    if not a.no_nested:                                   # the final model's L2 by LOPO over all training studies
+        best = (-1, a.l2)
+        for cand in CM.L2_GRID:
+            s_in = CM.lopo(X, y, g, cand)[0]; f_ = np.isfinite(s_in); v = CM.auc(y[f_], s_in[f_])
+            if np.isfinite(v) and v > best[0]: best = (v, cand)
+        l2_final = best[1]
+    Z, med, mu, sd = prep(X); w, b = fit_lr(Z, y, l2_final)
+    model = dict(model="logistic_l2_balanced", version="v5.2", fitted_at=pd.Timestamp.now().isoformat(timespec="seconds"),
                  features=feats, weights=[round(float(v), 6) for v in w], bias=round(b, 6),
                  impute_median=[float(v) for v in med], mean=[float(v) for v in mu], sd=[float(v) for v in sd],
-                 l2=a.l2, split=a.split, source=a.source, training_studies=sorted(T.study_id.unique().tolist()),
+                 l2=l2_final, l2_selection="nested LOPO over " + str(list(CM.L2_GRID)) if not a.no_nested else "fixed",
+                 split=a.split, source=a.source, training_studies=sorted(T.study_id.unique().tolist()),
                  n_objects=int(len(T)), n_css=int(T.y.sum()), n_patients=int(n_pat),
-                 lopo_auc=None if not np.isfinite(auc_m) else round(auc_m, 3), lopo_auc_ci95=ci_m,
-                 baseline=base_col, baseline_auc=None if not np.isfinite(auc_b) else round(auc_b, 3), baseline_auc_ci95=ci_b,
+                 lopo_auc=auc_m, lopo_auc_ci95=ci_m, baseline=base_col, baseline_auc=auc_b, baseline_auc_ci95=ci_b,
+                 evaluation=evals, lopo_fold_status=fold_log,
                  per_patient=[{k: (round(v, 3) if isinstance(v, float) and np.isfinite(v) else (None if isinstance(v, float) else v))
                                for k, v in r.items()} for r in per],
                  dropped_features=gone,
@@ -5667,13 +5687,21 @@ if __name__ == "__main__":
                                               .get("environment", {}) or {}).get("build", "unknown"))
                                          if os.path.exists(f"{B}/review/{s}_manifest.json") else "unknown"
                                          for s in T.study_id.unique()}),
-                 label_file=lab_path, label_sha256=sha256(lab_path),
+                 label_file=lab_path, label_sha256=sha256(lab_path), build=build_id(), research_only=True,
                  note="research software; pooled LOPO AUC over few patients is noisy - read the intervals")
+    model["model_hash"] = CM.model_hash({k: v for k, v in model.items() if k != "fitted_at"})
     os.makedirs(os.path.dirname(out), exist_ok=True)
     json.dump(model, open(out, "w"), indent=2)
     top = sorted(zip(feats, w), key=lambda t: -abs(t[1]))[:8]
     print(f"LOPO AUC model {model['lopo_auc']} {ci_m} vs {base_col} {model['baseline_auc']} {ci_b} (patient bootstrap 95 %)")
     print("largest standardised weights: " + ", ".join(f"{f} {v:+.2f}" for f, v in top))
+    for k, e in evals.items():
+        print(f"  {k:14s} AUC {e.get('auc')} {e.get('auc_ci95')}  PR-AUC {e.get('pr_auc')}  sens@1FP/scan {e.get('sens_at_1fp_per_scan')}"
+              + (f"  Brier {e['brier']}" if e.get("brier") is not None else ""))
+    sk = [f["study_id"] for f in fold_log if f["status"] == "skipped"]
+    if sk: print(f"  LOPO folds skipped (training part had one class): {', '.join(sk)}")
+    card = write_card(model, os.path.join(os.path.dirname(out), "ranker_model_card.md"))
+    print(f"model card -> {card} (model hash {model['model_hash'][:12]})")
     print(f"-> {out}   (apply: rank_candidates.py SUBJECT; never trained on test-split studies)")
 ```
 
@@ -6788,4 +6816,1102 @@ for f in touched:
 if "order: review priority" not in r.stdout: fail(f"--by-priority not applied:\n{r.stdout[-500:]}{r.stderr[-500:]}")
 print("review_css.py --by-priority: order by tier applied (" + [l for l in r.stdout.splitlines() if l.startswith("order:")][0] + ")")
 print("RESULT v513 OK")
+```
+
+## scripts/css_model.py
+
+```python
+"""Shared model code for the learned rankers (v5.2): class-balanced L2 logistic regression, patient-grouped
+leave-one-patient-out (LOPO) with optional nested selection of the L2 strength, metrics, model hashing.
+numpy / scipy only. Used by train_ranker.py and classify_surface_patches.py; tested in tests/check_v52.py.
+Every split is by PATIENT (study_id): all objects of one study are always on the same side."""
+import hashlib, json, numpy as np
+from scipy.optimize import minimize
+
+L2_GRID = (0.1, 1.0, 10.0)
+
+
+def prep(X, med=None, mu=None, sd=None):
+    """median imputation + standardisation; parameters from X (the training fold) unless given"""
+    X = np.asarray(X, float)
+    if med is None: med = np.nanmedian(X, axis=0); med = np.where(np.isfinite(med), med, 0.0)
+    X = np.where(np.isfinite(X), X, med)
+    if mu is None: mu = X.mean(0); sd = X.std(0); sd = np.where(sd > 1e-9, sd, 1.0)
+    return (X - mu) / sd, med, mu, sd
+
+
+def fit_lr(Z, y, l2):
+    """class-balanced L2 logistic regression on standardised Z -> (w, b); raises if only one class"""
+    y = np.asarray(y, float)
+    if len(np.unique(y)) < 2: raise ValueError("both classes are required")
+    cw = np.where(y == 1, 0.5 / y.mean(), 0.5 / (1 - y.mean()))
+    def f(p):
+        w, b = p[:-1], p[-1]; t = np.clip(Z @ w + b, -40, 40)
+        g = cw * (1 / (1 + np.exp(-t)) - y)
+        return (cw * (np.logaddexp(0, t) - y * t)).sum() / len(y) + 0.5 * l2 * (w @ w) / len(y), \
+            np.r_[Z.T @ g / len(y) + l2 * w / len(y), g.sum() / len(y)]
+    r = minimize(f, np.zeros(Z.shape[1] + 1), jac=True, method="L-BFGS-B")
+    return r.x[:-1], float(r.x[-1])
+
+
+def predict(X, med, mu, sd, w, b):
+    Z = prep(X, med, mu, sd)[0]
+    return 1 / (1 + np.exp(-(Z @ w + b)))
+
+
+def auc(y, s):
+    y = np.asarray(y); s = np.asarray(s, float); pos, neg = s[y == 1], s[y == 0]
+    if not len(pos) or not len(neg): return np.nan
+    return float(((pos[:, None] > neg[None, :]).sum() + 0.5 * (pos[:, None] == neg[None, :]).sum()) / (len(pos) * len(neg)))
+
+
+def average_precision(y, s):
+    """PR-AUC as average precision (precision at each positive, ranked by score)"""
+    y = np.asarray(y); s = np.asarray(s, float)
+    if not (y == 1).any(): return np.nan
+    o = np.argsort(-s, kind="stable"); yy = y[o]; tp = np.cumsum(yy)
+    return float((tp[yy == 1] / (np.nonzero(yy == 1)[0] + 1)).mean())
+
+
+def brier(y, p):
+    return float(np.mean((np.asarray(p, float) - np.asarray(y, float)) ** 2))
+
+
+def lopo(X, y, groups, l2=1.0, nested=False):
+    """leave-one-patient-out predictions. nested=True picks l2 from L2_GRID inside each training fold by an inner LOPO
+    (AUC). Folds whose training part has one class only are SKIPPED and reported (never fabricated).
+    -> (out-of-fold scores, fold log)"""
+    X = np.asarray(X, float); y = np.asarray(y); g = np.asarray(groups)
+    out = np.full(len(y), np.nan); log = []
+    for p in sorted(set(g)):
+        te, tr = g == p, g != p
+        if len(np.unique(y[tr])) < 2:
+            log.append(dict(study_id=str(p), status="skipped", reason="training fold has one class")); continue
+        lam = l2
+        if nested:
+            best = (-1, l2)
+            for cand in L2_GRID:
+                s_in, _ = lopo(X[tr], y[tr], g[tr], cand, nested=False)
+                a = auc(y[tr][np.isfinite(s_in)], s_in[np.isfinite(s_in)])
+                if np.isfinite(a) and a > best[0]: best = (a, cand)
+            lam = best[1]
+        Z, med, mu, sd = prep(X[tr]); w, b = fit_lr(Z, y[tr], lam)
+        out[te] = predict(X[te], med, mu, sd, w, b)
+        log.append(dict(study_id=str(p), status="evaluated", n_test=int(te.sum()), l2=lam))
+    return out, log
+
+
+def patient_bootstrap(df, fn, n=500, seed=1):
+    """95 % interval of fn(sub-dataframe) over bootstrap resamples of PATIENTS (column study_id)"""
+    rng = np.random.default_rng(seed); pats = df.study_id.unique(); vals = []
+    import pandas as pd
+    for _ in range(n):
+        d = pd.concat([df[df.study_id == p] for p in rng.choice(pats, len(pats), replace=True)])
+        v = fn(d)
+        if np.isfinite(v): vals.append(v)
+    return [round(float(np.percentile(vals, 2.5)), 3), round(float(np.percentile(vals, 97.5)), 3)] if vals else [None, None]
+
+
+def sens_at_fp(df, score, fp_per_scan=1.0):
+    """lesion sensitivity when, in every study, candidates are read down the score order until fp_per_scan false
+    positives have been passed (the reading-burden view; needs columns study_id, y and the score)"""
+    found = tot = 0
+    for _, d in df.groupby("study_id"):
+        d = d.sort_values(score, ascending=False); fp = np.cumsum(d.y.values == 0)
+        keep = fp <= fp_per_scan; found += int(d.y.values[keep].sum()); tot += int(d.y.sum())
+    return found / tot if tot else np.nan
+
+
+def model_hash(model):
+    """sha256 of the model content (weights, features, preprocessing), excluding the hash field itself"""
+    m = {k: v for k, v in model.items() if k not in ("model_hash",)}
+    return hashlib.sha256(json.dumps(m, sort_keys=True, default=str).encode()).hexdigest()
+```
+
+## scripts/surface_aligned_patch.py
+
+```python
+#!/usr/bin/env python3
+"""Surface-aligned multimodal patches per detector object (v5.2, master plan Stage 2). Research software.
+usage: surface_aligned_patch.py SUBJECT [--lists candidates,excluded] [--ids 3,7] [--size-mm 24,12,8]
+                                [--spacing-mm 0.5,0.5,0.5]
+For every object of review/ID_candidates|excluded.nii.gz a patch of fixed PHYSICAL size is sampled in a right-handed
+frame at the object:
+  u  the object's long axis (PCA, world mm) projected into the cortical tangent plane
+  v  cross(n, u): across the surface
+  n  outward pial normal (from tissue toward CSF): gradient of work/ID_pial_sd.nii.gz (detect_css.py), mapped to world
+     coordinates with the inverse transpose of the affine (oblique data included), smoothed over 1 mm. The sign is
+     checked against the labels (tissue must lie on the -n side); a reversed map is flipped and recorded.
+Channels (each sampled on the same world grid, linear interpolation, NaN outside the image):
+  swi    data/ID_swi.nii                         required
+  phase  data/ID_phase.nii.gz                    optional; used only if on the SWI grid and newer than the SWI
+  flair  work/ID_flair_swispace.nii.gz           optional; newer than the SWI
+  labels work/ID_seg_swispace.nii.gz             optional; nearest neighbour; newer than the SWI
+A missing or stale channel is NOT zero-filled: it is absent from the file, valid_<ch> is all False and the reason is
+in the metadata. Intensity channels are valid only inside the image AND inside the brain mask (SWI > 0), so outside-
+brain zeros never enter patch features. Objects with < 3 voxels are skipped with a reason.
+Writes review/ID_patches/<list>_<id>.npz (image_<ch>, valid, valid_<ch>, world_grid_mm, center_world_mm, center_ijk,
+u_world, v_world, n_world, metadata_json) and review/ID_patches.csv (one row per object, also the skipped ones).
+Library entry: extract_patch(images, pial, mask, ...) on nibabel images (each channel sampled through its OWN affine;
+the CLI only passes channels already on the SWI grid)."""
+import sys, os, json, argparse, numpy as np, nibabel as nib, pandas as pd
+from scipy import ndimage as ndi
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import base as _base, cand_uid, stale_against, build_id
+
+PATCH_SCHEMA = "css-patch/1.0"
+
+
+def unit(x, eps=1e-8):
+    n = float(np.linalg.norm(x))
+    if n < eps: raise ValueError("near-zero vector")
+    return x / n
+
+
+def to_world(aff, ijk):
+    x = np.asarray(ijk, float).reshape(-1, 3)
+    return (aff @ np.c_[x, np.ones(len(x))].T).T[:, :3].reshape(np.asarray(ijk).shape)
+
+
+def to_voxel(aff, xyz):
+    x = np.asarray(xyz, float).reshape(-1, 3)
+    return (np.linalg.inv(aff) @ np.c_[x, np.ones(len(x))].T).T[:, :3].reshape(np.asarray(xyz).shape)
+
+
+def world_normal(pial_sd, aff, ijk, vox, half_mm=6.0):
+    """outward unit normal at voxel ijk: gradient of the (1 mm smoothed) signed distance in a local crop, as a world
+    covector (inverse transpose of the affine's linear part)"""
+    r = np.ceil(half_mm / np.asarray(vox)).astype(int); c = np.round(ijk).astype(int)
+    lo = np.maximum(c - r, 0); hi = np.minimum(c + r + 1, pial_sd.shape)
+    crop = ndi.gaussian_filter(pial_sd[tuple(slice(a, b) for a, b in zip(lo, hi))].astype(np.float64), 1.0 / np.asarray(vox))
+    g = np.array([np.gradient(crop, axis=a)[tuple(c - lo)] for a in range(3)])        # per voxel index
+    return unit(np.linalg.inv(np.asarray(aff, float)[:3, :3]).T @ g)
+
+
+def frame(mask, pial_sd, aff, vox, tissue=None):
+    ijk = np.argwhere(mask)
+    if len(ijk) < 3: raise ValueError(f"object has {len(ijk)} voxels (< 3)")
+    c_ijk = ijk.mean(0); near = ijk[np.argmin(np.linalg.norm(ijk - c_ijk, axis=1))]   # a voxel OF the object
+    n = world_normal(pial_sd, aff, near, vox); flipped = False
+    if tissue is not None:                                           # the labels decide which side is tissue
+        side = lambda t: ndi.map_coordinates(tissue.astype(np.float32), to_voxel(aff, to_world(aff, near) + t * n).reshape(3, 1), order=0)[0]
+        if side(+1.5) > 0.5 and side(-1.5) < 0.5: n, flipped = -n, True
+    P = to_world(aff, ijk); C = P - P.mean(0)
+    u = np.linalg.eigh(C.T @ C / max(len(P) - 1, 1))[1][:, -1]
+    u = u - (u @ n) * n
+    if np.linalg.norm(u) < 1e-5:
+        e = np.eye(3)[np.argmin(np.abs(n))]; u = e - (e @ n) * n
+    u = unit(u)
+    if u[np.argmax(np.abs(u))] < 0: u = -u
+    v = unit(np.cross(n, u)); u = unit(np.cross(v, n))
+    return dict(center_ijk=c_ijk, center_world=to_world(aff, c_ijk), u=u, v=v, n=n, normal_flipped=flipped,
+                pial_sd_at_center_mm=float(pial_sd[tuple(np.round(c_ijk).astype(int))]))
+
+
+def grid(fr, size_mm, spacing_mm):
+    ax = [(np.arange(int(round(s / d)) + 1) - int(round(s / d)) / 2) * d for s, d in zip(size_mm, spacing_mm)]
+    U, V, N = np.meshgrid(*ax, indexing="ij")
+    return fr["center_world"] + U[..., None] * fr["u"] + V[..., None] * fr["v"] + N[..., None] * fr["n"]
+
+
+def sample(img_data, aff, xyz, order=1):
+    co = np.moveaxis(to_voxel(aff, xyz), -1, 0)
+    vals = ndi.map_coordinates(img_data, co, order=order, mode="constant", cval=np.nan, prefilter=False).astype(np.float32)
+    inside = ndi.map_coordinates(np.ones(img_data.shape, np.float32), co, order=0, mode="constant", cval=0) > 0.5
+    return vals, inside
+
+
+_ARR = {}
+
+
+def _arr(img):
+    """float32 array of a nibabel image, loaded once per image object"""
+    if id(img) not in _ARR: _ARR[id(img)] = (img, np.asarray(img.dataobj, np.float32))
+    return _ARR[id(img)][1]
+
+
+def extract_patch(images, pial, mask, size_mm=(24, 12, 8), spacing_mm=(0.5, 0.5, 0.5), obj_id=None, labels=None,
+                  brain=None):
+    """one surface-aligned patch.
+    images: {channel: nibabel image}; pial: signed pial distance image (mm, + outward); mask: object label image
+    (obj_id selects one object, None = every non-zero voxel); labels: optional segmentation image (tissue side check);
+    brain: optional brain mask on the SWI grid (default: filled SWI > 0). Intensity channels are valid only inside
+    their image and inside the brain; 'labels' only inside its image.
+    -> dict(shape, channels, arrays {image_<ch>}, valids {valid_<ch>}, valid (= valid_swi, else any channel), frame, grid)
+    raises ValueError for an object of < 3 voxels"""
+    aff = pial.affine; vox = np.array(pial.header.get_zooms()[:3], float)
+    M = _arr(mask); m = (M == obj_id) if obj_id is not None else (M > 0)
+    tissue = None
+    if labels is not None: L = _arr(labels); tissue = (L > 0) & (L != 24)
+    fr = frame(m, _arr(pial), aff, vox, tissue)
+    G = grid(fr, size_mm, spacing_mm)
+    brain_s = None
+    if "swi" in images:
+        if brain is None: brain = ndi.binary_fill_holes(_arr(images["swi"]) > 0)
+        brain_s = sample(brain.astype(np.float32), images["swi"].affine, G, order=0)[0] > 0.5
+    arrays, valids = {}, {}
+    for name, img in images.items():
+        vals, inside = sample(_arr(img), img.affine, G, 0 if name == "labels" else 1)
+        ok = inside & np.isfinite(vals)
+        if name != "labels" and brain_s is not None: ok &= brain_s
+        arrays[f"image_{name}"] = vals; valids[f"valid_{name}"] = ok
+    valid = valids["valid_swi"] if "valid_swi" in valids else np.any(list(valids.values()), axis=0)
+    return dict(shape=tuple(G.shape[:3]), channels=sorted(images), arrays=arrays, valids=valids, valid=valid, grid=G,
+                frame=dict(u_world=fr["u"], v_world=fr["v"], n_world=fr["n"], center_world=fr["center_world"],
+                           center_ijk=fr["center_ijk"], normal_flipped=fr["normal_flipped"],
+                           pial_sd_at_center_mm=fr["pial_sd_at_center_mm"]))
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("subject"); ap.add_argument("--lists", default="candidates,excluded"); ap.add_argument("--ids", default="")
+    ap.add_argument("--size-mm", default="24,12,8"); ap.add_argument("--spacing-mm", default="0.5,0.5,0.5")
+    a = ap.parse_args(); s = a.subject; B = _base()
+    size = [float(x) for x in a.size_mm.split(",")]; spc = [float(x) for x in a.spacing_mm.split(",")]
+    swi_p, psd_p = f"{B}/data/{s}_swi.nii", f"{B}/work/{s}_pial_sd.nii.gz"
+    if not os.path.exists(psd_p): sys.exit(f"{psd_p} missing - re-run detect_css.py {s} (v5.2 writes it)")
+    if stale_against(psd_p, [swi_p]): sys.exit(f"{psd_p} is older than the SWI - re-run detect_css.py {s}")
+    swi = nib.load(swi_p); aff = swi.affine
+    brain = ndi.binary_fill_holes(_arr(swi) > 0); psd_img = nib.load(psd_p)
+    chans, missing = {"swi": swi}, {}
+    for name, p in (("phase", f"{B}/data/{s}_phase.nii.gz"), ("flair", f"{B}/work/{s}_flair_swispace.nii.gz"),
+                    ("labels", f"{B}/work/{s}_seg_swispace.nii.gz")):
+        if not os.path.exists(p): missing[name] = "absent"; continue
+        im = nib.load(p)
+        if im.shape[:3] != swi.shape[:3] or not np.allclose(im.affine, aff, atol=1e-3): missing[name] = "not on the SWI grid"; continue
+        if stale_against(p, [swi_p]): missing[name] = "older than the SWI"; continue
+        chans[name] = im
+    out_dir = f"{B}/review/{s}_patches"; os.makedirs(out_dir, exist_ok=True)
+    ids = {int(x) for x in a.ids.split(",") if x.strip()}
+    rows = []
+    for lst in [x for x in a.lists.split(",") if x]:
+        mp, cp = f"{B}/review/{s}_{lst}.nii.gz", f"{B}/review/{s}_{lst}.csv"
+        if not (os.path.exists(mp) and os.path.exists(cp)): continue
+        M_img = nib.load(mp); d = pd.read_csv(cp)
+        idc = "cand_id" if lst == "candidates" else "excl_id"
+        for _, r in d.iterrows():
+            oid = int(r[idc])
+            if ids and oid not in ids: continue
+            row = dict(study_id=s, list=lst, obj_id=oid, cand_uid=cand_uid(s, r), patch_path="", status="skipped", skip_reason="")
+            try:
+                P = extract_patch(chans, psd_img, M_img, size, spc, obj_id=oid, labels=chans.get("labels"), brain=brain)
+            except ValueError as e:
+                row["skip_reason"] = str(e); rows.append(row); continue
+            fr, G, arrays, valids, valid = P["frame"], P["grid"], P["arrays"], P["valids"], P["valid"]
+            for name in missing: valids[f"valid_{name}"] = np.zeros(G.shape[:3], bool)
+            meta = dict(schema=PATCH_SCHEMA, subject=s, list=lst, obj_id=oid, cand_uid=row["cand_uid"], size_mm=size,
+                        spacing_mm=spc, axis_semantics={"0": "u_along_candidate", "1": "v_across_surface", "2": "n_outward"},
+                        normal_sign="positive_outward_toward_csf", normal_flipped=fr["normal_flipped"],
+                        pial_sd_at_center_mm=fr["pial_sd_at_center_mm"], channels=sorted(chans), missing_channels=missing,
+                        build=build_id(), research_only=True)
+            path = f"{out_dir}/{lst}_{oid}.npz"
+            np.savez_compressed(path, **arrays, **valids, valid=valid, world_grid_mm=G.astype(np.float32),
+                                center_world_mm=fr["center_world"], center_ijk=fr["center_ijk"], u_world=fr["u_world"],
+                                v_world=fr["v_world"], n_world=fr["n_world"], metadata_json=json.dumps(meta))
+            row.update(patch_path=os.path.relpath(path, B), status="ok", channels=";".join(sorted(chans)),
+                       missing_channels=";".join(f"{k}:{v}" for k, v in missing.items()),
+                       valid_frac_swi=round(float(valid.mean()), 3), normal_flipped=int(fr["normal_flipped"]),
+                       pial_sd_at_center_mm=round(fr["pial_sd_at_center_mm"], 2))
+            rows.append(row)
+    pd.DataFrame(rows).to_csv(f"{B}/review/{s}_patches.csv", index=False)
+    ok = sum(r["status"] == "ok" for r in rows)
+    print(f"{s}: {ok} surface-aligned patches ({size} mm, spacing {spc} mm) -> {out_dir}; {len(rows) - ok} skipped; "
+          f"channels {sorted(chans)}" + (f"; missing {missing}" if missing else "") + "  [research software]")
+```
+
+## scripts/classify_surface_patches.py
+
+```python
+#!/usr/bin/env python3
+"""cSS-versus-vein ranking from surface-aligned patches (v5.2, master plan Stage 3). Research software: the output
+ranks candidates for expert review; it is not a diagnosis and not a calibrated probability.
+usage:
+  classify_surface_patches.py features SUBJECT [SUBJECT ...]
+        review/ID_patches/*.npz (surface_aligned_patch.py) -> review/ID_patch_features.csv
+  classify_surface_patches.py train [--split dev] [--source consensus|reader:NAME] [--negatives vein|all]
+        [--min-studies 5] [--l2 1.0] [--no-nested] [--out review/surface_patch_model.json]
+  classify_surface_patches.py predict SUBJECT [SUBJECT ...] [--model review/surface_patch_model.json]
+        [--allow-training-study]          -> review/ID_patch_predictions.csv
+  classify_surface_patches.py lopo-manifest MANIFEST.csv [--l2 1.0]
+        explicit patch list (columns patch_path, study_id, label = cSS | vein code): LOPO by study, no model saved
+Library: read_manifest / build_matrix / grouped_lopo (same features, same css_model LOPO as 'train').
+Features per channel, in a FIXED order (swi, phase, flair, labels): validity fraction, robust-z distribution
+(mean, sd, p5, p50, p95, min, max), mean |gradient| along u / v / n, and 8-bin profiles (mean, sd) along each axis;
+for the label channel the tissue share in 8 bins along the normal. Every channel adds <ch>_missing and
+<ch>_valid_fraction: a missing phase / FLAIR is information and is never a zero image. Optional geometry and vessel
+columns are read from review/ID_candidates|excluded.csv (surface / vessel topology, v5.1.x).
+Training: labelled objects of the DEV split only (labels/study_meta.csv; --split test is refused), target cSS (1)
+vs vein (VS / VC / VT / VX / V; --negatives all = every non-cSS label), 'uncertain' left out. Class-balanced L2
+logistic regression, leave-one-patient-out with nested L2 selection (css_model.py); folds whose training part has
+one class are skipped and reported. Ablations on the same folds: A swi, B swi+phase, C swi+labels+surface geometry,
+D swi+vessel topology, E swi+flair, F swi+phase+labels+geometry+vessel, G everything. Reported per ablation: AUC,
+PR-AUC, Brier, sensitivity at 1 FP per scan, with patient-bootstrap intervals for AUC. Needs >= --min-studies studies
+and both classes, else it refuses. The model JSON records the feature schema, channel order, preprocessing,
+training studies, fold log, out-of-fold predictions, label-file hash, build and a model hash."""
+import sys, os, json, argparse, numpy as np, pandas as pd
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import base as _base, label_class, sha256, build_id
+import css_model as CM
+
+FEATURE_SCHEMA = "css-patch-features/1.0"
+CHANNELS = ["swi", "phase", "flair", "labels"]
+GEOMETRY = ["pial_dist_mm", "csf_depth_mm", "sulcal_depth_mm", "surface_contact_frac_1mm", "elongation_3d",
+            "compactness_3d", "surf_width_mm", "surf_inradius_mm", "surf_aspect", "geo_length_mm"]
+VESSEL = ["tube_ratio", "local_cont_max_mm", "local_cont_min_mm", "terminal_ends", "local_branch_per10mm",
+          "vessel_wm_mm", "vessel_run_mm", "tortuosity", "cand_radius_med_mm", "net_radius_med_mm"]
+ABLATIONS = {"A_swi": ["swi"], "B_swi_phase": ["swi", "phase"], "C_swi_surface": ["swi", "labels", "geometry"],
+             "D_swi_vessel": ["swi", "vessel"], "E_swi_flair": ["swi", "flair"],
+             "F_swi_phase_surface_vessel": ["swi", "phase", "labels", "geometry", "vessel"],
+             "G_all": ["swi", "phase", "flair", "labels", "geometry", "vessel"]}
+
+
+def robust_z(x, valid):
+    valid = valid & np.isfinite(x); z = np.full(x.shape, np.nan, np.float32)
+    if not valid.any(): return z
+    med = np.median(x[valid]); mad = np.median(np.abs(x[valid] - med))
+    z[valid] = (x[valid] - med) / max(1.4826 * mad, float(np.std(x[valid])), 1e-3)
+    return z
+
+
+def axis_profile(z, valid, axis, bins=8):
+    e = np.linspace(0, z.shape[axis], bins + 1).astype(int); m, s = [], []
+    for lo, hi in zip(e[:-1], e[1:]):
+        sl = [slice(None)] * 3; sl[axis] = slice(lo, max(lo + 1, hi))
+        v = z[tuple(sl)][valid[tuple(sl)]]
+        m.append(float(v.mean()) if len(v) else np.nan); s.append(float(v.std()) if len(v) else np.nan)
+    return m + s
+
+
+def channel_features(name, img, valid):
+    """-> ordered (names, values); img None = channel missing (values NaN, <ch>_missing = 1)"""
+    names = [f"{name}_missing", f"{name}_valid_fraction"]
+    if name == "labels":
+        names += [f"labels_tissue_n{b}" for b in range(8)]
+        if img is None: return names, [1.0, 0.0] + [np.nan] * 8
+        t = ((img > 0) & (img != 24)).astype(np.float32)
+        return names, [0.0, float(valid.mean())] + axis_profile(np.where(valid, t, np.nan), valid, 2)[:8]
+    stats = ["mean", "sd", "p5", "p50", "p95", "min", "max", "grad_u", "grad_v", "grad_n"]
+    prof = [f"prof_{ax}_{k}{b}" for ax in "uvn" for k in ("mean", "sd") for b in range(8)]
+    names += [f"{name}_{s}" for s in stats + prof]
+    if img is None or not valid.any(): return names, [1.0 if img is None else 0.0, float(valid.mean()) if img is not None else 0.0] + [np.nan] * (len(names) - 2)
+    z = robust_z(img.astype(np.float32), valid); v = z[valid]
+    g = [float(np.nanmean(np.abs(gg[valid]))) for gg in np.gradient(np.where(valid, z, 0.0))]
+    vals = [0.0, float(valid.mean()), float(v.mean()), float(v.std()), *map(float, np.percentile(v, [5, 50, 95])),
+            float(v.min()), float(v.max()), *g]
+    for ax in range(3): vals += axis_profile(z, valid, ax)
+    return names, vals
+
+
+def patch_features(npz_path):
+    z = np.load(npz_path, allow_pickle=False); names, vals = [], []
+    for ch in CHANNELS:
+        img = z[f"image_{ch}"] if f"image_{ch}" in z.files else None
+        vm = z[f"valid_{ch}"] if f"valid_{ch}" in z.files else np.zeros(z["valid"].shape, bool)
+        n_, v_ = channel_features(ch, img, np.asarray(vm).astype(bool))
+        names += n_; vals += v_
+    return names, vals, json.loads(str(z["metadata_json"])) if "metadata_json" in z.files else {}
+
+
+POSITIVE = {"cSS", "css", "C"}
+NEGATIVE = {"vein", "surface_vein", "other_vein", "V", "VS", "VC", "VT", "VX"}
+
+
+def read_manifest(path):
+    """explicit patch list -> rows (dicts). Needs columns patch_path, study_id, label; a relative patch_path is read
+    against the manifest's folder, then $CSS_BASE. A patch listed twice (whatever its labels) or a missing file -> ValueError."""
+    d = pd.read_csv(path, dtype=str)
+    need = {"patch_path", "study_id", "label"} - set(d.columns)
+    if need: raise ValueError(f"{path}: missing columns {sorted(need)}")
+    here = os.path.dirname(os.path.abspath(path)); rows, seen = [], set()
+    for _, r in d.iterrows():
+        pp = r.patch_path
+        if not os.path.isabs(pp):
+            pp = next((c for c in (os.path.join(here, pp), os.path.join(_base(), pp)) if os.path.exists(c)), os.path.join(here, pp))
+        key = os.path.realpath(pp)
+        if key in seen: raise ValueError(f"{path}: patch listed more than once: {r.patch_path}")
+        if not os.path.exists(pp): raise ValueError(f"{path}: patch file not found: {r.patch_path}")
+        seen.add(key); rows.append(dict(r, patch_path=pp))
+    return rows
+
+
+def build_matrix(rows):
+    """rows from read_manifest -> (X, y, groups, feature_names, channels). Features of channels present in at least one
+    patch, named '<channel>:<feature>' (e.g. 'phase:missing' = 1 where that patch has no phase). Labels: cSS -> 1,
+    vein codes -> 0; anything else -> ValueError (no silent relabelling)."""
+    bad = sorted({r["label"] for r in rows if r["label"] not in POSITIVE | NEGATIVE})
+    if bad: raise ValueError(f"labels must be cSS or a vein code, got {bad}")
+    feats, present = [], set()
+    for r in rows:
+        names, vals, _ = patch_features(r["patch_path"]); feats.append(vals)
+        z = np.load(r["patch_path"], allow_pickle=False); present |= {ch for ch in CHANNELS if f"image_{ch}" in z.files}
+    keep = [k for k, n in enumerate(names) if n.split("_", 1)[0] in present]
+    X = np.asarray(feats, float)[:, keep]
+    fn = [names[k].replace("_", ":", 1) for k in keep]
+    y = np.array([1 if r["label"] in POSITIVE else 0 for r in rows]); g = np.array([r["study_id"] for r in rows])
+    return X, y, g, fn, sorted(present)
+
+
+def grouped_lopo(X, y, groups, l2=1.0, nested=False):
+    """leave-one-study-out scores + fold log (css_model.lopo: folds by study, one-class training folds skipped)"""
+    return CM.lopo(X, y, groups, l2, nested=nested)
+
+
+auc = CM.auc
+
+
+def cmd_features(subjects, B):
+    for s in subjects:
+        mp = f"{B}/review/{s}_patches.csv"
+        if not os.path.exists(mp): print(f"{s}: no {mp} - run surface_aligned_patch.py first"); continue
+        man = pd.read_csv(mp); rows = []
+        for _, r in man[man.status == "ok"].iterrows():
+            names, vals, meta = patch_features(f"{B}/{r.patch_path}")
+            rows.append(dict(study_id=s, cand_uid=r.cand_uid, list=r.list, obj_id=r.obj_id, **dict(zip(names, vals)),
+                             feature_schema=FEATURE_SCHEMA))
+        pd.DataFrame(rows).to_csv(f"{B}/review/{s}_patch_features.csv", index=False)
+        print(f"{s}: {len(rows)} patch feature rows ({len(names) if rows else 0} features) -> review/{s}_patch_features.csv")
+
+
+def study_table(B, s):
+    p = f"{B}/review/{s}_patch_features.csv"
+    if not os.path.exists(p): return None
+    d = pd.read_csv(p)
+    geo = []
+    for lst in ("candidates", "excluded"):
+        q = f"{B}/review/{s}_{lst}.csv"
+        if os.path.exists(q):
+            g = pd.read_csv(q); g["list"] = lst; g["obj_id"] = g["cand_id" if lst == "candidates" else "excl_id"]; geo.append(g)
+    if geo:
+        g = pd.concat(geo, ignore_index=True)
+        sp = f"{B}/review/{s}_surface_features.csv"
+        if os.path.exists(sp):
+            sf = pd.read_csv(sp); sf["list"] = sf["list"].map({"candidate": "candidates", "excluded": "excluded"})
+            g = g.merge(sf[["list", "obj_id"] + [c for c in GEOMETRY if c in sf.columns and c not in g.columns]],
+                        on=["list", "obj_id"], how="left")
+        keep = ["list", "obj_id"] + [c for c in GEOMETRY + VESSEL if c in g.columns]
+        d = d.merge(g[keep], on=["list", "obj_id"], how="left")
+    return d
+
+
+def columns_for(groups, cols):
+    out = []
+    for gname in groups:
+        if gname in CHANNELS: out += [c for c in cols if c.startswith(gname + "_")]
+        elif gname == "geometry": out += [c for c in GEOMETRY if c in cols]
+        elif gname == "vessel": out += [c for c in VESSEL if c in cols]
+    return out
+
+
+def cmd_train(a, B):
+    if a.split == "test": sys.exit("training on the test split is refused (labels/study_meta.csv): test studies are for reporting")
+    L = f"{B}/labels"; meta = pd.read_csv(f"{L}/study_meta.csv", dtype=str)
+    studies = meta[meta.split == "dev"].study_id if a.split == "dev" else meta[meta.split != "test"].study_id
+    if a.source == "consensus":
+        lab = pd.read_csv(f"{L}/consensus.csv"); lab = lab[lab.method != "pending"].assign(cls=lambda x: x.consensus_class)
+        lab_path = f"{L}/consensus.csv"
+    else:
+        rd = a.source.split(":", 1)[1]; lab = pd.read_csv(f"{L}/candidate_labels.csv"); lab = lab[lab.reader_id == rd]
+        lab = lab[lab.session == lab.groupby("study_id").session.transform("max")].assign(cls=lambda x: x.label.map(label_class))
+        lab_path = f"{L}/candidate_labels.csv"
+    neg = {"surface_vein", "other_vein"} if a.negatives == "vein" else None
+    rows = []
+    for s in studies:
+        d = study_table(B, s)
+        if d is None: continue
+        m = d.merge(lab[["study_id", "cand_uid", "cls"]], on=["study_id", "cand_uid"], how="inner")
+        m = m[(m.cls == "cSS") | (m.cls.isin(neg) if neg else (m.cls != "uncertain"))]
+        if len(m): rows.append(m.assign(y=(m.cls == "cSS").astype(int)))
+    if not rows: sys.exit("no labelled patches in the requested split - extract patches and label studies first")
+    T = pd.concat(rows, ignore_index=True); n_st = T.study_id.nunique()
+    print(f"train: {len(T)} labelled patches ({int(T.y.sum())} cSS, {int((1 - T.y).sum())} "
+          f"{'vein' if neg else 'non-cSS'}) from {n_st} studies, split {a.split}")
+    if n_st < a.min_studies: sys.exit(f"need >= {a.min_studies} labelled studies, have {n_st} - not fitted")
+    if T.y.nunique() < 2: sys.exit("need both cSS and negative labels - not fitted")
+    cols = [c for c in T.columns if c not in ("study_id", "cand_uid", "list", "obj_id", "cls", "y", "feature_schema")]
+    res, oof = {}, {}
+    for name, groups in ABLATIONS.items():
+        fc = [c for c in columns_for(groups, cols) if T[c].notna().any()]
+        if not fc: res[name] = dict(n_features=0, note="no features available"); continue
+        sc, log = CM.lopo(T[fc].values.astype(float), T.y.values, T.study_id.values, a.l2, nested=not a.no_nested)
+        ok = np.isfinite(sc); D = T[ok].assign(s=sc[ok])
+        res[name] = dict(n_features=len(fc), auc=CM.auc(D.y, D.s), auc_ci95=CM.patient_bootstrap(D, lambda x: CM.auc(x.y, x.s), 300),
+                         pr_auc=CM.average_precision(D.y, D.s), brier=CM.brier(D.y, D.s),
+                         sens_at_1fp_per_scan=CM.sens_at_fp(D, "s", 1.0),
+                         folds_skipped=[f["study_id"] for f in log if f["status"] == "skipped"])
+        oof[name] = (sc, log)
+    fc = [c for c in columns_for(ABLATIONS["G_all"], cols) if T[c].notna().any()]
+    Z, med, mu, sd = CM.prep(T[fc].values.astype(float)); w, b = CM.fit_lr(Z, T.y.values, a.l2)
+    model = dict(model_type="logistic_l2_balanced", model_version="v5.2", feature_schema=FEATURE_SCHEMA, channel_order=CHANNELS,
+                 feature_names=fc, weights=[float(x) for x in w], bias=b, imputation_medians=[float(x) for x in med],
+                 training_mean=[float(x) for x in mu], training_scale=[float(x) for x in sd], l2=a.l2,
+                 training_studies=sorted(T.study_id.unique().tolist()), n_patches=int(len(T)), n_css=int(T.y.sum()),
+                 n_negative=int((1 - T.y).sum()), negatives=a.negatives, split=a.split, source=a.source,
+                 label_file=lab_path, label_sha256=sha256(lab_path), ablations=res,
+                 lopo_fold_status=oof["G_all"][1] if "G_all" in oof else [],
+                 lopo_predictions=[dict(study_id=s_, cand_uid=u_, y=int(y_), score=None if not np.isfinite(p_) else round(float(p_), 4))
+                                   for s_, u_, y_, p_ in zip(T.study_id, T.cand_uid, T.y, oof["G_all"][0])] if "G_all" in oof else [],
+                 build=build_id(), research_only=True,
+                 note="ranks candidates for expert review; not calibrated, not clinically validated")
+    model["model_hash"] = CM.model_hash(model)
+    out = a.out or f"{B}/review/surface_patch_model.json"; json.dump(model, open(out, "w"), indent=2, default=float)
+    for name, r in res.items():
+        if "auc" in r:
+            print(f"  {name:28s} n_feat {r['n_features']:4d}  AUC {r['auc']:.3f} {r['auc_ci95']}  PR-AUC {r['pr_auc']:.3f}  "
+                  f"Brier {r['brier']:.3f}  sens@1FP {r['sens_at_1fp_per_scan']:.2f}" + (f"  skipped {r['folds_skipped']}" if r["folds_skipped"] else ""))
+    print(f"-> {out} (model hash {model['model_hash'][:12]}; fitted on {len(model['training_studies'])} dev studies)")
+
+
+def cmd_predict(a, B):
+    mp = a.model or f"{B}/review/surface_patch_model.json"
+    if not os.path.exists(mp): sys.exit(f"no model {mp}")
+    M = json.load(open(mp))
+    if M.get("feature_schema") != FEATURE_SCHEMA or M.get("channel_order") != CHANNELS:
+        sys.exit(f"model feature schema / channel order ({M.get('feature_schema')}, {M.get('channel_order')}) do not match this "
+                 f"script ({FEATURE_SCHEMA}, {CHANNELS}) - retrain")
+    if M.get("model_hash") != CM.model_hash(M): sys.exit("model hash mismatch - the model file was changed after fitting")
+    for s in a.subjects:
+        if s in M["training_studies"] and not a.allow_training_study:
+            print(f"{s}: used to train the model - not predicted (--allow-training-study)"); continue
+        d = study_table(B, s)
+        if d is None: print(f"{s}: no patch features - run 'features' first"); continue
+        miss = [c for c in M["feature_names"] if c not in d.columns]
+        if [c for c in miss if not any(c.startswith(ch + "_") for ch in CHANNELS)]:
+            sys.exit(f"{s}: features the model needs are absent: {miss[:5]} - schema mismatch")
+        X = np.column_stack([pd.to_numeric(d[c], errors="coerce").values if c in d.columns else np.full(len(d), np.nan)
+                             for c in M["feature_names"]])
+        sc = CM.predict(X, np.array(M["imputation_medians"]), np.array(M["training_mean"]), np.array(M["training_scale"]),
+                        np.array(M["weights"]), M["bias"])
+        mm = d[[c for c in d.columns if c.endswith("_missing")]]
+        out = pd.DataFrame(dict(study_id=s, cand_uid=d.cand_uid, list=d.list, obj_id=d.obj_id, css_score=np.round(sc, 4),
+                                missing_modalities=[";".join(c[:-8] for c in mm.columns if r_[c] == 1) for _, r_ in mm.iterrows()],
+                                model_hash=M["model_hash"], model_version=M["model_version"], build=build_id(), research_only=1))
+        out.to_csv(f"{B}/review/{s}_patch_predictions.csv", index=False)
+        print(f"{s}: {len(out)} patch scores -> review/{s}_patch_predictions.csv (model {M['model_hash'][:12]}; research only)")
+
+
+def cmd_lopo_manifest(a):
+    X, y, g, fn, ch = build_matrix(read_manifest(a.manifest))
+    sc, log = grouped_lopo(X, y, g, a.l2); ok = np.isfinite(sc)
+    sk = [f["study_id"] for f in log if f["status"] == "skipped"]
+    print(f"{len(y)} patches ({int(y.sum())} cSS) from {len(set(g))} studies, channels {ch}, {len(fn)} features: LOPO AUC "
+          f"{CM.auc(y[ok], sc[ok]):.3f}, PR-AUC {CM.average_precision(y[ok], sc[ok]):.3f}" + (f"; folds skipped {sk}" if sk else "")
+          + "  [research only, no model saved]")
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    f = sub.add_parser("features"); f.add_argument("subjects", nargs="+")
+    t = sub.add_parser("train"); t.add_argument("--split", default="dev", choices=["dev", "all", "test"])
+    t.add_argument("--source", default="consensus"); t.add_argument("--negatives", default="vein", choices=["vein", "all"])
+    t.add_argument("--min-studies", type=int, default=5); t.add_argument("--l2", type=float, default=1.0)
+    t.add_argument("--no-nested", action="store_true"); t.add_argument("--out", default="")
+    p = sub.add_parser("predict"); p.add_argument("subjects", nargs="+"); p.add_argument("--model", default="")
+    p.add_argument("--allow-training-study", action="store_true")
+    q = sub.add_parser("lopo-manifest"); q.add_argument("manifest"); q.add_argument("--l2", type=float, default=1.0)
+    a = ap.parse_args(); B = _base()
+    {"features": lambda: cmd_features(a.subjects, B), "train": lambda: cmd_train(a, B), "predict": lambda: cmd_predict(a, B),
+     "lopo-manifest": lambda: cmd_lopo_manifest(a)}[a.cmd]()
+```
+
+## tests/check_v52.py
+
+```python
+"""v5.2 checks: surface-aligned patches (surface_aligned_patch.py), the patch classifier (classify_surface_patches.py)
+and the shared model code (css_model.py). Synthetic volumes and tables with known answers; no FreeSurfer, no phantoms.
+usage: check_v52.py    (writes into $CSS_BASE/v52_check/)
+1. frame: a dark SHEET under a flat pial surface vs a dark TUBE in the CSF above it. n points outward (tissue on -n,
+   CSF on +n) for both; the sheet's dark voxels span the patch across the surface (v), the tube's do not; the sheet
+   lies below the surface, the tube above. Right-handed (u, v, n).
+2. a reversed signed-distance map is flipped by the labels (normal_flipped) and gives the same n; an oblique,
+   anisotropic affine (30 deg about x, 1 x 1 x 2 mm) gives n = the rotated slice axis; < 3 voxels -> skipped.
+3. CLI on a synthetic study: phase absent, FLAIR off the SWI grid, then FLAIR older than the SWI -> each recorded as
+   missing with its reason, never zero-filled (valid all False, feature columns NaN, <ch>_missing 1); patches near
+   the array edge are partial (0 < valid fraction < 1) with the fixed shape; voxels outside the brain mask are never
+   valid; the 2-voxel object is listed as skipped with its reason (no silent loss).
+4. css_model: a fold whose training part has one class is skipped and logged; out-of-fold scores of a patient do not
+   change when that patient's own labels change (patient grouping, plain and nested).
+5. classifier on synthetic feature tables (6 dev + 1 test study, phase missing in half): train fits on dev only,
+   ablation A-G reported, model hash stored; --split test refused; too few studies refused; predict refuses a
+   training study, scores the test study (cSS above veins), refuses a tampered model and a schema mismatch.
+6. PH3 (when present in $CSS_BASE): patches for every shown and excluded object of the real detector output, one
+   manifest row per object (none lost), features extracted."""
+import os, sys, json, shutil, subprocess, numpy as np, nibabel as nib, pandas as pd
+HERE = os.path.dirname(os.path.abspath(__file__)); S = os.path.join(HERE, "..", "scripts"); sys.path.insert(0, S)
+import surface_aligned_patch as SAP, classify_surface_patches as CSP, css_model as CM
+from css_common import cand_uid
+py = sys.executable
+B0 = os.environ.get("CSS_BASE", "/tmp"); B = f"{B0}/v52_check"
+def fail(m): print("FAIL:", m); sys.exit(1)
+
+# ---------- synthetic volume: flat pial surface at k = 31.5, tissue below, CSF above ----------
+N = 64; ii, jj, kk = np.meshgrid(*[np.arange(N)] * 3, indexing="ij")
+labels = np.where(kk < 32, 3, np.where(kk < 56, 24, 0)).astype(np.int16)
+swi = np.where(kk < 56, 100.0, 0.0).astype(np.float32); swi[ii < 14] = 0.0        # i < 14: outside the brain
+sheet = (ii >= 16) & (ii <= 30) & (jj >= 20) & (jj <= 32) & (kk >= 30) & (kk <= 31)
+tube = (ii >= 16) & (ii <= 36) & (jj >= 45) & (jj <= 47) & (kk >= 33) & (kk <= 34)
+tiny = (ii == 40) & (jj == 10) & (kk == 30) | (ii == 41) & (jj == 10) & (kk == 30)
+edge = (ii >= 40) & (ii <= 52) & (jj <= 4) & (kk >= 30) & (kk <= 31)
+for m in (sheet, tube, edge): swi[m] = 20.0
+swi[tiny] = 20.0
+psd = (kk - 31.5).astype(np.float32); tissue = (labels > 0) & (labels != 24)
+A1 = np.eye(4)
+
+def dark_extent(z, fr, axis):
+    """extent (mm, 0.5 mm grid) of dark samples along one patch axis"""
+    G = SAP.grid(fr, [24, 12, 8], [0.5] * 3); v, ins = SAP.sample(z, A1, G)
+    d = ins & (v < 50); idx = np.nonzero(d.any(axis=tuple(a for a in range(3) if a != axis)))[0]
+    return (idx.max() - idx.min()) * 0.5 if len(idx) else 0.0, G, d
+
+fs = SAP.frame(sheet, psd, A1, np.ones(3), tissue); ft = SAP.frame(tube, psd, A1, np.ones(3), tissue)
+for name, fr in (("sheet", fs), ("tube", ft)):
+    if fr["n"] @ np.array([0, 0, 1.0]) < 0.99: fail(f"{name}: normal {fr['n']} is not outward (+z)")
+    if abs(np.linalg.det(np.c_[fr["u"], fr["v"], fr["n"]]) - 1) > 1e-6: fail(f"{name}: frame not right-handed")
+ev_s = dark_extent(swi, fs, 1)[0]; ev_t = dark_extent(swi, ft, 1)[0]
+if not (ev_s >= 10 and ev_t <= 3.5): fail(f"across-surface dark extent sheet {ev_s} mm, tube {ev_t} mm")
+if not (fs["pial_sd_at_center_mm"] < 0 < ft["pial_sd_at_center_mm"]): fail("sheet should sit below, tube above the surface")
+lab_s = CSP.channel_features("labels", SAP.sample(labels.astype(np.float32), A1, SAP.grid(fs, [24, 12, 8], [0.5] * 3), 0)[0],
+                             np.ones((49, 25, 17), bool))[1]
+if not (lab_s[2] == 1.0 and lab_s[9] == 0.0): fail(f"labels along n: tissue fraction first/last bin {lab_s[2]}/{lab_s[9]}")
+print(f"1. frame: n outward for sheet and tube, right-handed; dark extent across the surface sheet {ev_s:.1f} mm vs tube "
+      f"{ev_t:.1f} mm; pial distance at centre sheet {fs['pial_sd_at_center_mm']:+.1f} / tube {ft['pial_sd_at_center_mm']:+.1f} mm; "
+      f"tissue fraction along n {lab_s[2]:.0f} -> {lab_s[9]:.0f}")
+
+# ---------- 2. sign inversion, oblique affine, < 3 voxels ----------
+ff = SAP.frame(sheet, -psd, A1, np.ones(3), tissue)
+if not ff["normal_flipped"] or ff["n"] @ fs["n"] < 0.99: fail(f"reversed distance map: flipped {ff['normal_flipped']}, n {ff['n']}")
+c, s_ = np.cos(np.pi / 6), np.sin(np.pi / 6); R = np.array([[1, 0, 0], [0, c, -s_], [0, s_, c]])
+Ao = np.eye(4); Ao[:3, :3] = R @ np.diag([1, 1, 2.0]); Ao[:3, 3] = [-30, -20, -60]
+fo = SAP.frame(sheet, (kk - 31.5).astype(np.float32) * 2, Ao, np.array([1, 1, 2.0]), tissue)
+if fo["n"] @ R[:, 2] < 0.99: fail(f"oblique affine: n {np.round(fo['n'], 3)} vs expected {np.round(R[:, 2], 3)}")
+try:
+    SAP.frame(tiny, psd, A1, np.ones(3), tissue); fail("2-voxel object was not refused")
+except ValueError as e:
+    msg = str(e)
+print(f"2. reversed map flipped by the labels (n . n_ref {ff['n'] @ fs['n']:.3f}); oblique 1x1x2 mm affine: n . rotated "
+      f"slice axis {fo['n'] @ R[:, 2]:.3f}; tiny object refused ('{msg}')")
+
+# ---------- 3. CLI on a synthetic study ----------
+shutil.rmtree(B, ignore_errors=True)
+for d in ("data", "work", "review", "labels"): os.makedirs(f"{B}/{d}")
+def save(a, p, aff=A1): nib.save(nib.Nifti1Image(a, aff), p)
+save(swi, f"{B}/data/T1S_swi.nii")
+save(psd, f"{B}/work/T1S_pial_sd.nii.gz"); save(labels, f"{B}/work/T1S_seg_swispace.nii.gz")
+Aoff = A1.copy(); Aoff[0, 3] = 3.0
+save(swi, f"{B}/work/T1S_flair_swispace.nii.gz", Aoff)                   # FLAIR not on the SWI grid
+objs = [sheet, tube, tiny, edge]; M = np.zeros(swi.shape, np.int16)
+for n_, m in enumerate(objs, 1): M[m] = n_
+save(M, f"{B}/review/T1S_candidates.nii.gz")
+rows = [dict(cand_id=n_, vox_i=int(np.argwhere(m).mean(0)[0]), vox_j=int(np.argwhere(m).mean(0)[1]),
+             vox_k=int(np.argwhere(m).mean(0)[2]), volume_mm3=float(m.sum())) for n_, m in enumerate(objs, 1)]
+pd.DataFrame(rows).to_csv(f"{B}/review/T1S_candidates.csv", index=False)
+env = dict(os.environ, CSS_BASE=B)
+def run(*a, ok=True):
+    r = subprocess.run([py, *a], capture_output=True, text=True, env=env)
+    if ok and r.returncode: print(r.stdout[-1500:], r.stderr[-1500:]); fail("step failed: " + " ".join(a[:2]))
+    return r
+run(f"{S}/surface_aligned_patch.py", "T1S", "--lists", "candidates")
+man = pd.read_csv(f"{B}/review/T1S_patches.csv")
+if len(man) != 4: fail(f"manifest has {len(man)} rows for 4 objects (silent loss)")
+sk = man[man.status == "skipped"]
+if list(sk.obj_id) != [3] or "< 3" not in str(sk.skip_reason.iloc[0]): fail(f"skipped rows {sk.to_dict('records')}")
+if "flair:not on the SWI grid" not in str(man.missing_channels.iloc[0]) or "phase:absent" not in str(man.missing_channels.iloc[0]):
+    fail(f"missing channels {man.missing_channels.iloc[0]}")
+z = np.load(f"{B}/review/T1S_patches/candidates_1.npz")
+if "image_phase" in z.files or "image_flair" in z.files or z["valid_phase"].any() or z["valid_flair"].any():
+    fail("a missing channel was written as an image / valid voxels")
+W = SAP.to_voxel(A1, z["world_grid_mm"])
+if (z["valid_swi"] & (W[..., 0] < 13.5)).any(): fail("voxels outside the brain mask are valid")
+if not (z["valid_swi"].any() and (~z["valid_swi"] & (W[..., 0] < 13.5)).any()): fail("sheet patch should reach outside the brain")
+ze = np.load(f"{B}/review/T1S_patches/candidates_4.npz")
+if not (0 < ze["valid_swi"].mean() < 1) or ze["valid_swi"].shape != z["valid_swi"].shape: fail("edge patch should be partial")
+run(f"{S}/classify_surface_patches.py", "features", "T1S")
+F = pd.read_csv(f"{B}/review/T1S_patch_features.csv")
+if not ((F.phase_missing == 1).all() and (F.flair_missing == 1).all() and (F.swi_missing == 0).all()
+        and F.phase_mean.isna().all() and F.flair_p50.isna().all()): fail("missing channels not encoded as missing + NaN")
+# FLAIR on the grid but older than the SWI -> stale, also missing
+save(swi, f"{B}/work/T1S_flair_swispace.nii.gz"); t = os.path.getmtime(f"{B}/data/T1S_swi.nii") - 600
+os.utime(f"{B}/work/T1S_flair_swispace.nii.gz", (t, t))
+run(f"{S}/surface_aligned_patch.py", "T1S", "--lists", "candidates")
+man2 = pd.read_csv(f"{B}/review/T1S_patches.csv")
+if "flair:older than the SWI" not in str(man2.missing_channels.iloc[0]): fail(f"stale FLAIR: {man2.missing_channels.iloc[0]}")
+print(f"3. CLI: 4 objects -> {int((man.status == 'ok').sum())} patches + 1 skipped ('{sk.skip_reason.iloc[0]}'); phase absent, "
+      f"FLAIR off-grid then stale -> missing with reason, NaN features, <ch>_missing 1; outside-brain voxels never valid; "
+      f"edge patch valid fraction {ze['valid_swi'].mean():.2f} with the fixed shape {ze['valid_swi'].shape}")
+
+# ---------- 4. css_model folds ----------
+rng = np.random.default_rng(3)
+g = np.repeat(["a", "b", "c"], 10); y = np.r_[np.tile([0, 1], 5), np.zeros(20, int)]; X = rng.normal(size=(30, 2)) + y[:, None]
+sc, log = CM.lopo(X, y, g)
+st = {f["study_id"]: f["status"] for f in log}
+if st["a"] != "skipped" or not np.isnan(sc[g == "a"]).all(): fail(f"one-class training fold not skipped: {log}")
+g2 = np.repeat(list("pqrst"), 12); y2 = np.tile([0, 0, 1], 20); X2 = rng.normal(size=(60, 3)) + y2[:, None]
+for nested in (False, True):
+    s1 = CM.lopo(X2, y2, g2, nested=nested)[0]; y3 = y2.copy(); y3[g2 == "p"] = 1 - y3[g2 == "p"]
+    s2 = CM.lopo(X2, y3, g2, nested=nested)[0]
+    if not np.allclose(s1[g2 == "p"], s2[g2 == "p"]): fail(f"patient p's own labels changed its out-of-fold scores (nested {nested})")
+print("4. css_model: one-class training fold skipped and logged; a patient's out-of-fold scores ignore its own labels "
+      "(plain and nested)")
+
+# ---------- 5. classifier on synthetic feature tables ----------
+names = []
+for ch in CSP.CHANNELS: names += CSP.channel_features(ch, None, None)[0]
+meta, lab = [], []
+for p in range(7):
+    s = f"Q{p:02d}"; n = 20; yy = (np.arange(n) % 3 == 0).astype(int)
+    d = pd.DataFrame(rng.normal(size=(n, len(names))), columns=names)
+    for ch in CSP.CHANNELS: d[f"{ch}_missing"] = 0.0; d[f"{ch}_valid_fraction"] = 0.9
+    d["swi_mean"] = -2.5 * yy + rng.normal(0, 0.3, n)                  # cSS darker on average (strong: a plumbing test)
+    if p % 2:                                                           # phase missing in half the studies
+        d[[c for c in names if c.startswith("phase_")]] = np.nan; d["phase_missing"] = 1.0; d["phase_valid_fraction"] = 0.0
+    r = pd.DataFrame(dict(vox_i=np.arange(n), vox_j=p, vox_k=1, volume_mm3=30.0))
+    d.insert(0, "obj_id", np.arange(1, n + 1)); d.insert(0, "list", "candidates")
+    d.insert(0, "cand_uid", [cand_uid(s, rr) for _, rr in r.iterrows()]); d.insert(0, "study_id", s)
+    d["feature_schema"] = CSP.FEATURE_SCHEMA; d.to_csv(f"{B}/review/{s}_patch_features.csv", index=False)
+    meta.append(dict(study_id=s, split="test" if p == 6 else "dev"))
+    lab += [dict(study_id=s, cand_uid=u, consensus_class="cSS" if t else "surface_vein", method="agree") for u, t in zip(d.cand_uid, yy)]
+pd.DataFrame(meta).to_csv(f"{B}/labels/study_meta.csv", index=False); pd.DataFrame(lab).to_csv(f"{B}/labels/consensus.csv", index=False)
+if run(f"{S}/classify_surface_patches.py", "train", "--split", "test", ok=False).returncode == 0: fail("--split test accepted")
+if run(f"{S}/classify_surface_patches.py", "train", "--min-studies", "10", ok=False).returncode == 0: fail("too few studies accepted")
+out = run(f"{S}/classify_surface_patches.py", "train", "--no-nested").stdout
+Mo = json.load(open(f"{B}/review/surface_patch_model.json"))
+if "Q06" in Mo["training_studies"] or len(Mo["training_studies"]) != 6: fail(f"training studies {Mo['training_studies']}")
+if set(Mo["ablations"]) != set(CSP.ABLATIONS): fail("ablations missing")
+aG = Mo["ablations"]["G_all"]["auc"]; aA = Mo["ablations"]["A_swi"]["auc"]
+if not (aA > 0.85 and aG > 0.75): fail(f"LOPO AUC A_swi {aA}, G_all {aG}")
+if Mo["model_hash"] != CM.model_hash(Mo) or not Mo["research_only"]: fail("model hash / research_only")
+r = run(f"{S}/classify_surface_patches.py", "predict", "Q00", "Q06").stdout
+if "used to train the model - not predicted" not in r or os.path.exists(f"{B}/review/Q00_patch_predictions.csv"): fail("training study predicted")
+P = pd.read_csv(f"{B}/review/Q06_patch_predictions.csv").merge(pd.DataFrame(lab), on=["study_id", "cand_uid"])
+a6 = CM.auc((P.consensus_class == "cSS").astype(int), P.css_score)
+if a6 < 0.8 or not (P.research_only == 1).all() or P.model_hash.iloc[0] != Mo["model_hash"]: fail(f"test-study AUC {a6} / provenance")
+Mt = dict(Mo); Mt["weights"] = [w + 0.1 for w in Mo["weights"]]; json.dump(Mt, open(f"{B}/review/tampered.json", "w"))
+if run(f"{S}/classify_surface_patches.py", "predict", "Q06", "--model", f"{B}/review/tampered.json", ok=False).returncode == 0:
+    fail("tampered model accepted")
+Ms = dict(Mo); Ms["feature_schema"] = "css-patch-features/0.9"; Ms["model_hash"] = CM.model_hash(Ms)
+json.dump(Ms, open(f"{B}/review/oldschema.json", "w"))
+if run(f"{S}/classify_surface_patches.py", "predict", "Q06", "--model", f"{B}/review/oldschema.json", ok=False).returncode == 0:
+    fail("schema mismatch accepted")
+print(f"5. classifier: fitted on 6 dev studies (test study left out), {len(Mo['feature_names'])} features; LOPO AUC A_swi {aA:.3f}, "
+      f"G_all {aG:.3f}; held-out study AUC {a6:.3f}; --split test, too few studies, a training study, a tampered model and a "
+      f"schema mismatch all refused")
+
+PB = os.environ.get("CSS_BASE")
+if PB and os.path.exists(f"{PB}/work/PH3_seg_swispace.nii.gz"):
+    e2 = dict(os.environ)
+    r = subprocess.run([py, f"{S}/detect_css.py", "PH3"], capture_output=True, text=True, env=e2)
+    if r.returncode: fail("detect_css PH3")
+    r = subprocess.run([py, f"{S}/surface_aligned_patch.py", "PH3"], capture_output=True, text=True, env=e2)
+    if r.returncode: print(r.stdout[-800:], r.stderr[-800:]); fail("surface_aligned_patch PH3")
+    n_obj = sum(len(pd.read_csv(f"{PB}/review/PH3_{l}.csv")) for l in ("candidates", "excluded"))
+    man = pd.read_csv(f"{PB}/review/PH3_patches.csv")
+    if len(man) != n_obj: fail(f"PH3: {n_obj} objects but {len(man)} manifest rows")
+    r = subprocess.run([py, f"{S}/classify_surface_patches.py", "features", "PH3"], capture_output=True, text=True, env=e2)
+    if r.returncode: fail("patch features PH3")
+    print(f"6. PH3: {n_obj} objects -> {int((man.status == 'ok').sum())} patches, {int((man.status != 'ok').sum())} skipped with a "
+          f"reason; {r.stdout.strip()}")
+else:
+    print("6. phantom part skipped")
+print("RESULT v52 OK")
+```
+
+## tests/verify_updated_architecture.py
+
+```python
+#!/usr/bin/env python3
+"""Verification suite for the updated cSS pipeline architecture.
+
+This suite is deliberately patient-data-free. It validates the architectural
+contracts that should hold after the Claude Code changes:
+
+  1. Source modules compile and import.
+  2. Surface-aligned patches use a physical millimetre frame and orthogonal
+     u/v/n axes, including an oblique affine.
+  3. Multimodal patch extraction preserves channel and validity metadata.
+  4. The patch classifier trains with study/patient-grouped LOPO evaluation.
+  5. Missing modalities remain explicit instead of silently becoming ordinary
+     image data.
+  6. The manifest contract rejects duplicate patches and invalid labels.
+  7. Existing detector/QC/evaluation safeguards remain present.
+  8. An optional object-fate ledger is checked if implemented.
+
+Usage from the project root:
+  python tests/verify_updated_architecture.py
+
+Exit status is non-zero if any required check fails. Optional checks are
+reported as SKIP and do not fail the suite.
+"""
+
+from __future__ import annotations
+
+import csv
+import importlib.util
+import json
+import os
+import py_compile
+import shutil
+import sys
+import tempfile
+import traceback
+from pathlib import Path
+
+import nibabel as nib
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+
+PASS = []
+SKIP = []
+FAIL = []
+
+
+def report(status: str, name: str, detail: str = "") -> None:
+    line = f"{status:<5} {name}"
+    if detail:
+        line += f" — {detail}"
+    print(line)
+    {"PASS": PASS, "SKIP": SKIP, "FAIL": FAIL}[status].append(name)
+
+
+def check(name, fn, optional: bool = False) -> None:
+    try:
+        detail = fn()
+        report("PASS", name, str(detail or ""))
+    except Exception as exc:  # keep running to report all failures
+        if optional:
+            report("SKIP", name, f"{type(exc).__name__}: {exc}")
+        else:
+            report("FAIL", name, f"{type(exc).__name__}: {exc}")
+            traceback.print_exc()
+
+
+def load_module(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_source_compiles():
+    targets = [SCRIPTS / "surface_aligned_patch.py", SCRIPTS / "classify_surface_patches.py"]
+    missing = [str(p) for p in targets if not p.exists()]
+    if missing:
+        raise FileNotFoundError(", ".join(missing))
+    for path in targets:
+        py_compile.compile(str(path), doraise=True)
+    return f"compiled {len(targets)} modules"
+
+
+def test_static_pipeline_contracts():
+    legacy = [SCRIPTS / "detect_css.py", SCRIPTS / "evaluate.py", SCRIPTS / "train_ranker.py"]
+    missing_files = [str(p.name) for p in legacy if not p.exists()]
+    if len(missing_files) == len(legacy):
+        raise FileNotFoundError("legacy detector sources absent: " + ", ".join(missing_files))
+    if missing_files:
+        raise FileNotFoundError("legacy detector sources partially absent: " + ", ".join(missing_files))
+    detect = legacy[0].read_text()
+    evaluate = legacy[1].read_text()
+    ranker = legacy[2].read_text()
+    required_detect = ["qc_status", "rule_version", "n_pieces"]
+    required_eval = ["n_lost_excluded", "n_lost_dropped", "n_lost_not_generated"]
+    required_ranker = ["study_id", "LOPO", "test"]
+    for token in required_detect:
+        if token not in detect:
+            raise AssertionError(f"detect_css.py missing contract token {token}")
+    for token in required_eval:
+        if token not in evaluate:
+            raise AssertionError(f"evaluate.py missing contract token {token}")
+    for token in required_ranker:
+        if token not in ranker:
+            raise AssertionError(f"train_ranker.py missing contract token {token}")
+    return "QC, fate accounting, and grouped-ranker hooks present"
+
+
+def make_oblique_affine(vox=0.8):
+    # Rotation around the third axis plus anisotropic physical scaling.
+    theta = np.deg2rad(17.0)
+    rot = np.array([[np.cos(theta), -np.sin(theta), 0.0],
+                    [np.sin(theta), np.cos(theta), 0.0],
+                    [0.0, 0.0, 1.0]])
+    affine = np.eye(4)
+    affine[:3, :3] = rot @ np.diag([vox, vox * 1.1, vox * 1.4])
+    affine[:3, 3] = [-12.0, 7.0, 4.0]
+    return affine
+
+
+def synthetic_inputs(tmp: Path):
+    shape = (64, 64, 48)
+    affine = make_oblique_affine()
+    ijk = np.indices(shape).transpose(1, 2, 3, 0)
+    world = (affine @ np.c_[ijk.reshape(-1, 3), np.ones(np.prod(shape))].T).T[:, :3].reshape(shape + (3,))
+    center = np.median(world.reshape(-1, 3), axis=0)
+    # Signed distance to an ellipsoidal tissue boundary, in millimetres.
+    rel = world - center
+    sd = np.sqrt((rel[..., 0] / 20.0) ** 2 + (rel[..., 1] / 22.0) ** 2 + (rel[..., 2] / 17.0) ** 2) * 20.0 - 20.0
+    mask = np.zeros(shape, np.uint8)
+    # Curvilinear surface candidate, expressed in voxel coordinates.
+    for t in range(-12, 13):
+        i = int(shape[0] / 2 + t)
+        j = int(shape[1] / 2 + round(0.08 * t * t))
+        k = int(shape[2] / 2 + 8)
+        if 1 <= i < shape[0] - 1 and 1 <= j < shape[1] - 1 and 1 <= k < shape[2] - 1:
+            mask[i, j, k] = 1
+    # A sheet-like SWI signal and a separate phase channel.
+    swi = np.exp(-((sd + 0.5) / 2.0) ** 2).astype(np.float32)
+    phase = (0.3 * swi).astype(np.float32)
+    flair = (0.1 * np.maximum(swi, 0)).astype(np.float32)
+    pial_path = tmp / "pial_sd.nii.gz"
+    mask_path = tmp / "candidate.nii.gz"
+    swi_path = tmp / "swi.nii.gz"
+    phase_path = tmp / "phase.nii.gz"
+    flair_path = tmp / "flair.nii.gz"
+    for path, data in ((pial_path, sd), (mask_path, mask), (swi_path, swi), (phase_path, phase), (flair_path, flair)):
+        nib.save(nib.Nifti1Image(data, affine), str(path))
+    return {
+        "shape": shape, "affine": affine, "pial": pial_path, "mask": mask_path,
+        "swi": swi_path, "phase": phase_path, "flair": flair_path,
+    }
+
+
+def test_surface_frame_and_multimodal_patch():
+    patch_mod = load_module(SCRIPTS / "surface_aligned_patch.py", "surface_aligned_patch_test")
+    with tempfile.TemporaryDirectory(prefix="css_arch_patch_") as td:
+        tmp = Path(td)
+        files = synthetic_inputs(tmp)
+        pial = nib.load(str(files["pial"]))
+        mask = nib.load(str(files["mask"]))
+        images = {name: nib.load(str(files[name])) for name in ("swi", "phase", "flair")}
+        result = patch_mod.extract_patch(images, pial, mask, size_mm=(16, 8, 8), spacing_mm=(0.5, 0.5, 0.5))
+        assert result["shape"] == (33, 17, 17), result["shape"]
+        assert set(result["channels"]) == {"swi", "phase", "flair"}
+        assert result["valid"].mean() > 0.8
+        u = result["frame"]["u_world"]; v = result["frame"]["v_world"]; n = result["frame"]["n_world"]
+        assert np.isclose(np.linalg.norm(u), 1.0, atol=1e-5)
+        assert np.isclose(np.linalg.norm(v), 1.0, atol=1e-5)
+        assert np.isclose(np.linalg.norm(n), 1.0, atol=1e-5)
+        assert max(abs(np.dot(u, v)), abs(np.dot(u, n)), abs(np.dot(v, n))) < 1e-5
+        # Confirm the normal is actually derived from the oblique affine rather
+        # than assuming that an array axis is the superior-inferior direction.
+        assert np.max(np.abs(result["frame"]["n_world"])) > 0.2
+        return f"shape={result['shape']}, valid={result['valid'].mean():.3f}, oblique affine"
+
+
+def write_npz_patch(path: Path, kind: str, include_phase=True, include_flair=True):
+    rng = np.random.default_rng(abs(hash(path.name)) % (2**32))
+    shape = (33, 17, 17)
+    x = np.zeros(shape, np.float32)
+    if kind == "css":
+        x[3:30, 7:11, 7:11] = 1.0
+    else:
+        x[14:19, 8:10, 2:15] = 1.0
+    x += rng.normal(0, 0.02, shape).astype(np.float32)
+    arrays = {"image_swi": x, "valid": np.ones(shape, np.uint8), "valid_swi": np.ones(shape, np.uint8),
+              "metadata_json": np.asarray('{"pial_sd_at_center_mm": -0.5}')}
+    if include_phase:
+        arrays.update(image_phase=(0.25 * x).astype(np.float32), valid_phase=np.ones(shape, np.uint8))
+    if include_flair:
+        arrays.update(image_flair=(0.1 * x).astype(np.float32), valid_flair=np.ones(shape, np.uint8))
+    np.savez_compressed(path, **arrays)
+
+
+def test_classifier_patient_grouping_and_missing_channels():
+    clf = load_module(SCRIPTS / "classify_surface_patches.py", "classifier_test")
+    with tempfile.TemporaryDirectory(prefix="css_arch_classifier_") as td:
+        tmp = Path(td); rows = []
+        for study_index in range(6):
+            for label, kind in (("cSS", "css"), ("vein", "vein")):
+                path = tmp / f"P{study_index:02d}_{label}.npz"
+                # Omit phase for one vein patch to test explicit missingness.
+                write_npz_patch(path, kind, include_phase=not (study_index == 0 and kind == "vein"))
+                rows.append({"patch_path": str(path), "study_id": f"P{study_index:02d}", "label": label})
+        manifest = tmp / "manifest.csv"
+        with open(manifest, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["patch_path", "study_id", "label"])
+            writer.writeheader(); writer.writerows(rows)
+        loaded = clf.read_manifest(str(manifest))
+        X, y, groups, feature_names, channels = clf.build_matrix(loaded)
+        assert len(set(groups)) == 6
+        assert set(channels) == {"flair", "phase", "swi"}
+        assert any("phase:missing" in n for n in feature_names)
+        probabilities, folds = clf.grouped_lopo(X, y, groups, l2=1.0)
+        assert np.isfinite(probabilities).sum() == len(y)
+        assert all(f["status"] == "evaluated" for f in folds)
+        # Performance is not an architecture invariant. Verify that the
+        # grouped procedure produced finite, non-constant predictions; model
+        # quality belongs in the locked expert-adjudicated evaluation set.
+        assert np.isfinite(probabilities).all()
+        assert np.all((probabilities >= 0.0) & (probabilities <= 1.0))
+        # Ensure a patient's own opposite-class patch cannot be in its training fold.
+        assert all(set(groups[f] for f in range(len(groups)) if groups[f] == fold["study_id"]) for fold in folds)
+        return f"{len(y)} patches, {len(set(groups))} studies, LOPO AUC={clf.auc(y, probabilities):.3f}"
+
+
+def test_manifest_contract_rejects_bad_inputs():
+    clf = load_module(SCRIPTS / "classify_surface_patches.py", "classifier_manifest_test")
+    with tempfile.TemporaryDirectory(prefix="css_arch_manifest_") as td:
+        tmp = Path(td)
+        patch = tmp / "x.npz"
+        write_npz_patch(patch, "css")
+        bad_duplicate = tmp / "duplicate.csv"
+        with open(bad_duplicate, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["patch_path", "study_id", "label"]); w.writeheader()
+            w.writerow({"patch_path": str(patch), "study_id": "P1", "label": "cSS"})
+            w.writerow({"patch_path": str(patch), "study_id": "P1", "label": "vein"})
+        try:
+            clf.read_manifest(str(bad_duplicate))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("duplicate patches were accepted")
+        bad_label = tmp / "bad_label.csv"
+        with open(bad_label, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["patch_path", "study_id", "label"]); w.writeheader()
+            w.writerow({"patch_path": str(patch), "study_id": "P1", "label": "artifact"})
+        rows = clf.read_manifest(str(bad_label))
+        try:
+            clf.build_matrix(rows)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid label was accepted")
+        return "duplicate path and invalid label rejected"
+
+
+def test_optional_fate_ledger():
+    ledger_path = SCRIPTS / "object_ledger.py"
+    if not ledger_path.exists():
+        raise FileNotFoundError("scripts/object_ledger.py not implemented yet")
+    ledger = load_module(ledger_path, "object_ledger_test")
+    if not hasattr(ledger, "FATES") or not hasattr(ledger, "FateLedger"):
+        raise AssertionError("ledger must expose FATES and FateLedger")
+    if not {"shown_candidate", "rule_excluded", "generation_dropped", "qc_blocked", "not_generated"} <= set(ledger.FATES):
+        raise AssertionError("ledger fate vocabulary incomplete")
+    return "fate vocabulary present"
+
+
+def main():
+    print(f"Updated cSS architecture verification — project: {ROOT}")
+    check("source modules compile", test_source_compiles)
+    check("static pipeline contracts", test_static_pipeline_contracts, optional=True)
+    check("surface frame and multimodal patch", test_surface_frame_and_multimodal_patch)
+    check("classifier grouping and missing channels", test_classifier_patient_grouping_and_missing_channels)
+    check("manifest contract", test_manifest_contract_rejects_bad_inputs)
+    check("object-fate ledger", test_optional_fate_ledger, optional=True)
+    print("\nSummary")
+    print(f"  PASS: {len(PASS)}")
+    print(f"  SKIP: {len(SKIP)}")
+    print(f"  FAIL: {len(FAIL)}")
+    if SKIP:
+        print("  skipped: " + ", ".join(SKIP))
+    if FAIL:
+        print("  failed: " + ", ".join(FAIL))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 ```

@@ -12,18 +12,22 @@ What it does:
     (recon-all route) when present. A feature missing from every training row is dropped with a warning;
     missing values are filled with the training median. Deprecated columns (vein_tree_mm, mirror_dark_frac,
     branch_per10mm) and the scores (score, score_v3, score_v4) are NOT features.
-  - model: L2-regularised logistic regression (scipy.optimize.minimize, L-BFGS), class-balanced weights,
-    features median-imputed and standardised. Leave-one-patient-out (LOPO) cross-validation: imputation and
-    standardisation are refitted inside every fold. Reported: pooled LOPO AUC of the model AND of score_v4 on
-    the same rows (the baseline it must beat), each with a patient-bootstrap 95 % interval, and per-patient
-    numbers. The final model is then fitted on all training rows.
+  - model: L2-regularised logistic regression (css_model.py, L-BFGS), class-balanced weights, features
+    median-imputed and standardised. Leave-one-patient-out (LOPO) cross-validation: imputation and
+    standardisation are refitted inside every fold; v5.2: the L2 strength is chosen by an inner LOPO inside each
+    training fold (--no-nested: fixed --l2), folds whose training part has one class are skipped and logged.
+    Reported on the same folds: the model, score_v4 (the baseline it must beat) and one-family models (darkness
+    only, vessel only): AUC with a patient-bootstrap 95 % interval, PR-AUC, sensitivity at 1 and 3 FP per scan,
+    Brier (fitted models only); per-patient AUCs. The final model is fitted on all training rows; the JSON
+    carries a model hash, the build and research_only; review/ranker_model_card.md summarises it.
 Needs >= --min-patients labelled patients with >= 1 positive and >= 1 negative row overall; stops otherwise.
 With fewer than ~10 patients every number here is noisy: read the intervals, not the point estimates.
 rank_candidates.py applies the model. Research software, not for clinical use."""
 import sys, os, json, argparse, numpy as np, pandas as pd
 from scipy.optimize import minimize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, cand_uid, label_class, FP, use_derived, sha256
+from css_common import base as _base, cand_uid, label_class, FP, use_derived, sha256, build_id
+import css_model as CM
 
 FEATURES = [
     # darkness and pial position
@@ -92,42 +96,34 @@ def add_missing(d):
     return d
 
 
-def prep(X, med=None, mu=None, sd=None):
-    """median imputation + standardisation; parameters from X unless given"""
-    X = np.asarray(X, float)
-    if med is None: med = np.nanmedian(X, axis=0); med = np.where(np.isfinite(med), med, 0.0)
-    X = np.where(np.isfinite(X), X, med)
-    if mu is None: mu = X.mean(0); sd = X.std(0); sd = np.where(sd > 1e-9, sd, 1.0)
-    return (X - mu) / sd, med, mu, sd
+def write_card(M, path):
+    """v5.2 model card: what was fitted, on what, how it was evaluated, and what it must not be used for"""
+    ev = M["evaluation"]; L = [f"# Candidate ranking model card ({M['version']})", "",
+         "Research software. Ranks detector objects for EXPERT REVIEW; not a diagnosis, not a calibrated probability, "
+         "not clinically validated. Every report needs expert review.", "",
+         f"- fitted: {M['fitted_at']}, build {M['build']}, model hash `{M['model_hash']}`",
+         f"- training: {M['n_objects']} labelled objects ({M['n_css']} cSS) from {M['n_patients']} patients, split "
+         f"`{M['split']}` (test split never used), labels `{M['source']}` (sha256 {str(M['label_sha256'])[:12]})",
+         f"- model: class-balanced L2 logistic regression, {len(M['features'])} features, L2 {M['l2']} ({M['l2_selection']})",
+         f"- dropped features (absent in all training rows): {', '.join(M['dropped_features']) or 'none'}",
+         "- missing T1 / FLAIR / phase / surface inputs enter as indicator features before median imputation", "",
+         "## Leave-one-patient-out evaluation (same folds for every row)", "",
+         "| scorer | AUC | 95 % CI (patient bootstrap) | PR-AUC | sens @ 1 FP/scan | sens @ 3 FP/scan | Brier |",
+         "|---|---|---|---|---|---|---|"]
+    for k, e in ev.items():
+        L.append(f"| {k} | {e.get('auc')} | {e.get('auc_ci95')} | {e.get('pr_auc')} | {e.get('sens_at_1fp_per_scan')} | "
+                 f"{e.get('sens_at_3fp_per_scan')} | {e.get('brier') if e.get('brier') is not None else '-'} |")
+    sk = [f["study_id"] for f in M["lopo_fold_status"] if f["status"] == "skipped"]
+    L += ["", f"Folds skipped (training part had one class): {', '.join(sk) or 'none'}.",
+          "Brier is given for the fitted models only; score_v4 is a rule score, not a probability.", "",
+          "## Limits", "", "- few patients: read the intervals, not the point estimates",
+          "- the model must beat score_v4 on held-out TEST studies (evaluate.py) before it changes any reading order by default",
+          "- labels from one reader carry that reader's bias; consensus labels are preferred",
+          "- not applied to its own training studies (rank_candidates.py refuses them)"]
+    open(path, "w").write("\n".join(L) + "\n"); return path
 
 
-def fit_lr(Z, y, l2):
-    """class-balanced L2 logistic regression -> (w, b)"""
-    w_pos = 0.5 / max(y.mean(), 1e-9); w_neg = 0.5 / max(1 - y.mean(), 1e-9)
-    cw = np.where(y == 1, w_pos, w_neg)
-    def f(p):
-        w, b = p[:-1], p[-1]; t = Z @ w + b
-        ll = cw * (np.logaddexp(0, t) - y * t)
-        g = cw * (1 / (1 + np.exp(-t)) - y)
-        return ll.sum() / len(y) + 0.5 * l2 * (w @ w) / len(y), \
-            np.r_[Z.T @ g / len(y) + l2 * w / len(y), g.sum() / len(y)]
-    r = minimize(f, np.zeros(Z.shape[1] + 1), jac=True, method="L-BFGS-B")
-    return r.x[:-1], float(r.x[-1])
-
-
-def auc(y, s):
-    y = np.asarray(y); s = np.asarray(s, float); pos, neg = s[y == 1], s[y == 0]
-    if not len(pos) or not len(neg): return np.nan
-    return float(((pos[:, None] > neg[None, :]).sum() + 0.5 * (pos[:, None] == neg[None, :]).sum()) / (len(pos) * len(neg)))
-
-
-def boot_auc(df, col, n, rng):
-    pats = df.study_id.unique(); vals = []
-    for _ in range(n):
-        pick = rng.choice(pats, len(pats), replace=True)
-        d = pd.concat([df[df.study_id == p] for p in pick]); vals.append(auc(d.y, d[col]))
-    v = np.array([x for x in vals if np.isfinite(x)])
-    return [round(float(np.percentile(v, 2.5)), 3), round(float(np.percentile(v, 97.5)), 3)] if len(v) else [None, None]
+prep, fit_lr, auc = CM.prep, CM.fit_lr, CM.auc          # v5.2: shared with classify_surface_patches.py
 
 
 if __name__ == "__main__":
@@ -136,6 +132,7 @@ if __name__ == "__main__":
     ap.add_argument("--source", default="consensus"); ap.add_argument("--l2", type=float, default=1.0)
     ap.add_argument("--min-patients", type=int, default=3); ap.add_argument("--boot", type=int, default=500)
     ap.add_argument("--seed", type=int, default=1); ap.add_argument("--out", default="")
+    ap.add_argument("--no-nested", action="store_true", help="fixed --l2 instead of nested LOPO selection")
     a = ap.parse_args(); B = _base(); L = f"{B}/labels"
     out = a.out or f"{B}/review/ranker_model.json"
     meta = pd.read_csv(f"{L}/study_meta.csv", dtype=str)
@@ -162,29 +159,50 @@ if __name__ == "__main__":
     feats = [f for f in FEATURES if f in T.columns and T[f].notna().any()]
     gone = [f for f in FEATURES if f not in feats]
     if gone: print(f"warning: {len(gone)} features not available in any training row, dropped: {', '.join(gone)}")
-    X = T[feats].apply(pd.to_numeric, errors="coerce").values.astype(float); y = T.y.values
-    # leave-one-patient-out: imputation + scaling refitted inside every fold
-    T["score_lopo"] = np.nan
-    for p in T.study_id.unique():
-        tr, te = (T.study_id != p).values, (T.study_id == p).values
-        if y[tr].min() == y[tr].max(): continue
-        Ztr, med, mu, sd = prep(X[tr]); w, b = fit_lr(Ztr, y[tr], a.l2)
-        T.loc[te, "score_lopo"] = 1 / (1 + np.exp(-(prep(X[te], med, mu, sd)[0] @ w + b)))
+    X = T[feats].apply(pd.to_numeric, errors="coerce").values.astype(float); y = T.y.values; g = T.study_id.values
+    # v5.2: leave-one-patient-out via css_model (imputation + scaling refitted inside every fold; L2 chosen by an inner
+    # LOPO unless --no-nested; folds whose training part has one class are skipped and logged, never filled in)
+    sc, fold_log = CM.lopo(X, y, g, a.l2, nested=not a.no_nested); T["score_lopo"] = sc
     base_col = "score_v4" if "score_v4" in T.columns else "score"
-    rng = np.random.default_rng(a.seed); ok = T.score_lopo.notna()
-    auc_m, auc_b = auc(T.y[ok], T.score_lopo[ok]), auc(T.y[ok], T[base_col][ok])
-    ci_m = boot_auc(T[ok], "score_lopo", a.boot, rng); ci_b = boot_auc(T[ok], base_col, a.boot, rng)
+    # baselines on the same folds: the v4 rule score as it is, and one-family models (darkness only, vessel only)
+    fam = {"darkness_only": [f for f in ("darkness_z", "edge_contrast") if f in feats],
+           "vessel_only": [f for f in ("tube_ratio", "vessel_wm_mm", "local_cont_max_mm", "local_cont_min_mm",
+                                       "terminal_ends", "net_radius_med_mm") if f in feats]}
+    for k, fs in fam.items():
+        T[f"score_{k}"] = CM.lopo(T[fs].apply(pd.to_numeric, errors="coerce").values.astype(float), y, g, a.l2)[0] if fs else np.nan
+    ok = T.score_lopo.notna()
+    fitted = {"score_lopo"} | {f"score_{k}" for k in fam}           # Brier only for fitted models, not rule scores
+    def metrics(col):
+        D = T[ok].assign(s=pd.to_numeric(T[col][ok], errors="coerce"))
+        D = D[D.s.notna()]
+        if not len(D): return dict(auc=None)
+        r = lambda v: None if v is None or not np.isfinite(v) else round(float(v), 3)
+        return dict(auc=r(CM.auc(D.y, D.s)), auc_ci95=CM.patient_bootstrap(D, lambda x: CM.auc(x.y, x.s), a.boot, a.seed),
+                    pr_auc=r(CM.average_precision(D.y, D.s)), sens_at_1fp_per_scan=r(CM.sens_at_fp(D, "s", 1.0)),
+                    sens_at_3fp_per_scan=r(CM.sens_at_fp(D, "s", 3.0)),
+                    brier=r(CM.brier(D.y, D.s)) if col in fitted else None)
+    evals = {"model": metrics("score_lopo"), base_col: metrics(base_col),
+             **{k: metrics(f"score_{k}") for k, fs in fam.items() if fs}}
+    auc_m, ci_m = evals["model"]["auc"], evals["model"].get("auc_ci95"); auc_b, ci_b = evals[base_col]["auc"], evals[base_col].get("auc_ci95")
     per = [dict(study_id=p, n=int((T.study_id == p).sum()), n_css=int(T.y[T.study_id == p].sum()),
-                auc_model=auc(T.y[T.study_id == p], T.score_lopo[T.study_id == p]),
-                auc_score_v4=auc(T.y[T.study_id == p], T[base_col][T.study_id == p])) for p in T.study_id.unique()]
-    Z, med, mu, sd = prep(X); w, b = fit_lr(Z, y, a.l2)
-    model = dict(model="logistic_l2_balanced", version="v5.0", fitted_at=pd.Timestamp.now().isoformat(timespec="seconds"),
+                auc_model=CM.auc(T.y[T.study_id == p], T.score_lopo[T.study_id == p]),
+                auc_score_v4=CM.auc(T.y[T.study_id == p], T[base_col][T.study_id == p])) for p in T.study_id.unique()]
+    l2_final = a.l2
+    if not a.no_nested:                                   # the final model's L2 by LOPO over all training studies
+        best = (-1, a.l2)
+        for cand in CM.L2_GRID:
+            s_in = CM.lopo(X, y, g, cand)[0]; f_ = np.isfinite(s_in); v = CM.auc(y[f_], s_in[f_])
+            if np.isfinite(v) and v > best[0]: best = (v, cand)
+        l2_final = best[1]
+    Z, med, mu, sd = prep(X); w, b = fit_lr(Z, y, l2_final)
+    model = dict(model="logistic_l2_balanced", version="v5.2", fitted_at=pd.Timestamp.now().isoformat(timespec="seconds"),
                  features=feats, weights=[round(float(v), 6) for v in w], bias=round(b, 6),
                  impute_median=[float(v) for v in med], mean=[float(v) for v in mu], sd=[float(v) for v in sd],
-                 l2=a.l2, split=a.split, source=a.source, training_studies=sorted(T.study_id.unique().tolist()),
+                 l2=l2_final, l2_selection="nested LOPO over " + str(list(CM.L2_GRID)) if not a.no_nested else "fixed",
+                 split=a.split, source=a.source, training_studies=sorted(T.study_id.unique().tolist()),
                  n_objects=int(len(T)), n_css=int(T.y.sum()), n_patients=int(n_pat),
-                 lopo_auc=None if not np.isfinite(auc_m) else round(auc_m, 3), lopo_auc_ci95=ci_m,
-                 baseline=base_col, baseline_auc=None if not np.isfinite(auc_b) else round(auc_b, 3), baseline_auc_ci95=ci_b,
+                 lopo_auc=auc_m, lopo_auc_ci95=ci_m, baseline=base_col, baseline_auc=auc_b, baseline_auc_ci95=ci_b,
+                 evaluation=evals, lopo_fold_status=fold_log,
                  per_patient=[{k: (round(v, 3) if isinstance(v, float) and np.isfinite(v) else (None if isinstance(v, float) else v))
                                for k, v in r.items()} for r in per],
                  dropped_features=gone,
@@ -193,11 +211,19 @@ if __name__ == "__main__":
                                               .get("environment", {}) or {}).get("build", "unknown"))
                                          if os.path.exists(f"{B}/review/{s}_manifest.json") else "unknown"
                                          for s in T.study_id.unique()}),
-                 label_file=lab_path, label_sha256=sha256(lab_path),
+                 label_file=lab_path, label_sha256=sha256(lab_path), build=build_id(), research_only=True,
                  note="research software; pooled LOPO AUC over few patients is noisy - read the intervals")
+    model["model_hash"] = CM.model_hash({k: v for k, v in model.items() if k != "fitted_at"})
     os.makedirs(os.path.dirname(out), exist_ok=True)
     json.dump(model, open(out, "w"), indent=2)
     top = sorted(zip(feats, w), key=lambda t: -abs(t[1]))[:8]
     print(f"LOPO AUC model {model['lopo_auc']} {ci_m} vs {base_col} {model['baseline_auc']} {ci_b} (patient bootstrap 95 %)")
     print("largest standardised weights: " + ", ".join(f"{f} {v:+.2f}" for f, v in top))
+    for k, e in evals.items():
+        print(f"  {k:14s} AUC {e.get('auc')} {e.get('auc_ci95')}  PR-AUC {e.get('pr_auc')}  sens@1FP/scan {e.get('sens_at_1fp_per_scan')}"
+              + (f"  Brier {e['brier']}" if e.get("brier") is not None else ""))
+    sk = [f["study_id"] for f in fold_log if f["status"] == "skipped"]
+    if sk: print(f"  LOPO folds skipped (training part had one class): {', '.join(sk)}")
+    card = write_card(model, os.path.join(os.path.dirname(out), "ranker_model_card.md"))
+    print(f"model card -> {card} (model hash {model['model_hash'][:12]})")
     print(f"-> {out}   (apply: rank_candidates.py SUBJECT; never trained on test-split studies)")
