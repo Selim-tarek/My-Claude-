@@ -73,7 +73,7 @@ from skimage.measure import regionprops
 from skimage.morphology import skeletonize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from css_common import base as _base, load_lut, fresh, sha256, update_manifest, environment_record, skeleton_length, radius_profile
-import css_qc, css_vessel, mimic_rules, css_pieces
+import css_qc, css_vessel, mimic_rules, css_pieces, css_features
 
 subj   = sys.argv[1]
 z_thr  = float(sys.argv[2]) if len(sys.argv) > 2 else -2.5
@@ -171,6 +171,9 @@ tissue = ndi.binary_fill_holes(brain & (seg > 0) & ~np.isin(seg, CSF))    # fill
 # v4.17: CSF = brain voxels that are not labelled tissue. SynthSeg labels extracerebral/sulcal CSF 24, but
 # recon-all aparc+aseg leaves sulcal CSF unlabelled (0) and uses 24 for a small basal region only
 csf_space = brain & ~tissue
+# v5.1.2 feature-spec maps (css_features.py, recorded only): distance into the CSF, near-CSF, depth below the crowns
+CSF_DEPTH, NEAR_CSF = css_features.csf_maps(csf_space, vox)
+SULC_D = css_features.sulcal_depth_map(tissue, vox)
 surface = (~brain) | csf_space
 near_surface = ndi.binary_dilation(surface, structure=s2d, iterations=it)
 pial_sd = (ndi.distance_transform_edt(~tissue, sampling=vox)
@@ -649,11 +652,13 @@ for p in regionprops(lab, spacing=vox):
     ring2 = ndi.binary_dilation(mm, structure=s3, iterations=2) & ~mm & brain[pad]
     edge_c = float(np.median(z[pad][ring2]) - np.median(z[pad][mm])) if ring2.any() else np.nan
     idist = float(ich_dist[pad][mm].min())
-    fz = fcz = np.nan
+    fz = fcz = fbf = np.nan
     if FL is not None:
         near3 = ndi.binary_dilation(mm, structure=s3, iterations=max(1, int(round(3 / vox[0])))) & (FL[pad] > 0)
         ring = near3 & (pial_sd[pad] > 0.5)                       # sulcal CSF: acute convexity SAH
-        if ring.sum() >= 5: fz = float(np.median((FL[pad][ring] - f_mu) / f_sd))
+        if ring.sum() >= 5:
+            fz = float(np.median((FL[pad][ring] - f_mu) / f_sd))
+            fbf = float((((FL[pad][ring] - f_mu) / f_sd) > 3.0).mean())   # v5.1.2 share of bright CSF samples
         ctxn = near3 & cortex[pad]                                # cortex: oedema of cortical vein thrombosis
         if ctxn.sum() >= 5: fcz = float(np.median((FL[pad][ctxn] - fc_mu) / f_sd))
     mim = MIM.evaluate(mm, pad, tissue[pad], fz, fcz, dark_pad=z[pad] < Z_LOW)   # v5.0, recorded; acts only with CSS_USE_MIMIC=1
@@ -670,6 +675,12 @@ for p in regionprops(lab, spacing=vox):
                  mirror_valid_frac=mirror_valid(pts),
                  missing_t1_anatomy=int(not T1_ANAT), missing_flair_features=int(FL is None),
                  missing_phase_features=int(MIM.hp is None))
+    # v5.1.2 feature-spec families (css_features.py; recorded only)
+    feat = dict(css_features.position_features(mm, pial_sd[pad], CSF_DEPTH[pad], NEAR_CSF[pad], SULC_D[pad]),
+                **css_features.compactness_features(mm, vox), **css_features.path_features(mm, vox),
+                **css_features.darkness_features(z[pad][mm]), flair_csf_bright_frac=round(fbf, 2) if np.isfinite(fbf) else np.nan)
+    feat["feature_qc_flags"] = css_features.qc_flags({**piece, **mim})
+    feat["feature_schema_version"] = css_features.FEATURE_SCHEMA
     longs     = bool(n_sl * vox[2] > 40.0)    # > 40 mm top-to-bottom (sinus / large veins)
     # v3 score (kept for comparison)
     s3_ = depth * (0.25 + contact) * np.log1p(vol)
@@ -721,7 +732,7 @@ for p in regionprops(lab, spacing=vox):
                      basal_frac=round(float((d_basal[pad][mm] <= BASAL_MM).mean()), 2),
                      vessel_ext_mm=round(ves_ext, 1), vessel_wm_mm=round(ves_wm, 1), vessel_run_mm=round(min(ves_run, VES_REACH_MM), 1), axis_normal=round(axn, 2),
                      score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label,
-                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1, **vt, **rad, **rref, **{k: v for k, v in mim.items() if not k.startswith('_')}, **piece))
+                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1, **vt, **rad, **rref, **{k: v for k, v in mim.items() if not k.startswith('_')}, **piece, **feat))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
 cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongation",
@@ -745,7 +756,13 @@ V50_COLS = ["mimic_score", "mimic_class", "mimic_reason", "phase_z", "mb_cluster
             # v5.1.1: per-piece evidence of merged objects, valid-sample fractions, missing inputs
             "piece_vol_vox", "piece_pial_mm", "piece_tube", "piece_vein_frac", "mixed_object", "mixed_object_review",
             "merge_gap_mm", "ref_valid_frac", "mirror_valid_frac", "region_n_vox",
-            "missing_t1_anatomy", "missing_flair_features", "missing_phase_features"]
+            "missing_t1_anatomy", "missing_flair_features", "missing_phase_features",
+            # v5.1.2 feature-spec families (css_features.py, mimic_rules.py), recorded only
+            "phase_valid_frac", "phase_polarity_frac", "pial_sd_p10_mm", "pial_sd_p90_mm", "surface_contact_frac_1mm",
+            "surface_contact_frac_2mm", "csf_adjacent_frac", "csf_depth_mm", "sulcal_depth_mm",
+            "equivalent_sphere_diameter_mm", "compactness_3d", "sphericity", "elongation_3d", "flatness_3d",
+            "path_length_mm", "tortuosity", "darkness_z_p10", "dark_frac_z2", "dark_frac_z3", "dark_frac_z4",
+            "flair_csf_bright_frac", "feature_qc_flags", "feature_schema_version"]
 cols = cols + V50_COLS
 
 # ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason

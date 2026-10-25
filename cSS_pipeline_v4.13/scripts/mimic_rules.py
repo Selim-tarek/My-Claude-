@@ -167,9 +167,14 @@ class MimicRejector:
         # fit on the shell AROUND the candidate: inside a strong deposit the phase wraps past pi (a paramagnetic sheet
         # flat to B0 at 0.5 ppm reaches 5.5 rad at 3 T, TE 20 ms) and the homodyne filter folds it to the wrong sign;
         # the field outside is weaker. Voxels already near +-pi are left out as possibly wrapped.
-        reg = ndi.binary_dilation(cm, iterations=FIT_SHELL_VOX) & ~cm & self.brain[box] \
-            & (np.abs(self.hp[box]) < WRAP_RAD)
+        shell = ndi.binary_dilation(cm, iterations=FIT_SHELL_VOX) & ~cm & self.brain[box]
+        reg = shell & (np.abs(self.hp[box]) < WRAP_RAD)
         a, t, r = fit_amplitude(self.hp[box][reg], pred[reg])
+        # v5.1.2: share of the shell usable for the fit (not possibly wrapped) and polarity consistency = share of
+        # informative fit voxels whose observed phase sign agrees with the fitted pattern
+        self._valid = float(reg.sum() / max(shell.sum(), 1))
+        inf = reg & (np.abs(pred) > 0.1 * np.abs(pred[reg]).max()) if reg.any() and np.abs(pred[reg]).max() > 0 else reg
+        self._polar = float((np.sign(self.hp[box][inf]) == np.sign(a * pred[inf])).mean()) if inf.any() and np.isfinite(a) else np.nan
         return (self.conv * t if np.isfinite(t) else np.nan), (self.conv * r if np.isfinite(r) else np.nan)
 
     def evaluate(self, mm, pad, tissue_pad, fz, fcz, dark_pad=None):
@@ -177,6 +182,7 @@ class MimicRejector:
         The microbleed rule looks at the dark voxels within 2 voxels of the candidate, not at the candidate mask
         itself: the detector's mask is the ridge-filtered (thinned) dark region, in which round microbleeds no
         longer look round (PHM phantom: a row of 4 microbleeds became one candidate with 0 countable blobs)."""
+        self._valid, self._polar = np.nan, np.nan
         pz, pr = self.phase_evidence(mm, pad)
         support = mm if dark_pad is None else (mm | (ndi.binary_dilation(mm, iterations=2) & dark_pad))
         calc = 0.0; why = []
@@ -191,4 +197,6 @@ class MimicRejector:
         return dict(mimic_score=round(sc, 2), mimic_class=cls if sc > 0 else "none", mimic_reason="; ".join(why),
                     phase_z=round(pz, 2) if np.isfinite(pz) else np.nan,
                     phase_r=round(pr, 2) if np.isfinite(pr) else np.nan, mb_cluster_n=int(mn),
+                    phase_valid_frac=round(self._valid, 2) if np.isfinite(self._valid) else np.nan,
+                    phase_polarity_frac=round(self._polar, 2) if np.isfinite(self._polar) else np.nan,
                     _flair_class=fcls)

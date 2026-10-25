@@ -164,6 +164,9 @@ grep -q "RESULT v51 OK" $T/v51.log || { cat $T/v51.log; echo "FAIL: v5.1 checks"
 echo "== v5.1.1 per-piece evidence / mixed objects, valid-sample fractions, missing inputs, label schema"
 python $ROOT/tests/check_v511.py | tee $T/v511.log | grep -vE "^RESULT"
 grep -q "RESULT v511 OK" $T/v511.log || { cat $T/v511.log; echo "FAIL: v5.1.1 checks"; exit 1; }
+echo "== v5.1.2 feature-spec families: units and phantom directions"
+python $ROOT/tests/check_v512.py | tee $T/v512.log | grep -vE "^RESULT"
+grep -q "RESULT v512 OK" $T/v512.log || { cat $T/v512.log; echo "FAIL: v5.1.2 checks"; exit 1; }
 echo "== v4.16 surface overlay for freeview (detector list / expert calls, Destrieux sulcus per object)"
 python $ROOT/tests/check_overlay.py | tee $T/overlay.log | grep -v "^RESULT"
 grep -q "RESULT overlay OK" $T/overlay.log || { echo "FAIL: v4.16 overlay checks"; exit 1; }

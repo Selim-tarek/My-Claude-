@@ -1,4 +1,4 @@
-# All code — cSS pipeline v5.1.1
+# All code — cSS pipeline v5.1.2
 
 Generated from the files below; the files are authoritative.
 
@@ -1402,7 +1402,7 @@ from skimage.measure import regionprops
 from skimage.morphology import skeletonize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from css_common import base as _base, load_lut, fresh, sha256, update_manifest, environment_record, skeleton_length, radius_profile
-import css_qc, css_vessel, mimic_rules, css_pieces
+import css_qc, css_vessel, mimic_rules, css_pieces, css_features
 
 subj   = sys.argv[1]
 z_thr  = float(sys.argv[2]) if len(sys.argv) > 2 else -2.5
@@ -1500,6 +1500,9 @@ tissue = ndi.binary_fill_holes(brain & (seg > 0) & ~np.isin(seg, CSF))    # fill
 # v4.17: CSF = brain voxels that are not labelled tissue. SynthSeg labels extracerebral/sulcal CSF 24, but
 # recon-all aparc+aseg leaves sulcal CSF unlabelled (0) and uses 24 for a small basal region only
 csf_space = brain & ~tissue
+# v5.1.2 feature-spec maps (css_features.py, recorded only): distance into the CSF, near-CSF, depth below the crowns
+CSF_DEPTH, NEAR_CSF = css_features.csf_maps(csf_space, vox)
+SULC_D = css_features.sulcal_depth_map(tissue, vox)
 surface = (~brain) | csf_space
 near_surface = ndi.binary_dilation(surface, structure=s2d, iterations=it)
 pial_sd = (ndi.distance_transform_edt(~tissue, sampling=vox)
@@ -1978,11 +1981,13 @@ for p in regionprops(lab, spacing=vox):
     ring2 = ndi.binary_dilation(mm, structure=s3, iterations=2) & ~mm & brain[pad]
     edge_c = float(np.median(z[pad][ring2]) - np.median(z[pad][mm])) if ring2.any() else np.nan
     idist = float(ich_dist[pad][mm].min())
-    fz = fcz = np.nan
+    fz = fcz = fbf = np.nan
     if FL is not None:
         near3 = ndi.binary_dilation(mm, structure=s3, iterations=max(1, int(round(3 / vox[0])))) & (FL[pad] > 0)
         ring = near3 & (pial_sd[pad] > 0.5)                       # sulcal CSF: acute convexity SAH
-        if ring.sum() >= 5: fz = float(np.median((FL[pad][ring] - f_mu) / f_sd))
+        if ring.sum() >= 5:
+            fz = float(np.median((FL[pad][ring] - f_mu) / f_sd))
+            fbf = float((((FL[pad][ring] - f_mu) / f_sd) > 3.0).mean())   # v5.1.2 share of bright CSF samples
         ctxn = near3 & cortex[pad]                                # cortex: oedema of cortical vein thrombosis
         if ctxn.sum() >= 5: fcz = float(np.median((FL[pad][ctxn] - fc_mu) / f_sd))
     mim = MIM.evaluate(mm, pad, tissue[pad], fz, fcz, dark_pad=z[pad] < Z_LOW)   # v5.0, recorded; acts only with CSS_USE_MIMIC=1
@@ -1999,6 +2004,12 @@ for p in regionprops(lab, spacing=vox):
                  mirror_valid_frac=mirror_valid(pts),
                  missing_t1_anatomy=int(not T1_ANAT), missing_flair_features=int(FL is None),
                  missing_phase_features=int(MIM.hp is None))
+    # v5.1.2 feature-spec families (css_features.py; recorded only)
+    feat = dict(css_features.position_features(mm, pial_sd[pad], CSF_DEPTH[pad], NEAR_CSF[pad], SULC_D[pad]),
+                **css_features.compactness_features(mm, vox), **css_features.path_features(mm, vox),
+                **css_features.darkness_features(z[pad][mm]), flair_csf_bright_frac=round(fbf, 2) if np.isfinite(fbf) else np.nan)
+    feat["feature_qc_flags"] = css_features.qc_flags({**piece, **mim})
+    feat["feature_schema_version"] = css_features.FEATURE_SCHEMA
     longs     = bool(n_sl * vox[2] > 40.0)    # > 40 mm top-to-bottom (sinus / large veins)
     # v3 score (kept for comparison)
     s3_ = depth * (0.25 + contact) * np.log1p(vol)
@@ -2050,7 +2061,7 @@ for p in regionprops(lab, spacing=vox):
                      basal_frac=round(float((d_basal[pad][mm] <= BASAL_MM).mean()), 2),
                      vessel_ext_mm=round(ves_ext, 1), vessel_wm_mm=round(ves_wm, 1), vessel_run_mm=round(min(ves_run, VES_REACH_MM), 1), axis_normal=round(axn, 2),
                      score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label,
-                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1, **vt, **rad, **rref, **{k: v for k, v in mim.items() if not k.startswith('_')}, **piece))
+                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1, **vt, **rad, **rref, **{k: v for k, v in mim.items() if not k.startswith('_')}, **piece, **feat))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
 cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongation",
@@ -2074,7 +2085,13 @@ V50_COLS = ["mimic_score", "mimic_class", "mimic_reason", "phase_z", "mb_cluster
             # v5.1.1: per-piece evidence of merged objects, valid-sample fractions, missing inputs
             "piece_vol_vox", "piece_pial_mm", "piece_tube", "piece_vein_frac", "mixed_object", "mixed_object_review",
             "merge_gap_mm", "ref_valid_frac", "mirror_valid_frac", "region_n_vox",
-            "missing_t1_anatomy", "missing_flair_features", "missing_phase_features"]
+            "missing_t1_anatomy", "missing_flair_features", "missing_phase_features",
+            # v5.1.2 feature-spec families (css_features.py, mimic_rules.py), recorded only
+            "phase_valid_frac", "phase_polarity_frac", "pial_sd_p10_mm", "pial_sd_p90_mm", "surface_contact_frac_1mm",
+            "surface_contact_frac_2mm", "csf_adjacent_frac", "csf_depth_mm", "sulcal_depth_mm",
+            "equivalent_sphere_diameter_mm", "compactness_3d", "sphericity", "elongation_3d", "flatness_3d",
+            "path_length_mm", "tortuosity", "darkness_z_p10", "dark_frac_z2", "dark_frac_z3", "dark_frac_z4",
+            "flair_csf_bright_frac", "feature_qc_flags", "feature_schema_version"]
 cols = cols + V50_COLS
 
 # ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason
@@ -5409,9 +5426,14 @@ class MimicRejector:
         # fit on the shell AROUND the candidate: inside a strong deposit the phase wraps past pi (a paramagnetic sheet
         # flat to B0 at 0.5 ppm reaches 5.5 rad at 3 T, TE 20 ms) and the homodyne filter folds it to the wrong sign;
         # the field outside is weaker. Voxels already near +-pi are left out as possibly wrapped.
-        reg = ndi.binary_dilation(cm, iterations=FIT_SHELL_VOX) & ~cm & self.brain[box] \
-            & (np.abs(self.hp[box]) < WRAP_RAD)
+        shell = ndi.binary_dilation(cm, iterations=FIT_SHELL_VOX) & ~cm & self.brain[box]
+        reg = shell & (np.abs(self.hp[box]) < WRAP_RAD)
         a, t, r = fit_amplitude(self.hp[box][reg], pred[reg])
+        # v5.1.2: share of the shell usable for the fit (not possibly wrapped) and polarity consistency = share of
+        # informative fit voxels whose observed phase sign agrees with the fitted pattern
+        self._valid = float(reg.sum() / max(shell.sum(), 1))
+        inf = reg & (np.abs(pred) > 0.1 * np.abs(pred[reg]).max()) if reg.any() and np.abs(pred[reg]).max() > 0 else reg
+        self._polar = float((np.sign(self.hp[box][inf]) == np.sign(a * pred[inf])).mean()) if inf.any() and np.isfinite(a) else np.nan
         return (self.conv * t if np.isfinite(t) else np.nan), (self.conv * r if np.isfinite(r) else np.nan)
 
     def evaluate(self, mm, pad, tissue_pad, fz, fcz, dark_pad=None):
@@ -5419,6 +5441,7 @@ class MimicRejector:
         The microbleed rule looks at the dark voxels within 2 voxels of the candidate, not at the candidate mask
         itself: the detector's mask is the ridge-filtered (thinned) dark region, in which round microbleeds no
         longer look round (PHM phantom: a row of 4 microbleeds became one candidate with 0 countable blobs)."""
+        self._valid, self._polar = np.nan, np.nan
         pz, pr = self.phase_evidence(mm, pad)
         support = mm if dark_pad is None else (mm | (ndi.binary_dilation(mm, iterations=2) & dark_pad))
         calc = 0.0; why = []
@@ -5433,6 +5456,8 @@ class MimicRejector:
         return dict(mimic_score=round(sc, 2), mimic_class=cls if sc > 0 else "none", mimic_reason="; ".join(why),
                     phase_z=round(pz, 2) if np.isfinite(pz) else np.nan,
                     phase_r=round(pr, 2) if np.isfinite(pr) else np.nan, mb_cluster_n=int(mn),
+                    phase_valid_frac=round(self._valid, 2) if np.isfinite(self._valid) else np.nan,
+                    phase_polarity_frac=round(self._polar, 2) if np.isfinite(self._polar) else np.nan,
                     _flair_class=fcls)
 ```
 
@@ -6430,4 +6455,200 @@ if L.label_schema_version.iloc[0] != "css-labels/1.0" or L.sort_values("sheet_no
 if L[L.sheet_no == 2].label_class.iloc[0] != "surface_vein": fail("label_class not written")
 print("expert labels: css-labels/1.0, fine label + class + confidence_missing written; --require-confidence refuses")
 print("RESULT v511 OK")
+```
+
+## scripts/css_features.py
+
+```python
+"""Feature families of docs/FEATURE_SPEC (cSS vs VS / VC / VT / CA / MB) that the detector did not yet compute (v5.1.2).
+Pure functions on a candidate crop; imported by detect_css.py, unit-tested in tests/check_v512.py. RECORDED ONLY: no
+rule, score or tier uses them. All distances in mm (voxel size passed explicitly).
+
+Already computed elsewhere under another name (not duplicated): pial_dist_mm (median signed pial distance),
+cortex_frac (cortex overlap), parenchyma_frac, bank_frac / tram_frac, tube_ratio, cand_radius_med/p95_mm / cv,
+local_cont_max/min_mm (curved continuation), vessel_run_mm (straight continuation), vessel_wm_mm (white-matter
+continuation), local_branch_per10mm, terminal_ends, end_type_* ("midline" = reaches the sagittal sinus zone), surf_*
+(surface morphology, surface_features.py), phase_z / phase_r (dipole fit), mb_cluster_n, flair_csf_z / flair_ctx_z,
+ich_dist_mm. Not computable here: CT hyperdensity (no CT input)."""
+import numpy as np
+from scipy import ndimage as ndi
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import dijkstra
+
+FEATURE_SCHEMA = "css-features/1.0"
+
+
+def csf_maps(csf, vox):
+    """whole-brain maps for position_features: distance into the CSF from tissue (0 in tissue), and 'within 1.5 mm
+    of CSF'. Computed once per scan (a per-candidate crop would cut the distances at the crop edge)."""
+    return (ndi.distance_transform_edt(csf, sampling=vox).astype(np.float32),
+            ndi.distance_transform_edt(~csf, sampling=vox) <= 1.5)
+
+
+def position_features(mm, pial_sd, csf_depth, near_csf, sulcal_depth=None):
+    """Family B/D: pial-distance percentiles, contact within 1 / 2 mm of the pial boundary, CSF adjacency, how far
+    into the CSF the candidate sits (median distance from tissue: ~0 on a bank, larger in mid-sulcus = VC) and how
+    deep below the gyral crowns (sulcal_depth_map). All maps are crops at the candidate."""
+    psd = pial_sd[mm]
+    out = dict(pial_sd_p10_mm=round(float(np.percentile(psd, 10)), 2), pial_sd_p90_mm=round(float(np.percentile(psd, 90)), 2),
+               surface_contact_frac_1mm=round(float((np.abs(psd) <= 1.0).mean()), 2),
+               surface_contact_frac_2mm=round(float((np.abs(psd) <= 2.0).mean()), 2),
+               csf_adjacent_frac=round(float(near_csf[mm].mean()), 2),
+               csf_depth_mm=round(float(np.median(csf_depth[mm])), 2),
+               sulcal_depth_mm=round(float(np.median(sulcal_depth[mm])), 2) if sulcal_depth is not None else np.nan)
+    return out
+
+
+def compactness_features(mm, vox):
+    """Family G: equivalent-sphere diameter, 3-D compactness 36 pi V^2 / S^3 (S = anisotropic marching-cubes area;
+    1 = sphere), sphericity = compactness^(1/3), elongation (longest / shortest principal axis) and flatness
+    (middle / shortest), principal axes from the voxel coordinates in mm."""
+    vox = np.asarray(vox, float); V = float(mm.sum() * np.prod(vox))
+    out = dict(equivalent_sphere_diameter_mm=round(float((6 * V / np.pi) ** (1 / 3)), 2),
+               compactness_3d=np.nan, sphericity=np.nan, elongation_3d=np.nan, flatness_3d=np.nan)
+    if mm.sum() < 4: return out
+    try:
+        from skimage.measure import marching_cubes, mesh_surface_area
+        v, f, _, _ = marching_cubes(np.pad(mm, 1).astype(np.float32), 0.5, spacing=tuple(vox))
+        S = float(mesh_surface_area(v, f))
+        if S > 0:
+            c = min(1.0, 36 * np.pi * V ** 2 / S ** 3)
+            out.update(compactness_3d=round(c, 3), sphericity=round(c ** (1 / 3), 3))
+    except Exception:
+        pass
+    P = np.argwhere(mm) * vox
+    ev = np.sort(np.linalg.eigvalsh(np.cov((P - P.mean(0)).T)))[::-1] if len(P) > 3 else None
+    if ev is not None:
+        a = np.sqrt(np.maximum(ev, 1e-6))
+        sd_min = max(a[2], vox.min() / np.sqrt(12))                     # a 1-voxel-thin object: voxel size floor
+        out.update(elongation_3d=round(float(a[0] / sd_min), 2), flatness_3d=round(float(a[1] / sd_min), 2))
+    return out
+
+
+_OFF = np.array([(a, b, c) for a in (-1, 0, 1) for b in (-1, 0, 1) for c in (-1, 0, 1) if (a, b, c) > (0, 0, 0)])
+
+
+def path_features(mm, vox):
+    """Family E: two-sweep geodesic diameter through the candidate's voxels (largest 26-connected piece), and
+    tortuosity = geodesic length / straight end-to-end distance (1 = straight; curved veins and wrapping cSS > 1)."""
+    vox = np.asarray(vox, float)
+    lab, n = ndi.label(mm, structure=np.ones((3, 3, 3), bool))       # merged objects: pieces need not touch;
+    if n > 1: mm = lab == (np.argmax(np.bincount(lab.ravel())[1:]) + 1)   # the path runs in the largest piece
+    idx = np.argwhere(mm)
+    if len(idx) < 3: return dict(path_length_mm=np.nan, tortuosity=np.nan)
+    lin = np.ravel_multi_index(idx.T, mm.shape); order = np.argsort(lin); sl = lin[order]
+    r_, c_, w_ = [], [], []
+    for o in _OFF:
+        q = idx + o; ok = np.all((q >= 0) & (q < np.array(mm.shape)), axis=1)
+        ql = np.full(len(idx), -1, np.int64); ql[ok] = np.ravel_multi_index(q[ok].T, mm.shape)
+        pos = np.clip(np.searchsorted(sl, ql), 0, len(sl) - 1); hit = ok & (sl[pos] == ql)
+        r_.append(np.nonzero(hit)[0]); c_.append(order[pos[hit]]); w_.append(np.full(hit.sum(), float(np.linalg.norm(o * vox))))
+    r, c, w = np.concatenate(r_), np.concatenate(c_), np.concatenate(w_)
+    G = coo_matrix((np.r_[w, w], (np.r_[r, c], np.r_[c, r])), shape=(len(idx),) * 2).tocsr()
+    d0 = dijkstra(G, indices=0); e1 = int(np.argmax(np.where(np.isfinite(d0), d0, -1)))
+    d1 = dijkstra(G, indices=e1); e2 = int(np.argmax(np.where(np.isfinite(d1), d1, -1)))
+    L = float(d1[e2]); eu = float(np.linalg.norm((idx[e1] - idx[e2]) * vox))
+    return dict(path_length_mm=round(L, 1), tortuosity=round(L / eu, 2) if eu > 1.0 else np.nan)
+
+
+def darkness_features(zc):
+    """Family A: lower tail and dark fractions of the candidate's local darkness z"""
+    zc = np.asarray(zc, float)
+    if not len(zc): return dict(darkness_z_p10=np.nan, dark_frac_z2=np.nan, dark_frac_z3=np.nan, dark_frac_z4=np.nan)
+    return dict(darkness_z_p10=round(float(-np.percentile(zc, 10)), 2), dark_frac_z2=round(float((zc < -2).mean()), 2),
+                dark_frac_z3=round(float((zc < -3).mean()), 2), dark_frac_z4=round(float((zc < -4).mean()), 2))
+
+
+def sulcal_depth_map(tissue, vox, close_mm=5.0):
+    """distance (mm) below the 'hull' of the brain tissue (closing by close_mm): ~0 on gyral crowns, grows into sulci"""
+    d_out = ndi.distance_transform_edt(~tissue, sampling=vox)
+    hull = ndi.distance_transform_edt(d_out <= close_mm, sampling=vox) > close_mm
+    hull |= tissue
+    return ndi.distance_transform_edt(hull, sampling=vox).astype(np.float32)
+
+
+def qc_flags(row):
+    """';'-joined reasons why some of this candidate's features are less trustworthy"""
+    f = []
+    if row.get("ref_valid_frac", 1) is not None and np.isfinite(row.get("ref_valid_frac", 1)) and row.get("ref_valid_frac", 1) < 0.5:
+        f.append("cortex_reference_sparse")
+    mv = row.get("mirror_valid_frac", np.nan)
+    if np.isfinite(mv) and mv < 0.5: f.append("mirror_outside_brain")
+    if row.get("missing_phase_features"): f.append("no_phase")
+    if row.get("missing_flair_features"): f.append("no_flair")
+    if row.get("missing_t1_anatomy"): f.append("swi_only_anatomy")
+    if row.get("mixed_object"): f.append("mixed_merged_object")
+    return ";".join(f)
+```
+
+## tests/check_v512.py
+
+```python
+"""v5.1.2 checks: feature-spec families (scripts/css_features.py, phase validity / polarity in mimic_rules.py).
+usage: check_v512.py    (units need nothing; the directional part needs PH3 from phantom_v4.py, aligned, in $CSS_BASE;
+                         the phase part uses PHM from check_mimic.py when present)
+1. units: a sphere is compact (compactness ~1), a sheet and a tube are not; a straight tube has tortuosity ~1, a
+   half circle ~pi/2; the tortuosity of two non-touching pieces is measured on the larger one.
+2. directions on PH3 objects (feature spec section 10), resolution-tolerant:
+   VT.vessel_wm_mm > every cSS;  VC and VS sit deeper in the CSF than cSS (csf_depth_mm);  VS lies nearer the gyral
+   crowns than VC (sulcal_depth_mm);  the compact transcortical vein is more compact than every cSS band.
+3. PHM (if present): the calcified band has phase_z < 0 < every paramagnetic cSS; phase_valid_frac / polarity in 0..1.
+PHANTOM DIRECTIONS ONLY - not real-world performance."""
+import os, sys, subprocess, numpy as np, nibabel as nib, pandas as pd
+HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+import css_features as F
+def fail(m): print("FAIL:", m); sys.exit(1)
+v = np.array([0.8, 0.8, 0.8]); sh = (80, 80, 30); P = np.indices(sh).transpose(1, 2, 3, 0) * v
+sph = ((P - [32, 32, 12]) ** 2).sum(-1) <= 2.0 ** 2
+sheet = np.zeros(sh, bool); sheet[10:60, 10:60, 14] = True
+tube = np.zeros(sh, bool); tube[10:70, 40:42, 14:16] = True
+arc = np.zeros(sh, bool)
+for a in np.linspace(0, np.pi, 400):
+    i, j = int(40 + 25 * np.cos(a)), int(20 + 25 * np.sin(a)); arc[i - 1:i + 1, j - 1:j + 1, 14:16] = True
+cs, cp, ct = (F.compactness_features(m, v)["compactness_3d"] for m in (sph, sheet, tube))
+if not (cs > 0.8 and cp < 0.05 and ct < 0.2): fail(f"compactness sphere {cs} sheet {cp} tube {ct}")
+ts, ta = F.path_features(tube, v)["tortuosity"], F.path_features(arc, v)["tortuosity"]
+if not (abs(ts - 1) < 0.05 and abs(ta - np.pi / 2) < 0.15): fail(f"tortuosity straight {ts} arc {ta}")
+two = tube.copy(); two[10:20, 70:72, 14:16] = True                    # a second, small, non-touching piece
+if abs(F.path_features(two, v)["tortuosity"] - ts) > 0.02: fail("tortuosity not measured on the largest piece")
+print(f"units: compactness sphere {cs} / sheet {cp} / tube {ct}; tortuosity straight {ts}, half circle {ta} (pi/2 = 1.57)")
+
+B = os.environ.get("CSS_BASE")
+if not B or not os.path.exists(f"{B}/data/PH3_swi.nii"):
+    print("PH3 part skipped (no PH3 in $CSS_BASE)"); print("RESULT v512 OK"); sys.exit(0)
+S = f"{B}/scripts"; py = sys.executable
+r = subprocess.run([py, f"{S}/detect_css.py", "PH3"], capture_output=True, text=True)
+if r.returncode: print(r.stdout[-600:], r.stderr[-1200:]); fail("detect_css PH3")
+tr = nib.load(f"{B}/work/PH3_truth.nii.gz").get_fdata().astype(int); ve = nib.load(f"{B}/work/PH3_veins.nii.gz").get_fdata().astype(int)
+kind_of = {1: "VC", 2: "VC", 3: "VC", 4: "VC", 5: "VS", 6: "VS", 7: "VT"}
+rows = []
+for lst, idc in (("candidates", "cand_id"), ("excluded", "excl_id")):
+    d = pd.read_csv(f"{B}/review/PH3_{lst}.csv"); M = nib.load(f"{B}/review/PH3_{lst}.nii.gz").get_fdata().astype(int)
+    for _, rr in d.iterrows():
+        m = M == rr[idc]
+        k = "cSS" if (tr[m] > 0).mean() > 0.2 else (kind_of.get(int(np.bincount(ve[m][ve[m] > 0]).argmax()), "other")
+                                                    if (ve[m] > 0).mean() > 0.3 else "other")
+        rows.append(dict(kind=k, **rr.to_dict()))
+D = pd.DataFrame(rows); g = {k: D[D.kind == k] for k in ("cSS", "VC", "VS", "VT")}
+if any(not len(x) for x in g.values()): fail(f"PH3 object kinds missing: {D.kind.value_counts().to_dict()}")
+checks = [("VT.vessel_wm_mm > cSS", g["VT"].vessel_wm_mm.min() > g["cSS"].vessel_wm_mm.max()),
+          ("VC.csf_depth_mm > cSS", g["VC"].csf_depth_mm.min() > g["cSS"].csf_depth_mm.max()),
+          ("VS.csf_depth_mm > cSS", g["VS"].csf_depth_mm.min() > g["cSS"].csf_depth_mm.max()),
+          ("VS.sulcal_depth_mm < VC", g["VS"].sulcal_depth_mm.max() < g["VC"].sulcal_depth_mm.min()),
+          ("VT.compactness_3d > cSS", g["VT"].compactness_3d.min() > g["cSS"].compactness_3d.max())]
+bad = [n for n, ok in checks if not ok]
+if bad: fail("directions not met: " + ", ".join(bad))
+need = ["pial_sd_p10_mm", "surface_contact_frac_1mm", "csf_adjacent_frac", "sphericity", "elongation_3d", "flatness_3d",
+        "path_length_mm", "darkness_z_p10", "dark_frac_z3", "feature_qc_flags", "feature_schema_version"]
+if any(c not in D.columns for c in need) or (D.feature_schema_version != "css-features/1.0").any(): fail("v5.1.2 columns missing")
+print("PH3 directions: " + "; ".join(n for n, _ in checks) + "  - all met")
+if os.path.exists(f"{B}/review/PHM_candidates.csv"):
+    c = pd.read_csv(f"{B}/review/PHM_candidates.csv"); x = pd.read_csv(f"{B}/review/PHM_excluded.csv")
+    if "phase_valid_frac" in c.columns:
+        allp = pd.concat([c, x])
+        if not allp.phase_valid_frac.dropna().between(0, 1).all() or not allp.phase_polarity_frac.dropna().between(0, 1).all():
+            fail("phase_valid_frac / phase_polarity_frac outside 0..1")
+        print(f"PHM phase: valid fraction {allp.phase_valid_frac.min():.2f}-{allp.phase_valid_frac.max():.2f}, "
+              f"polarity consistency {allp.phase_polarity_frac.min():.2f}-{allp.phase_polarity_frac.max():.2f}")
+print("RESULT v512 OK")
 ```

@@ -67,3 +67,16 @@ unit-tested (band + tube -> mixed, vein fraction 0.40; one kind / 12 % vein / no
 objects, `CSS_MIXED_REVIEW=1` changes nothing. Lopsided head mask: mirror_valid_frac 0.00-0.92 on 5 objects.
 Bug found in the v5.1.1 full-suite run and fixed before commit: `add_missing` crashed when a study had no surface /
 phase / FLAIR columns at all (`True.astype`).
+
+## v5.1.2 — feature-spec families (FEATURE_SPEC_cSS_vs_mimics.md), recorded only
+
+New module `css_features.py` (feature schema css-features/1.0), columns appended to both CSVs, no rule or score uses them:
+- position: `pial_sd_p10/p90`, `surface_contact_frac_1mm/2mm`, `csf_adjacent_frac`, `csf_depth_mm` (distance into the
+  CSF from tissue), `sulcal_depth_mm` (depth below a 5 mm closing of the tissue = gyral-crown envelope);
+- compactness: `esd`, `compactness_3d` (marching-cubes surface), `sphericity`, `elongation_3d`, `flatness_3d`;
+- path: `path_length_mm`, `tortuosity` (two-sweep Dijkstra on the largest 26-connected component);
+- darkness: `darkness_z_p10`, `dark_frac_z2/3/4`; FLAIR `flair_csf_bright_frac`; phase `phase_valid_frac`,
+  `phase_polarity_frac` (mimic_rules.py); `feature_qc_flags`, `feature_schema_version`.
+Tests (check_v512): compactness sphere 1.0 / sheet 0.005 / tube 0.093; tortuosity straight 1.01, half circle 1.59;
+PH3 directions of the spec all met (VT vessel_wm > cSS; VC / VS deeper in CSF than cSS; VS nearer the crowns than VC;
+VT more compact than cSS); PHM phase valid fraction 1.00, polarity 0.57-0.96. Phantom directions only.

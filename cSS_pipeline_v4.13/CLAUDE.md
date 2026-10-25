@@ -424,6 +424,10 @@ v5.1") but are not ranker features; Stage A only, then stop for the user's real-
   missing_surface_features (ranker) as features before imputation; label schema css-labels/1.0 (label_class,
   confidence_missing, --require-confidence; consensus adjudication_status). Touching vein + cSS = one piece (not
   splittable); mixed case unit-tested only. Fixed before commit: add_missing crashed on studies with no surface columns.
+- v5.1.2 css_features.py (recorded only, schema css-features/1.0): pial_sd_p10/p90, surface_contact_frac_1/2mm,
+  csf_adjacent_frac, csf_depth_mm, sulcal_depth_mm (5 mm closing envelope), esd / compactness_3d / sphericity /
+  elongation_3d / flatness_3d, path_length_mm / tortuosity (largest component), darkness_z_p10, dark_frac_z2/3/4,
+  flair_csf_bright_frac, phase_valid_frac / phase_polarity_frac, feature_qc_flags. check_v512: spec directions met on PH3.
 
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
