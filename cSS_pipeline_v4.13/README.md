@@ -1,10 +1,10 @@
-# cSS grading pipeline v5.1
+# cSS grading pipeline v5.1.1
 
 Three-layer detection: definition-based candidates, a mimic layer (phase, FLAIR, microbleed clusters) and a ranking
 model trained on expert labels. **v5.0.0 (Stage A):** both new layers are in place but OFF by default
 (`CSS_USE_MIMIC=1`; the ranker needs >= 3 expert-labelled patients and is applied to dev-split studies only);
 with the defaults the output equals v4.19. v5.1.0 adds per-object fate accounting, `audit_case.py`, stale-input
-checks and a fix to the opt-in microbleed rule (docs/CHANGELOG_v5.1.md). The pial-surface sampler (layer 2) is still to come.
+checks and a fix to the opt-in microbleed rule (docs/CHANGELOG_v5.1.md). v5.1.1: per-piece evidence of merged objects (`CSS_MIXED_REVIEW=1`), valid-sample fractions, missing-input indicators, label schema. The pial-surface sampler (layer 2) is still to come.
 
 Research software, not clinically validated. **How to run it, step by step: [RUNBOOK.md](RUNBOOK.md).**
 Methods and rationale: [PIPELINE.md](PIPELINE.md). Audit and plan: docs/AUDIT_v4.13_and_FP_plan.md.

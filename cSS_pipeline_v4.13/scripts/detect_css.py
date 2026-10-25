@@ -73,7 +73,7 @@ from skimage.measure import regionprops
 from skimage.morphology import skeletonize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from css_common import base as _base, load_lut, fresh, sha256, update_manifest, environment_record, skeleton_length, radius_profile
-import css_qc, css_vessel, mimic_rules
+import css_qc, css_vessel, mimic_rules, css_pieces
 
 subj   = sys.argv[1]
 z_thr  = float(sys.argv[2]) if len(sys.argv) > 2 else -2.5
@@ -104,6 +104,10 @@ KEEP_ALL = os.environ.get("CSS_KEEP_ALL", "") == "1"
 #   CSS_QC_STRICT=1  case QC gates: insufficient_quality -> no candidates, exit 3
 USE_MIMIC = os.environ.get("CSS_USE_MIMIC", "") == "1"
 QC_STRICT = os.environ.get("CSS_QC_STRICT", "") == "1"
+#   CSS_MIXED_REVIEW=1 (v5.1.1) a merged object whose pieces disagree (vein-like + cSS-like) is not excluded by the
+#   vein rules E5 / E6 / E7 as a whole; it is shown with mixed_object_review = 1
+MIXED_REVIEW = os.environ.get("CSS_MIXED_REVIEW", "") == "1"
+PIECE_MIN_FRAC = 0.15        # mixed_object: each kind of piece holds >= this share of the object's volume
 MIMIC_CALC_EXCL, MIMIC_MB_EXCL = 0.7, 0.5   # E10 / E11 mimic_score cut-offs (not validated)
 HESS_SIGMAS_MM = (0.8, 1.6)            # 3-D shape analysis scales
 # v4.11 vessel exclusion: a dark line that continues as a TUBE beyond the cortical band (into the white
@@ -189,7 +193,10 @@ def local_ref(ref):
 z = (Ic - local_ref(cortex)) / sd
 # pass 2: locally dark cortex (lesion candidates) no longer pulls its own reference down;
 # regionally dark NORMAL cortex (iron-rich motor cortex) is not locally dark, so it stays in
-z = (Ic - local_ref(cortex & (z > Z_LOW))) / sd
+_ref2 = cortex & (z > Z_LOW)
+z = (Ic - local_ref(_ref2)) / sd
+# v5.1.1: where the pass-2 cortex reference had enough valid voxels (else the global cortex median was used)
+REF_OK = ndi.gaussian_filter(_ref2.astype(np.float32), _sig) > 0.05; del _ref2
 z_glob = (Ic - mu) / sd
 # v4.19.2 regional + contralateral reference (recorded only). LEMON P201 (healthy): 5 of 6 candidates were
 # naturally dark cortex (motor strip, cuneus/precuneus: iron/myelin), patch-shaped like cSS. Physiological
@@ -209,10 +216,10 @@ def mirror_code(c):
     return {3: 42, 42: 3}.get(c, -1)
 def region_ref(code, vals_c, own_vals):
     """vals_c: candidate intensities; own_vals: the candidate's voxels that are in its own label's cortex"""
-    nan = dict(region_z=np.nan, region_dark_frac=np.nan, mirror_region_z=np.nan, cand_mirror_z=np.nan)
+    nan = dict(region_z=np.nan, region_dark_frac=np.nan, mirror_region_z=np.nan, cand_mirror_z=np.nan, region_n_vox=0)
     if code not in REG or not len(vals_c): return nan
     v, m, sd_ = REG[code]; cm_ = float(np.median(vals_c))
-    out = dict(nan, region_z=round((cm_ - m) / sd_, 2))
+    out = dict(nan, region_z=round((cm_ - m) / sd_, 2), region_n_vox=int(len(v)))
     # share of the region's cortex (candidate itself left out) at least half as dark as the candidate, measured
     # from the whole-brain cortex median: high = the region is broadly dark (physiological pattern)
     thr = mu + 0.5 * (cm_ - mu)
@@ -260,6 +267,7 @@ dmid = np.where(hemiL, ndi.distance_transform_edt(hemiL, sampling=vox),
                 ndi.distance_transform_edt(~hemiL, sampling=vox))
 lab = np.zeros(I.shape, np.int32); n_raw = 0; nxt = 0; n_seeded = 0
 n_pieces = None; n_before_merge = None     # set by the merge step
+PIECES = None                              # v5.1.1: pre-merge piece labels (None = no merging)
 for side in (hemiL, ~hemiL):
     wl, nw = ndi.label(weak & side, structure=s3)
     n_raw += nw
@@ -300,7 +308,8 @@ if MERGE_GAP_MM > 0 and lab.max() > 0:
     _sel = _orig > 0
     _pairs = np.unique(np.stack([lab[_sel], _orig[_sel]]), axis=1)
     n_pieces = np.bincount(_pairs[0], minlength=int(lab.max()) + 1)    # original pieces per candidate
-    del _orig, _sel, _pairs
+    PIECES = _orig                     # v5.1.1: pre-merge pieces kept for per-piece evidence
+    del _sel, _pairs
     del near_lab, merged
 
 os.makedirs(f"{base}/work", exist_ok=True)
@@ -395,6 +404,13 @@ else:
     pc = np.array(I.shape) * vox / 2; mvec = np.array([1.0, 0, 0])
 zmin3 = ndi.minimum_filter(z, size=3)
 brain_in = ndi.binary_erosion(brain, structure=s3)      # one voxel inside the mask edge
+def mirror_valid(pts):
+    """v5.1.1: share of the candidate's mirror points that land inside the brain (mirror_dark_frac uses only those)"""
+    p = pts * vox; q = p - 2 * ((p - pc) @ mvec)[:, None] * mvec[None, :]
+    qi = np.round(q / vox).astype(int)
+    ok = np.all((qi >= 0) & (qi < np.array(I.shape)), axis=1)
+    ok[ok] = brain_in[qi[ok, 0], qi[ok, 1], qi[ok, 2]]
+    return round(float(ok.mean()), 2) if len(ok) else np.nan
 def mirror_dark(pts):
     p = pts * vox; q = p - 2 * ((p - pc) @ mvec)[:, None] * mvec[None, :]
     qi = np.round(q / vox).astype(int)
@@ -646,6 +662,14 @@ for p in regionprops(lab, spacing=vox):
     # off-surface tube. vein_tree_mm is recorded only: on real SWI (P006) the dark tubular network
     # along the cortex merges into one brain-wide component (255 mm for most candidates)
     vein_like = bool(pdist > 0.3 and (np.isnan(tub) or tub > 0.4))
+    # v5.1.1 per-piece evidence of merged objects (css_pieces.py), valid-sample fractions, missing inputs
+    piece = dict(css_pieces.piece_evidence(mm, None if PIECES is None else PIECES[pad], pial_sd[pad], TUBE[pad],
+                                           PIECE_MIN_FRAC),
+                 merge_gap_mm=MERGE_GAP_MM, mixed_object_review=0,
+                 ref_valid_frac=round(float(REF_OK[pad][mm].mean()), 2),
+                 mirror_valid_frac=mirror_valid(pts),
+                 missing_t1_anatomy=int(not T1_ANAT), missing_flair_features=int(FL is None),
+                 missing_phase_features=int(MIM.hp is None))
     longs     = bool(n_sl * vox[2] > 40.0)    # > 40 mm top-to-bottom (sinus / large veins)
     # v3 score (kept for comparison)
     s3_ = depth * (0.25 + contact) * np.log1p(vol)
@@ -697,7 +721,7 @@ for p in regionprops(lab, spacing=vox):
                      basal_frac=round(float((d_basal[pad][mm] <= BASAL_MM).mean()), 2),
                      vessel_ext_mm=round(ves_ext, 1), vessel_wm_mm=round(ves_wm, 1), vessel_run_mm=round(min(ves_run, VES_REACH_MM), 1), axis_normal=round(axn, 2),
                      score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label,
-                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1, **vt, **rad, **rref, **{k: v for k, v in mim.items() if not k.startswith('_')}))
+                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1, **vt, **rad, **rref, **{k: v for k, v in mim.items() if not k.startswith('_')}, **piece))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
 cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongation",
@@ -717,7 +741,11 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "cand_radius_med_mm", "cand_radius_p95_mm", "cand_radius_cv", "net_radius_med_mm", "net_radius_p95_mm",                        # v4.18, recorded only
         "region_z", "region_dark_frac", "mirror_region_z", "cand_mirror_z"]                         # v4.19.2, recorded only
 # v5.0 columns: appended LAST in both files (the excluded CSV ends with exclusion_confidence before them)
-V50_COLS = ["mimic_score", "mimic_class", "mimic_reason", "phase_z", "mb_cluster_n", "phase_r"]   # mimic_rules.py
+V50_COLS = ["mimic_score", "mimic_class", "mimic_reason", "phase_z", "mb_cluster_n", "phase_r",   # mimic_rules.py
+            # v5.1.1: per-piece evidence of merged objects, valid-sample fractions, missing inputs
+            "piece_vol_vox", "piece_pial_mm", "piece_tube", "piece_vein_frac", "mixed_object", "mixed_object_review",
+            "merge_gap_mm", "ref_valid_frac", "mirror_valid_frac", "region_n_vox",
+            "missing_t1_anatomy", "missing_flair_features", "missing_phase_features"]
 cols = cols + V50_COLS
 
 # ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason
@@ -742,7 +770,14 @@ RULE_CONF = {"E1": "high" if T1_ANAT else "medium", "E2": "medium", "E3": "mediu
              "E5": "medium", "E6": "medium", "E7": "medium", "E8": "low", "E9": "medium",
              "E10": "low", "E11": "low"}                       # v5.0 mimic rules: no real-data support yet
 def exclusion(r):
-    """-> (rule_version, reason); ("", "") = kept"""
+    """-> (rule_version, reason); ("", "") = kept. v5.1.1 CSS_MIXED_REVIEW=1: a mixed merged object (pieces disagree)
+    is not removed whole by a vein rule (E5 / E6 / E7); it is shown with mixed_object_review = 1"""
+    rv, why = exclusion_v4(r)
+    if css_pieces.rescue_mixed(rv, r.get("mixed_object"), MIXED_REVIEW):
+        r["mixed_object_review"] = 1
+        return "", ""
+    return rv, why
+def exclusion_v4(r):
     if KEEP_ALL: return "", ""
     if r["infratentorial"] or r["infra_frac"] >= (0.3 if T1_ANAT else 0.5):
         return "E1@v4.9.2", "infratentorial / tentorial interface (cerebellum, brainstem) - not cSS by definition"
@@ -894,7 +929,7 @@ _inputs = {k: p_ for k, p_ in (("swi", f"{base}/data/{subj}_swi.nii"), ("labels"
 update_manifest(base, subj, "detect", dict(
     pipeline_version=RULESET, run_at=pd.Timestamp.now().isoformat(timespec="seconds"), args=sys.argv[1:],
     parameters=dict(z_thr=z_thr, ridge_pct=r_pct, rim_mm=RIM_MM, rank=RANK, keep_all=KEEP_ALL,
-                    use_mimic=USE_MIMIC, qc_strict=QC_STRICT, phase=MIM.phase_note,
+                    use_mimic=USE_MIMIC, qc_strict=QC_STRICT, mixed_review=MIXED_REVIEW, phase=MIM.phase_note,
                     sato_sigmas_mm=list(SATO_SIGMAS_MM), sato_sigmas_px=[round(v, 2) for v in SATO_PX]),
     anatomy="T1" if T1_ANAT else "SWI-only", flair_used=FL is not None, qc_status=QC["status"],
     n_candidates=int(len(df)), n_excluded=len(excluded), n_dropped=len(dropped), fates=FATES,

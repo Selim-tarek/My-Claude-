@@ -1,6 +1,7 @@
 """Shared helpers for the cSS pipeline scripts (imported from the same folder)."""
 import os, sys, numpy as np, pandas as pd
 
+LABEL_SCHEMA = "css-labels/1.0"   # v5.1.1: expert label table schema (fine code + label + coarse class + confidence)
 FP = ["vox_i", "vox_j", "vox_k", "volume_mm3"]      # candidate fingerprint stored with each call
 
 

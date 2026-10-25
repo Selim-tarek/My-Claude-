@@ -14,6 +14,7 @@ scored by running this script by hand with the frozen model. Research software, 
 import sys, os, json, argparse, numpy as np, pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from css_common import base as _base, FP, use_derived, sha256
+from train_ranker import add_missing
 
 ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 ap.add_argument("subject"); ap.add_argument("--model", default="")
@@ -46,7 +47,7 @@ X = pd.DataFrame(index=d.index)
 sp = f"{B}/review/{s}_surface_features.csv"
 sf = pd.read_csv(sp).drop(columns=["list", "obj_id"], errors="ignore").drop_duplicates(FP) \
     if use_derived(sp, [f"{B}/review/{s}_candidates.nii.gz"], "surface features") else None
-full = d.merge(sf, on=FP, how="left", suffixes=("", "_surf")) if sf is not None else d
+full = add_missing(d.merge(sf, on=FP, how="left", suffixes=("", "_surf")) if sf is not None else d)
 missing = [f for f in M["features"] if f not in full.columns]
 for f in M["features"]: X[f] = pd.to_numeric(full[f], errors="coerce").values if f in full.columns else np.nan
 Xv = X.values.astype(float); med = np.array(M["impute_median"])

@@ -388,6 +388,12 @@ shown) - the counts must add up (`review/P012_audit.json`).
 4. Test-split studies are never trained on (`train_ranker.py` refuses `--split test`) and are not ranked
    automatically: rank them by hand with the frozen model, then `evaluate.py --split test`.
 
+### 13c. Mixed merged objects (v5.1.1, opt-in)
+
+`CSS_MIXED_REVIEW=1 python $S/detect_css.py P012 -2.5 85 3` keeps an object whose merged pieces are part vein-like,
+part cSS-like for review instead of letting a vein rule (E5 / E6 / E7) exclude it (`mixed_object_review` = 1). Without
+the switch, `mixed_object` is recorded only. Check on P006 that 6/6 known lesions stay shown with the switch on.
+
 ---
 
 ## Where things are (`$CSS_BASE`)

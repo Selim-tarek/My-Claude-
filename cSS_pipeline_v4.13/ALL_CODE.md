@@ -1,4 +1,4 @@
-# All code — cSS pipeline v5.1
+# All code — cSS pipeline v5.1.1
 
 Generated from the files below; the files are authoritative.
 
@@ -442,7 +442,7 @@ Agreement: Cohen's kappa for cSS vs not-cSS and for the six classes, raw agreeme
 bootstrapping PATIENTS (candidates of one patient are not independent)."""
 import sys, os, json, numpy as np, pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, LABELS, label_class, cohen_kappa, append_rows
+from css_common import base as _base, LABELS, label_class, cohen_kappa, append_rows, LABEL_SCHEMA
 
 arg = lambda f, d="": sys.argv[sys.argv.index(f) + 1] if f in sys.argv else d
 if not arg("--readers") or len(arg("--readers").split(",")) != 2: sys.exit(__doc__)
@@ -468,6 +468,7 @@ if arg("--apply"):
         rows.append(dict(study_id=r.study_id, cand_uid=r.cand_uid, list=r.list, obj_id=r.obj_id,
                          consensus_label=lab, consensus_class=label_class(lab), method="adjudicated",
                          readers=f"{ra}+{rb}", adjudicator=r.get("adjudicator", "")))
+    for r_ in rows: r_.update(adjudication_status=r_["method"], label_schema_version=LABEL_SCHEMA)   # v5.1.1
     append_rows(cons_p, rows, key)
     print(f"{len(rows)} adjudicated labels -> {cons_p}"); sys.exit(0)
 
@@ -490,6 +491,7 @@ for k in a.index.union(b.index):
         rows.append(dict(zip(key, k), obj_id=src.loc[k, "obj_id"], consensus_label=src.loc[k, "label"],
                          consensus_class=label_class(src.loc[k, "label"]), method="single_reader",
                          readers=ra if k in a.index else rb, adjudicator=""))
+for r_ in rows: r_.update(adjudication_status=r_["method"], label_schema_version=LABEL_SCHEMA)       # v5.1.1
 append_rows(cons_p, rows, key)
 pd.DataFrame(todo, columns=key + ["obj_id", "sheet_no", f"label_{ra}", f"label_{rb}", "adjudicated_label",
                                   "adjudicator"]).to_csv(todo_p, index=False)
@@ -524,6 +526,7 @@ print(f"consensus -> {cons_p} ({sum(r['method'] == 'agreement' for r in rows)} a
 """Shared helpers for the cSS pipeline scripts (imported from the same folder)."""
 import os, sys, numpy as np, pandas as pd
 
+LABEL_SCHEMA = "css-labels/1.0"   # v5.1.1: expert label table schema (fine code + label + coarse class + confidence)
 FP = ["vox_i", "vox_j", "vox_k", "volume_mm3"]      # candidate fingerprint stored with each call
 
 
@@ -1399,7 +1402,7 @@ from skimage.measure import regionprops
 from skimage.morphology import skeletonize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from css_common import base as _base, load_lut, fresh, sha256, update_manifest, environment_record, skeleton_length, radius_profile
-import css_qc, css_vessel, mimic_rules
+import css_qc, css_vessel, mimic_rules, css_pieces
 
 subj   = sys.argv[1]
 z_thr  = float(sys.argv[2]) if len(sys.argv) > 2 else -2.5
@@ -1430,6 +1433,10 @@ KEEP_ALL = os.environ.get("CSS_KEEP_ALL", "") == "1"
 #   CSS_QC_STRICT=1  case QC gates: insufficient_quality -> no candidates, exit 3
 USE_MIMIC = os.environ.get("CSS_USE_MIMIC", "") == "1"
 QC_STRICT = os.environ.get("CSS_QC_STRICT", "") == "1"
+#   CSS_MIXED_REVIEW=1 (v5.1.1) a merged object whose pieces disagree (vein-like + cSS-like) is not excluded by the
+#   vein rules E5 / E6 / E7 as a whole; it is shown with mixed_object_review = 1
+MIXED_REVIEW = os.environ.get("CSS_MIXED_REVIEW", "") == "1"
+PIECE_MIN_FRAC = 0.15        # mixed_object: each kind of piece holds >= this share of the object's volume
 MIMIC_CALC_EXCL, MIMIC_MB_EXCL = 0.7, 0.5   # E10 / E11 mimic_score cut-offs (not validated)
 HESS_SIGMAS_MM = (0.8, 1.6)            # 3-D shape analysis scales
 # v4.11 vessel exclusion: a dark line that continues as a TUBE beyond the cortical band (into the white
@@ -1515,7 +1522,10 @@ def local_ref(ref):
 z = (Ic - local_ref(cortex)) / sd
 # pass 2: locally dark cortex (lesion candidates) no longer pulls its own reference down;
 # regionally dark NORMAL cortex (iron-rich motor cortex) is not locally dark, so it stays in
-z = (Ic - local_ref(cortex & (z > Z_LOW))) / sd
+_ref2 = cortex & (z > Z_LOW)
+z = (Ic - local_ref(_ref2)) / sd
+# v5.1.1: where the pass-2 cortex reference had enough valid voxels (else the global cortex median was used)
+REF_OK = ndi.gaussian_filter(_ref2.astype(np.float32), _sig) > 0.05; del _ref2
 z_glob = (Ic - mu) / sd
 # v4.19.2 regional + contralateral reference (recorded only). LEMON P201 (healthy): 5 of 6 candidates were
 # naturally dark cortex (motor strip, cuneus/precuneus: iron/myelin), patch-shaped like cSS. Physiological
@@ -1535,10 +1545,10 @@ def mirror_code(c):
     return {3: 42, 42: 3}.get(c, -1)
 def region_ref(code, vals_c, own_vals):
     """vals_c: candidate intensities; own_vals: the candidate's voxels that are in its own label's cortex"""
-    nan = dict(region_z=np.nan, region_dark_frac=np.nan, mirror_region_z=np.nan, cand_mirror_z=np.nan)
+    nan = dict(region_z=np.nan, region_dark_frac=np.nan, mirror_region_z=np.nan, cand_mirror_z=np.nan, region_n_vox=0)
     if code not in REG or not len(vals_c): return nan
     v, m, sd_ = REG[code]; cm_ = float(np.median(vals_c))
-    out = dict(nan, region_z=round((cm_ - m) / sd_, 2))
+    out = dict(nan, region_z=round((cm_ - m) / sd_, 2), region_n_vox=int(len(v)))
     # share of the region's cortex (candidate itself left out) at least half as dark as the candidate, measured
     # from the whole-brain cortex median: high = the region is broadly dark (physiological pattern)
     thr = mu + 0.5 * (cm_ - mu)
@@ -1586,6 +1596,7 @@ dmid = np.where(hemiL, ndi.distance_transform_edt(hemiL, sampling=vox),
                 ndi.distance_transform_edt(~hemiL, sampling=vox))
 lab = np.zeros(I.shape, np.int32); n_raw = 0; nxt = 0; n_seeded = 0
 n_pieces = None; n_before_merge = None     # set by the merge step
+PIECES = None                              # v5.1.1: pre-merge piece labels (None = no merging)
 for side in (hemiL, ~hemiL):
     wl, nw = ndi.label(weak & side, structure=s3)
     n_raw += nw
@@ -1626,7 +1637,8 @@ if MERGE_GAP_MM > 0 and lab.max() > 0:
     _sel = _orig > 0
     _pairs = np.unique(np.stack([lab[_sel], _orig[_sel]]), axis=1)
     n_pieces = np.bincount(_pairs[0], minlength=int(lab.max()) + 1)    # original pieces per candidate
-    del _orig, _sel, _pairs
+    PIECES = _orig                     # v5.1.1: pre-merge pieces kept for per-piece evidence
+    del _sel, _pairs
     del near_lab, merged
 
 os.makedirs(f"{base}/work", exist_ok=True)
@@ -1721,6 +1733,13 @@ else:
     pc = np.array(I.shape) * vox / 2; mvec = np.array([1.0, 0, 0])
 zmin3 = ndi.minimum_filter(z, size=3)
 brain_in = ndi.binary_erosion(brain, structure=s3)      # one voxel inside the mask edge
+def mirror_valid(pts):
+    """v5.1.1: share of the candidate's mirror points that land inside the brain (mirror_dark_frac uses only those)"""
+    p = pts * vox; q = p - 2 * ((p - pc) @ mvec)[:, None] * mvec[None, :]
+    qi = np.round(q / vox).astype(int)
+    ok = np.all((qi >= 0) & (qi < np.array(I.shape)), axis=1)
+    ok[ok] = brain_in[qi[ok, 0], qi[ok, 1], qi[ok, 2]]
+    return round(float(ok.mean()), 2) if len(ok) else np.nan
 def mirror_dark(pts):
     p = pts * vox; q = p - 2 * ((p - pc) @ mvec)[:, None] * mvec[None, :]
     qi = np.round(q / vox).astype(int)
@@ -1972,6 +1991,14 @@ for p in regionprops(lab, spacing=vox):
     # off-surface tube. vein_tree_mm is recorded only: on real SWI (P006) the dark tubular network
     # along the cortex merges into one brain-wide component (255 mm for most candidates)
     vein_like = bool(pdist > 0.3 and (np.isnan(tub) or tub > 0.4))
+    # v5.1.1 per-piece evidence of merged objects (css_pieces.py), valid-sample fractions, missing inputs
+    piece = dict(css_pieces.piece_evidence(mm, None if PIECES is None else PIECES[pad], pial_sd[pad], TUBE[pad],
+                                           PIECE_MIN_FRAC),
+                 merge_gap_mm=MERGE_GAP_MM, mixed_object_review=0,
+                 ref_valid_frac=round(float(REF_OK[pad][mm].mean()), 2),
+                 mirror_valid_frac=mirror_valid(pts),
+                 missing_t1_anatomy=int(not T1_ANAT), missing_flair_features=int(FL is None),
+                 missing_phase_features=int(MIM.hp is None))
     longs     = bool(n_sl * vox[2] > 40.0)    # > 40 mm top-to-bottom (sinus / large veins)
     # v3 score (kept for comparison)
     s3_ = depth * (0.25 + contact) * np.log1p(vol)
@@ -2023,7 +2050,7 @@ for p in regionprops(lab, spacing=vox):
                      basal_frac=round(float((d_basal[pad][mm] <= BASAL_MM).mean()), 2),
                      vessel_ext_mm=round(ves_ext, 1), vessel_wm_mm=round(ves_wm, 1), vessel_run_mm=round(min(ves_run, VES_REACH_MM), 1), axis_normal=round(axn, 2),
                      score_v3=round(s3_, 2), score_v4=round(s4, 2), _lab=p.label,
-                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1, **vt, **rad, **rref, **{k: v for k, v in mim.items() if not k.startswith('_')}))
+                     n_pieces=int(n_pieces[p.label]) if n_pieces is not None else 1, **vt, **rad, **rref, **{k: v for k, v in mim.items() if not k.startswith('_')}, **piece))
 
 # CSV columns up to "long_structure" are consumed by export_review.py / the workbook: keep them
 cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongation",
@@ -2043,7 +2070,11 @@ cols = ["cand_id", "hemi", "region", "label", "volume_mm3", "n_slices", "elongat
         "cand_radius_med_mm", "cand_radius_p95_mm", "cand_radius_cv", "net_radius_med_mm", "net_radius_p95_mm",                        # v4.18, recorded only
         "region_z", "region_dark_frac", "mirror_region_z", "cand_mirror_z"]                         # v4.19.2, recorded only
 # v5.0 columns: appended LAST in both files (the excluded CSV ends with exclusion_confidence before them)
-V50_COLS = ["mimic_score", "mimic_class", "mimic_reason", "phase_z", "mb_cluster_n", "phase_r"]   # mimic_rules.py
+V50_COLS = ["mimic_score", "mimic_class", "mimic_reason", "phase_z", "mb_cluster_n", "phase_r",   # mimic_rules.py
+            # v5.1.1: per-piece evidence of merged objects, valid-sample fractions, missing inputs
+            "piece_vol_vox", "piece_pial_mm", "piece_tube", "piece_vein_frac", "mixed_object", "mixed_object_review",
+            "merge_gap_mm", "ref_valid_frac", "mirror_valid_frac", "region_n_vox",
+            "missing_t1_anatomy", "missing_flair_features", "missing_phase_features"]
 cols = cols + V50_COLS
 
 # ---- 11. exclusions (v4.8) - each with an explicit, definition-based reason
@@ -2068,7 +2099,14 @@ RULE_CONF = {"E1": "high" if T1_ANAT else "medium", "E2": "medium", "E3": "mediu
              "E5": "medium", "E6": "medium", "E7": "medium", "E8": "low", "E9": "medium",
              "E10": "low", "E11": "low"}                       # v5.0 mimic rules: no real-data support yet
 def exclusion(r):
-    """-> (rule_version, reason); ("", "") = kept"""
+    """-> (rule_version, reason); ("", "") = kept. v5.1.1 CSS_MIXED_REVIEW=1: a mixed merged object (pieces disagree)
+    is not removed whole by a vein rule (E5 / E6 / E7); it is shown with mixed_object_review = 1"""
+    rv, why = exclusion_v4(r)
+    if css_pieces.rescue_mixed(rv, r.get("mixed_object"), MIXED_REVIEW):
+        r["mixed_object_review"] = 1
+        return "", ""
+    return rv, why
+def exclusion_v4(r):
     if KEEP_ALL: return "", ""
     if r["infratentorial"] or r["infra_frac"] >= (0.3 if T1_ANAT else 0.5):
         return "E1@v4.9.2", "infratentorial / tentorial interface (cerebellum, brainstem) - not cSS by definition"
@@ -2220,7 +2258,7 @@ _inputs = {k: p_ for k, p_ in (("swi", f"{base}/data/{subj}_swi.nii"), ("labels"
 update_manifest(base, subj, "detect", dict(
     pipeline_version=RULESET, run_at=pd.Timestamp.now().isoformat(timespec="seconds"), args=sys.argv[1:],
     parameters=dict(z_thr=z_thr, ridge_pct=r_pct, rim_mm=RIM_MM, rank=RANK, keep_all=KEEP_ALL,
-                    use_mimic=USE_MIMIC, qc_strict=QC_STRICT, phase=MIM.phase_note,
+                    use_mimic=USE_MIMIC, qc_strict=QC_STRICT, mixed_review=MIXED_REVIEW, phase=MIM.phase_note,
                     sato_sigmas_mm=list(SATO_SIGMAS_MM), sato_sigmas_px=[round(v, 2) for v in SATO_PX]),
     anatomy="T1" if T1_ANAT else "SWI-only", flair_used=FL is not None, qc_status=QC["status"],
     n_candidates=int(len(df)), n_excluded=len(excluded), n_dropped=len(dropped), fates=FATES,
@@ -2274,6 +2312,7 @@ print(f"RESULT found={len(best)} total={n} worst={worst} above={above} auc={auc:
 usage: expert_import.py SUBJECT READER --css 3,17,40 [--vein 1,2] [--ich 9] [--unsure 5]
        expert_import.py SUBJECT READER --letters "1V 2VS:4 3C 4N 5U ..."   (codes from the grid)
        options: --session N (default 1; a later blinded re-read of the same sheet = 2, ...)  --score
+                --require-confidence (v5.1.1): refuse answers given without :1-:5 (defaulted N excepted)
 Codes (css_common.LABELS): C, V / VS / VC / VT / VX, TV, A / AM, N / NI, MB, CA, SAH, LN, HI, IS, H, U,
 optionally followed by :1-:5 confidence. Sheet numbers not listed are recorded as N (defaulted=1).
 Writes
@@ -2285,7 +2324,7 @@ The reader's own calls in review/ID_calls.csv are left untouched. Then scores th
   expert_import.py ... --score     (runs mark_css.py + score_css.py with the expert's cSS / ICH calls)"""
 import sys, os, re, datetime, subprocess, pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, FP, match_calls, LABELS, parse_answer, cand_uid, append_rows
+from css_common import base as _base, FP, match_calls, LABELS, parse_answer, cand_uid, append_rows, label_class, LABEL_SCHEMA
 
 if len(sys.argv) < 3: sys.exit(__doc__)
 subj, reader = sys.argv[1], sys.argv[2]
@@ -2307,6 +2346,10 @@ if arg("--letters"):
 for flag, code in (("--css", "C"), ("--vein", "V"), ("--ich", "H"), ("--unsure", "U")):
     for n in nums(arg(flag)): ans[n] = (code, None, 0)
 bad = [n for n in ans if n not in set(key.sheet_no)]
+_noconf = sorted(n for n, (c, cf, d) in ans.items() if not d and cf is None)
+if _noconf and "--require-confidence" in sys.argv:
+    sys.exit(f"--require-confidence: no confidence (:1-:5) for sheet numbers {_noconf}")
+if _noconf: print(f"note: {len(_noconf)} answers without a confidence (recorded as confidence_missing = 1)")
 if bad: sys.exit(f"sheet numbers not on the sheet: {bad}")
 
 # re-attach each sheet number to the CURRENT detector output by fingerprint (the detector may have been
@@ -2336,7 +2379,9 @@ for (lst, oid), (n, r) in sorted(mapped.items(), key=lambda kv: kv[1][0]):
     long_rows.append(dict(study_id=subj, reader_id=reader, session=session, detector_version=ver,
                           cand_uid=cand_uid(subj, r), list=lst, obj_id=oid, sheet_no=n, code=code,
                           label=label, coarse_call=call, confidence=conf, defaulted=dflt, blinded=1,
-                          source="expert_sheet", timestamp=now))
+                          source="expert_sheet", timestamp=now,
+                          label_schema_version=LABEL_SCHEMA, label_class=label_class(label),
+                          confidence_missing=int(conf is None and not dflt)))     # v5.1.1, appended
 out = f"{base}/review/{subj}_expert_{reader}.csv"
 pd.DataFrame(rows, columns=["cand_id", "call"] + FP + ["label", "confidence", "defaulted"]).to_csv(out, index=False)
 append_rows(f"{base}/labels/candidate_labels.csv", long_rows,
@@ -5438,7 +5483,9 @@ FEATURES = [
     "flair_csf_z", "flair_ctx_z", "mimic_score", "phase_z", "mb_cluster_n",
     # pial surface (recon-all route, review/ID_surface_features.csv)
     "surf_normal_dist_mm", "surf_width_mm", "surf_inradius_mm", "surf_aspect", "geo_length_mm", "surf_band_continuity",
-    "surf_dark_cont_mm", "surf_exit_paths", "surf_sulc", "surf_curv", "surf_thickness_mm"]
+    "surf_dark_cont_mm", "surf_exit_paths", "surf_sulc", "surf_curv", "surf_thickness_mm",
+    # v5.1.1 missing-input indicators: a missing T1 / FLAIR / phase / surface is information, not a normal value
+    "missing_t1_anatomy", "missing_flair_features", "missing_phase_features", "missing_surface_features"]
 DEPRECATED = ["vein_tree_mm", "mirror_dark_frac", "branch_per10mm"]       # never features (saturated / uninformative)
 
 
@@ -5469,6 +5516,20 @@ def study_table(B, s):
         sf = pd.read_csv(sp).drop(columns=["list", "obj_id"], errors="ignore").drop_duplicates(FP)
         d = d.merge(sf, on=FP, how="left", suffixes=("", "_surf"))
     d["cand_uid"] = [cand_uid(s, r) for _, r in d.iterrows()]
+    return add_missing(d)
+
+
+def add_missing(d):
+    """v5.1.1: missing-input indicators (added BEFORE median imputation). detect_css.py writes the T1 / FLAIR / phase
+    ones; older outputs and the surface family are derived here from the feature values themselves."""
+    d = d.copy()
+    surf = [c for c in d.columns if c.startswith("surf_") or c.startswith("geo_")]
+    d["missing_surface_features"] = (d[surf].isna().all(axis=1).astype(int) if surf else 1)
+    if "missing_phase_features" not in d.columns:
+        d["missing_phase_features"] = (d["phase_z"].isna().astype(int) if "phase_z" in d.columns else 1)
+    if "missing_flair_features" not in d.columns:
+        fl = [c for c in ("flair_csf_z", "flair_ctx_z") if c in d.columns]
+        d["missing_flair_features"] = (d[fl].isna().all(axis=1).astype(int) if fl else 1)
     return d
 
 
@@ -5602,6 +5663,7 @@ scored by running this script by hand with the frozen model. Research software, 
 import sys, os, json, argparse, numpy as np, pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from css_common import base as _base, FP, use_derived, sha256
+from train_ranker import add_missing
 
 ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 ap.add_argument("subject"); ap.add_argument("--model", default="")
@@ -5634,7 +5696,7 @@ X = pd.DataFrame(index=d.index)
 sp = f"{B}/review/{s}_surface_features.csv"
 sf = pd.read_csv(sp).drop(columns=["list", "obj_id"], errors="ignore").drop_duplicates(FP) \
     if use_derived(sp, [f"{B}/review/{s}_candidates.nii.gz"], "surface features") else None
-full = d.merge(sf, on=FP, how="left", suffixes=("", "_surf")) if sf is not None else d
+full = add_missing(d.merge(sf, on=FP, how="left", suffixes=("", "_surf")) if sf is not None else d)
 missing = [f for f in M["features"] if f not in full.columns]
 for f in M["features"]: X[f] = pd.to_numeric(full[f], errors="coerce").values if f in full.columns else np.nan
 Xv = X.values.astype(float); med = np.array(M["impute_median"])
@@ -6221,4 +6283,151 @@ if not seen: fail("no phantom with a truth map to test the mimic layer on")
 if lost_any: fail("CSS_USE_MIMIC=1 lost true lesions: " + "; ".join(lost_any))
 print(f"mimic layer on vs off, true lesions kept: {', '.join(seen)} - none lost")
 print("RESULT v51 OK")
+```
+
+## scripts/css_pieces.py
+
+```python
+"""Per-piece evidence for merged candidates (v5.1.1). Pure functions, imported by detect_css.py; unit-tested in
+tests/check_v511.py.
+
+detect_css.py merges dark pieces closer than MERGE_GAP_MM into one candidate (a line broken by noise, the two banks of
+a tram-track). That can also join a cSS segment and a neighbouring vein; the group's median features then describe
+neither, and a vein rule (E5 / E6 / E7) would remove the cSS segment with it. Each pre-merge piece is therefore
+classified with the detector's own vein_like definition:
+  vein-like piece   median pial distance > 0.3 mm (off the cortex) and tubular (median tube ratio > 0.4, or unknown)
+  cSS-like piece    median pial distance <= 0.3 mm and not tubular (tube ratio <= 0.4, or unknown)
+mixed_object = >= 2 pieces and each kind holds >= min_frac of the object's volume.
+Limits: a vein TOUCHING a cSS segment voxel to voxel is one piece already (this cannot split it); merges undone by
+the 40 mm chain cap leave single pieces (nothing to compare). Thresholds are the v4 vein_like ones, not validated."""
+import numpy as np
+
+
+def piece_evidence(mm, pieces, pial_sd, tube, min_frac=0.15):
+    """mm: candidate mask (crop); pieces: pre-merge labels (same crop, or None = no merging); pial_sd, tube: maps (same
+    crop). -> dict of the per-piece columns"""
+    pcs = {}
+    if pieces is not None:
+        pl = pieces[mm]
+        for pid in np.unique(pl[pl > 0]):
+            pm = mm & (pieces == pid)
+            tv = tube[pm]; tp = float(np.nanmedian(tv)) if np.isfinite(tv).any() else np.nan
+            pp = float(np.median(pial_sd[pm]))
+            pcs[int(pid)] = (int(pm.sum()), pp, tp, bool(pp > 0.3 and (np.isnan(tp) or tp > 0.4)),
+                             bool(pp <= 0.3 and (np.isnan(tp) or tp <= 0.4)))
+    tot = sum(v[0] for v in pcs.values()) or 1
+    vf = sum(v[0] for v in pcs.values() if v[3]) / tot
+    cf = sum(v[0] for v in pcs.values() if v[4]) / tot
+    return dict(piece_vol_vox=";".join(str(v[0]) for v in pcs.values()),
+                piece_pial_mm=";".join(f"{v[1]:.2f}" for v in pcs.values()),
+                piece_tube=";".join("nan" if np.isnan(v[2]) else f"{v[2]:.2f}" for v in pcs.values()),
+                piece_vein_frac=round(vf, 2) if pcs else np.nan,
+                mixed_object=int(len(pcs) > 1 and vf >= min_frac and cf >= min_frac))
+
+
+def rescue_mixed(rule_version, mixed_object, enabled):
+    """True = a vein rule (E5 / E6 / E7) must not remove this mixed object as a whole (CSS_MIXED_REVIEW=1)"""
+    return bool(enabled and mixed_object and rule_version.split("@")[0] in ("E5", "E6", "E7"))
+```
+
+## tests/check_v511.py
+
+```python
+"""v5.1.1 checks: per-piece evidence of merged objects, CSS_MIXED_REVIEW, valid-sample fractions, missing-input
+indicators, versioned expert labels.
+usage: check_v511.py    (unit parts need nothing; the rest needs PH3 from phantom_v4.py, aligned, in $CSS_BASE)
+1. css_pieces: a cSS-like band merged with a vein-like tube -> mixed_object 1; one kind only, or a vein piece under
+   15 % of the volume -> 0; no merging -> no piece evidence. rescue_mixed only for E5 / E6 / E7, only when enabled.
+2. PH3: the new columns are present; CSS_MIXED_REVIEW=1 changes nothing when no object is mixed.
+3. a lopsided head mask (part of one hemisphere cut away): mirror points outside the brain are reported by
+   mirror_valid_frac < 1 and are not counted as dark; ref_valid_frac within 0..1.
+4. missing-input columns match the inputs (PH3: SWI-only anatomy, no FLAIR, no phase); the ranker's add_missing.
+5. expert labels: label_schema_version, label_class, confidence_missing written; --require-confidence refuses.
+PHANTOM / UNIT CHECKS ONLY."""
+import os, sys, json, shutil, subprocess, numpy as np, nibabel as nib, pandas as pd
+HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+import css_pieces
+from train_ranker import add_missing
+def fail(m): print("FAIL:", m); sys.exit(1)
+
+# 1. units
+sh = (20, 20, 10); mm = np.zeros(sh, bool); pieces = np.zeros(sh, int)
+pial = np.zeros(sh, np.float32); tube = np.full(sh, np.nan, np.float32)
+mm[2:14, 2:7, 4] = True; pieces[2:14, 2:7, 4] = 1; pial[2:14, 2:7, 4] = -0.5; tube[2:14, 2:7, 4] = 0.2   # band 60 vox
+mm[14:18, 9:11, 3:8] = True; pieces[14:18, 9:11, 3:8] = 2; pial[14:18, 9:11, 3:8] = 1.0; tube[14:18, 9:11, 3:8] = 0.8  # tube 40
+e = css_pieces.piece_evidence(mm, pieces, pial, tube)
+if e["mixed_object"] != 1 or abs(e["piece_vein_frac"] - 0.4) > 0.01: fail(f"band + tube: {e}")
+only = mm & (pieces == 1)
+if css_pieces.piece_evidence(only, pieces, pial, tube)["mixed_object"] != 0: fail("one kind of piece called mixed")
+small = mm.copy(); small[14:18, 9:11, 4:8] = False                   # tube piece 8 of 68 voxels = 12 %
+if css_pieces.piece_evidence(small, pieces, pial, tube)["mixed_object"] != 0: fail("12 % vein piece called mixed")
+nm = css_pieces.piece_evidence(mm, None, pial, tube)
+if nm["mixed_object"] != 0 or not np.isnan(nm["piece_vein_frac"]): fail(f"no merging: {nm}")
+R = css_pieces.rescue_mixed
+if not (R("E5@v4.8", 1, True) and R("E7@v4.12", 1, True) and not R("E1@v4.9.2", 1, True)
+        and not R("E5@v4.8", 0, True) and not R("E5@v4.8", 1, False)):
+    fail("rescue_mixed logic")
+print("pieces: band + tube -> mixed (vein fraction 0.40); one kind / 12 % vein / no merging -> not mixed; "
+      "rescue only for E5-E7 with CSS_MIXED_REVIEW=1")
+d = add_missing(pd.DataFrame(dict(phase_z=[np.nan, 1.0], flair_csf_z=[np.nan, np.nan], flair_ctx_z=[np.nan, 2.0],
+                                  surf_width_mm=[np.nan, 3.0])))
+if d.missing_phase_features.tolist() != [1, 0] or d.missing_flair_features.tolist() != [1, 0] \
+        or d.missing_surface_features.tolist() != [1, 0]:
+    fail(f"add_missing {d.to_dict('list')}")
+print("ranker missing-input indicators: phase / FLAIR / surface families flagged per row before imputation")
+
+B = os.environ.get("CSS_BASE")
+if not B or not os.path.exists(f"{B}/data/PH3_swi.nii"):
+    print("PH3 parts skipped (no PH3 in $CSS_BASE)"); print("RESULT v511 OK"); sys.exit(0)
+S = f"{B}/scripts"; py = sys.executable
+def run(*a, env=None, ok=True):
+    e_ = dict(os.environ); e_.pop("CSS_MIXED_REVIEW", None); e_.update(env or {})
+    r = subprocess.run([py, *a], capture_output=True, text=True, env=e_)
+    if ok and r.returncode: print(r.stdout[-800:], r.stderr[-1200:]); fail("step failed: " + " ".join(a))
+    return r
+# 2. columns, MIXED_REVIEW no-op
+run(f"{S}/detect_css.py", "PH3"); c0, x0 = (pd.read_csv(f"{B}/review/PH3_{f}.csv") for f in ("candidates", "excluded"))
+new = ["piece_vol_vox", "piece_pial_mm", "piece_tube", "piece_vein_frac", "mixed_object", "mixed_object_review",
+       "merge_gap_mm", "ref_valid_frac", "mirror_valid_frac", "region_n_vox", "missing_t1_anatomy",
+       "missing_flair_features", "missing_phase_features"]
+if any(c not in c0.columns or c not in x0.columns for c in new): fail("v5.1.1 columns missing")
+run(f"{S}/detect_css.py", "PH3", env={"CSS_MIXED_REVIEW": "1"}); c1 = pd.read_csv(f"{B}/review/PH3_candidates.csv")
+if int(c0.mixed_object.sum()) == 0 and not c0[["vox_i", "vox_j", "vox_k", "volume_mm3"]].equals(c1[["vox_i", "vox_j", "vox_k", "volume_mm3"]]):
+    fail("CSS_MIXED_REVIEW changed the output although no object is mixed")
+print(f"PH3: v5.1.1 columns present in candidates and excluded; {int(c0.mixed_object.sum())} mixed objects; "
+      f"CSS_MIXED_REVIEW=1 changes nothing here")
+# 4. missing inputs on PH3 (SWI-only, no FLAIR, no phase)
+if not (c0.missing_t1_anatomy.eq(1).all() and c0.missing_flair_features.eq(1).all() and c0.missing_phase_features.eq(1).all()):
+    fail("PH3 missing-input columns wrong")
+# 3. lopsided head mask
+img = nib.load(f"{B}/data/PH3_swi.nii"); I = img.get_fdata().astype(np.float32); aff = img.affine
+seg = nib.load(f"{B}/synthseg/PH3_seg.nii.gz").get_fdata().astype(np.int32)
+I2, s2 = I.copy(), seg.copy(); cut = int(0.72 * I.shape[0]); I2[cut:] = 0; s2[cut:] = 0     # part of one side gone
+nib.save(nib.Nifti1Image(I2, aff), f"{B}/data/PHA_swi.nii"); nib.save(nib.Nifti1Image(s2, aff), f"{B}/synthseg/PHA_seg.nii.gz")
+p = f"{B}/work/PHA_t1seg_swispace.nii.gz"
+if os.path.exists(p): os.remove(p)
+run(f"{S}/align_seg.py", "PHA"); run(f"{S}/detect_css.py", "PHA")
+a = pd.concat([pd.read_csv(f"{B}/review/PHA_{f}.csv") for f in ("candidates", "excluded")])
+low = a[a.mirror_valid_frac < 1]
+if not len(low): fail("no candidate with mirror points outside the cut brain")
+if ((low.mirror_valid_frac < 0.5) & low.mirror_dark_frac.notna()).any(): fail("mirror dark computed from mostly outside points")
+if not a.ref_valid_frac.between(0, 1).all(): fail("ref_valid_frac outside 0..1")
+print(f"lopsided head mask: {len(low)} objects with mirror points outside the brain (mirror_valid_frac "
+      f"{low.mirror_valid_frac.min():.2f}-{low.mirror_valid_frac.max():.2f}); below 0.5 -> mirror_dark_frac NaN, not 'dark'")
+# 5. expert labels
+for f in ("candidates", "excluded"):
+    shutil.copy(f"{B}/review/PH3_{f}.csv", f"{B}/review/PHK_{f}.csv")
+c = pd.read_csv(f"{B}/review/PHK_candidates.csv").head(3)
+key = c[["vox_i", "vox_j", "vox_k", "volume_mm3"]].assign(sheet_no=[1, 2, 3], list="candidate", obj_id=c.cand_id.values, cand_id=c.cand_id.values)
+key.to_csv(f"{B}/review/PHK_expert_key.csv", index=False)
+r = run(f"{S}/expert_import.py", "PHK", "rdrA", "--letters", "1C:4 2VS 3N:5", "--require-confidence", ok=False)
+if r.returncode == 0: fail("--require-confidence accepted an answer without confidence")
+run(f"{S}/expert_import.py", "PHK", "rdrA", "--letters", "1C:4 2VS 3N:5")
+L = pd.read_csv(f"{B}/labels/candidate_labels.csv"); L = L[(L.study_id == "PHK") & (L.reader_id == "rdrA")]
+if not {"label_schema_version", "label_class", "confidence_missing"} <= set(L.columns): fail("label schema columns missing")
+if L.label_schema_version.iloc[0] != "css-labels/1.0" or L.sort_values("sheet_no").confidence_missing.tolist() != [0, 1, 0]:
+    fail(f"label rows {L[['sheet_no', 'label_schema_version', 'confidence_missing']].to_dict('list')}")
+if L[L.sheet_no == 2].label_class.iloc[0] != "surface_vein": fail("label_class not written")
+print("expert labels: css-labels/1.0, fine label + class + confidence_missing written; --require-confidence refuses")
+print("RESULT v511 OK")
 ```

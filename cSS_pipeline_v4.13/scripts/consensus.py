@@ -14,7 +14,7 @@ Agreement: Cohen's kappa for cSS vs not-cSS and for the six classes, raw agreeme
 bootstrapping PATIENTS (candidates of one patient are not independent)."""
 import sys, os, json, numpy as np, pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, LABELS, label_class, cohen_kappa, append_rows
+from css_common import base as _base, LABELS, label_class, cohen_kappa, append_rows, LABEL_SCHEMA
 
 arg = lambda f, d="": sys.argv[sys.argv.index(f) + 1] if f in sys.argv else d
 if not arg("--readers") or len(arg("--readers").split(",")) != 2: sys.exit(__doc__)
@@ -40,6 +40,7 @@ if arg("--apply"):
         rows.append(dict(study_id=r.study_id, cand_uid=r.cand_uid, list=r.list, obj_id=r.obj_id,
                          consensus_label=lab, consensus_class=label_class(lab), method="adjudicated",
                          readers=f"{ra}+{rb}", adjudicator=r.get("adjudicator", "")))
+    for r_ in rows: r_.update(adjudication_status=r_["method"], label_schema_version=LABEL_SCHEMA)   # v5.1.1
     append_rows(cons_p, rows, key)
     print(f"{len(rows)} adjudicated labels -> {cons_p}"); sys.exit(0)
 
@@ -62,6 +63,7 @@ for k in a.index.union(b.index):
         rows.append(dict(zip(key, k), obj_id=src.loc[k, "obj_id"], consensus_label=src.loc[k, "label"],
                          consensus_class=label_class(src.loc[k, "label"]), method="single_reader",
                          readers=ra if k in a.index else rb, adjudicator=""))
+for r_ in rows: r_.update(adjudication_status=r_["method"], label_schema_version=LABEL_SCHEMA)       # v5.1.1
 append_rows(cons_p, rows, key)
 pd.DataFrame(todo, columns=key + ["obj_id", "sheet_no", f"label_{ra}", f"label_{rb}", "adjudicated_label",
                                   "adjudicator"]).to_csv(todo_p, index=False)

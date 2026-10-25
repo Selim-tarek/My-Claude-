@@ -3,6 +3,7 @@
 usage: expert_import.py SUBJECT READER --css 3,17,40 [--vein 1,2] [--ich 9] [--unsure 5]
        expert_import.py SUBJECT READER --letters "1V 2VS:4 3C 4N 5U ..."   (codes from the grid)
        options: --session N (default 1; a later blinded re-read of the same sheet = 2, ...)  --score
+                --require-confidence (v5.1.1): refuse answers given without :1-:5 (defaulted N excepted)
 Codes (css_common.LABELS): C, V / VS / VC / VT / VX, TV, A / AM, N / NI, MB, CA, SAH, LN, HI, IS, H, U,
 optionally followed by :1-:5 confidence. Sheet numbers not listed are recorded as N (defaulted=1).
 Writes
@@ -14,7 +15,7 @@ The reader's own calls in review/ID_calls.csv are left untouched. Then scores th
   expert_import.py ... --score     (runs mark_css.py + score_css.py with the expert's cSS / ICH calls)"""
 import sys, os, re, datetime, subprocess, pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, FP, match_calls, LABELS, parse_answer, cand_uid, append_rows
+from css_common import base as _base, FP, match_calls, LABELS, parse_answer, cand_uid, append_rows, label_class, LABEL_SCHEMA
 
 if len(sys.argv) < 3: sys.exit(__doc__)
 subj, reader = sys.argv[1], sys.argv[2]
@@ -36,6 +37,10 @@ if arg("--letters"):
 for flag, code in (("--css", "C"), ("--vein", "V"), ("--ich", "H"), ("--unsure", "U")):
     for n in nums(arg(flag)): ans[n] = (code, None, 0)
 bad = [n for n in ans if n not in set(key.sheet_no)]
+_noconf = sorted(n for n, (c, cf, d) in ans.items() if not d and cf is None)
+if _noconf and "--require-confidence" in sys.argv:
+    sys.exit(f"--require-confidence: no confidence (:1-:5) for sheet numbers {_noconf}")
+if _noconf: print(f"note: {len(_noconf)} answers without a confidence (recorded as confidence_missing = 1)")
 if bad: sys.exit(f"sheet numbers not on the sheet: {bad}")
 
 # re-attach each sheet number to the CURRENT detector output by fingerprint (the detector may have been
@@ -65,7 +70,9 @@ for (lst, oid), (n, r) in sorted(mapped.items(), key=lambda kv: kv[1][0]):
     long_rows.append(dict(study_id=subj, reader_id=reader, session=session, detector_version=ver,
                           cand_uid=cand_uid(subj, r), list=lst, obj_id=oid, sheet_no=n, code=code,
                           label=label, coarse_call=call, confidence=conf, defaulted=dflt, blinded=1,
-                          source="expert_sheet", timestamp=now))
+                          source="expert_sheet", timestamp=now,
+                          label_schema_version=LABEL_SCHEMA, label_class=label_class(label),
+                          confidence_missing=int(conf is None and not dflt)))     # v5.1.1, appended
 out = f"{base}/review/{subj}_expert_{reader}.csv"
 pd.DataFrame(rows, columns=["cand_id", "call"] + FP + ["label", "confidence", "defaulted"]).to_csv(out, index=False)
 append_rows(f"{base}/labels/candidate_labels.csv", long_rows,

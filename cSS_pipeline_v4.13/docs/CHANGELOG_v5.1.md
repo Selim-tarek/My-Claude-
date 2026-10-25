@@ -48,3 +48,22 @@ candidates, exclusions and their order are unchanged against v5.0.0 / v4.19.3. T
 exclusions; in-plane axis swap gives the same objects at the same world positions; 15 deg oblique affine changes no
 candidate and 25 deg reads low confidence; stale FLAIR / phase / surface features / model labels; and **the mimic
 layer switched on loses no true lesion on PH3 or PH6** (the check that would have caught item 10).
+
+## v5.1.1 — rest of Priority 1 (per-piece evidence, valid-sample fractions, missing inputs, label schema)
+
+Output-preserving with the defaults (every v5.1.0 column identical on the phantom suite; new columns appended).
+
+| # | Change | Where | Default output |
+|---|---|---|---|
+| 1 | **Per-piece evidence of merged objects**: each pre-merge piece is classified with the detector's own vein_like definition (off the cortex > 0.3 mm and tubular > 0.4 vs on the cortex and not tubular); columns `piece_vol_vox`, `piece_pial_mm`, `piece_tube`, `piece_vein_frac`, `mixed_object` (>= 2 pieces, each kind >= 15 % of the volume) | css_pieces.py, detect_css.py | recorded only |
+| 2 | **`CSS_MIXED_REVIEW=1`** (opt-in): a mixed object that a vein rule (E5 / E6 / E7) would exclude is kept for review, `mixed_object_review` = 1 | detect_css.py | off |
+| 3 | **Valid-sample fractions**: `ref_valid_frac` (share of the local reference with usable cortex), `mirror_valid_frac` (mirror points inside the brain; below 0.5 -> `mirror_dark_frac` NaN, not "dark"), `region_n_vox` | detect_css.py | recorded only |
+| 4 | **Missing-input indicators** `missing_t1_anatomy`, `missing_flair_features`, `missing_phase_features` (detector) and `missing_surface_features` (ranker); the ranker uses them as features BEFORE median imputation | detect_css.py, train_ranker.py, rank_candidates.py | recorded only |
+| 5 | **Versioned expert labels**: `label_schema_version` (css-labels/1.0), `label_class`, `confidence_missing`; `expert_import.py --require-confidence` refuses unrated rows; consensus writes `adjudication_status` | css_common.py, expert_import.py, consensus.py | new label columns |
+
+Limits: a vein TOUCHING a cSS segment voxel-to-voxel is already one piece (cannot be split); merges undone by the 40 mm
+chain cap leave single pieces. A mixed phantom could therefore not be staged through the detector: the piece logic is
+unit-tested (band + tube -> mixed, vein fraction 0.40; one kind / 12 % vein / no merging -> not mixed). PH3: 0 mixed
+objects, `CSS_MIXED_REVIEW=1` changes nothing. Lopsided head mask: mirror_valid_frac 0.00-0.92 on 5 objects.
+Bug found in the v5.1.1 full-suite run and fixed before commit: `add_missing` crashed when a study had no surface /
+phase / FLAIR columns at all (`True.astype`).

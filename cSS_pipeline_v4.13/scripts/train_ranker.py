@@ -42,7 +42,9 @@ FEATURES = [
     "flair_csf_z", "flair_ctx_z", "mimic_score", "phase_z", "mb_cluster_n",
     # pial surface (recon-all route, review/ID_surface_features.csv)
     "surf_normal_dist_mm", "surf_width_mm", "surf_inradius_mm", "surf_aspect", "geo_length_mm", "surf_band_continuity",
-    "surf_dark_cont_mm", "surf_exit_paths", "surf_sulc", "surf_curv", "surf_thickness_mm"]
+    "surf_dark_cont_mm", "surf_exit_paths", "surf_sulc", "surf_curv", "surf_thickness_mm",
+    # v5.1.1 missing-input indicators: a missing T1 / FLAIR / phase / surface is information, not a normal value
+    "missing_t1_anatomy", "missing_flair_features", "missing_phase_features", "missing_surface_features"]
 DEPRECATED = ["vein_tree_mm", "mirror_dark_frac", "branch_per10mm"]       # never features (saturated / uninformative)
 
 
@@ -73,6 +75,20 @@ def study_table(B, s):
         sf = pd.read_csv(sp).drop(columns=["list", "obj_id"], errors="ignore").drop_duplicates(FP)
         d = d.merge(sf, on=FP, how="left", suffixes=("", "_surf"))
     d["cand_uid"] = [cand_uid(s, r) for _, r in d.iterrows()]
+    return add_missing(d)
+
+
+def add_missing(d):
+    """v5.1.1: missing-input indicators (added BEFORE median imputation). detect_css.py writes the T1 / FLAIR / phase
+    ones; older outputs and the surface family are derived here from the feature values themselves."""
+    d = d.copy()
+    surf = [c for c in d.columns if c.startswith("surf_") or c.startswith("geo_")]
+    d["missing_surface_features"] = (d[surf].isna().all(axis=1).astype(int) if surf else 1)
+    if "missing_phase_features" not in d.columns:
+        d["missing_phase_features"] = (d["phase_z"].isna().astype(int) if "phase_z" in d.columns else 1)
+    if "missing_flair_features" not in d.columns:
+        fl = [c for c in ("flair_csf_z", "flair_ctx_z") if c in d.columns]
+        d["missing_flair_features"] = (d[fl].isna().all(axis=1).astype(int) if fl else 1)
     return d
 
 

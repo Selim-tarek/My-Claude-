@@ -418,6 +418,13 @@ v5.1") but are not ranker features; Stage A only, then stop for the user's real-
 - Deferred: per-piece / mixed_object_review, valid-sample fractions, versioned label schema, feature-spec families,
   review tiers, nested-CV ranker + model card, surface-aligned patches + patch classifier, richer phantoms.
 
+- v5.1.1 (docs/CHANGELOG_v5.1.md): per-piece evidence of merged objects (css_pieces.py: piece_* columns, mixed_object;
+  CSS_MIXED_REVIEW=1 keeps a mixed object a vein rule E5-E7 would exclude, mixed_object_review); ref_valid_frac,
+  mirror_valid_frac (< 0.5 -> mirror_dark_frac NaN), region_n_vox; missing_t1_anatomy / _flair_ / _phase_ (detect) and
+  missing_surface_features (ranker) as features before imputation; label schema css-labels/1.0 (label_class,
+  confidence_missing, --require-confidence; consensus adjudication_status). Touching vein + cSS = one piece (not
+  splittable); mixed case unit-tested only. Fixed before commit: add_missing crashed on studies with no surface columns.
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.

@@ -41,9 +41,11 @@ x = pd.read_csv(f"{B}/review/PH3_excluded.csv")
 # v5.0: exclusion_confidence ends the v4.x columns; the v5.0 mimic columns are appended after it (append-only contract)
 V50 = ["mimic_score", "mimic_class", "mimic_reason", "phase_z", "mb_cluster_n", "phase_r"]
 xc = list(x.columns)
-if xc[:2] != ["excl_id", "reason"] or "exclusion_confidence" not in xc or xc[xc.index("exclusion_confidence") + 1:] != V50:
-    fail(f"excluded columns {xc[-8:]}")
-if c[-len(V50):] != V50: fail(f"candidate columns do not end with the v5.0 columns: {c[-8:]}")
+# v5.1.x: the block appended after the v4.19 columns is the same in both files and starts with the v5.0 columns
+tail_c = c[c.index("cand_mirror_z") + 1:]
+tail_x = xc[xc.index("exclusion_confidence") + 1:] if "exclusion_confidence" in xc else None
+if xc[:2] != ["excl_id", "reason"] or tail_x != tail_c or tail_c[:len(V50)] != V50:
+    fail(f"appended columns differ: candidates {tail_c[:8]}..., excluded {(tail_x or [])[:8]}...")
 if len(x) and not x.rule_version.str.match(r"E\d@v4\.\d").all(): fail("excluded rows without rule id")
 print(f"columns: v4.13 order kept, appended {c[len(V413):]}; excluded rows carry rule ids {sorted(x.rule_version.unique())}")
 
