@@ -1,4 +1,4 @@
-# cSS pipeline v5.0 — runbook
+# cSS pipeline v5.2 — runbook
 
 Step-by-step operation of the whole pipeline, from DICOM to a validated research score. Method details and
 the reasoning behind each rule are in [PIPELINE.md](PIPELINE.md); the audit and plan in
@@ -35,7 +35,7 @@ Replace `P012` with your study code. Never use names or MRNs. Never commit patie
 ## 0. One-time setup (Mac)
 
 ```zsh
-cd ~/Downloads/cSS_pipeline_v4.16
+cd ~/Downloads/cSS_pipeline_v5.2
 conda env create -f environment.yml   # once (or: conda env update -f environment.yml)
 zsh install.sh                     # copies scripts to ~/css_project/scripts, backs up old ones
 # open a NEW Terminal window
@@ -304,9 +304,10 @@ over the tentorium and near the skull base are excluded by design (rules E1, E3,
 `ID_excluded.csv`). Decide before the study whether such cSS is outside the phenotype, or must be retained
 (then those rules have to become review flags), and state it in the methods.
 
-**Not built yet (planned, in this order):** a patient-grouped evaluation script that reads `labels/`; a
-regularised ranking model validated by patient-level cross-validation; review tiers from that model. Until
-then, every candidate is read and the hand-set `score_v4` only orders the list.
+**Built but not yet validated on real labels:** patient-grouped evaluation (`evaluate.py`), the ranking model with
+nested patient-level CV (`train_ranker.py`, v5.2), review-priority tiers (v5.1.3), the surface-patch classifier (v5.2).
+Until a model beats `score_v4` on test studies, every candidate is read and `score_v4` orders the list.
+All commands in one place, with recommended settings: [docs/COMMANDS_v5.2.md](docs/COMMANDS_v5.2.md).
 
 ---
 

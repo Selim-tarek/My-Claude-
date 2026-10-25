@@ -7,6 +7,7 @@ with the defaults the output equals v4.19. v5.1.0 adds per-object fate accountin
 checks and a fix to the opt-in microbleed rule (docs/CHANGELOG_v5.1.md). v5.1.1: per-piece evidence of merged objects (`CSS_MIXED_REVIEW=1`), valid-sample fractions, missing-input indicators, label schema. v5.1.2: feature-spec families (recorded only). v5.1.3: review-priority tiers (`review_css.py --by-priority`). v5.2: surface-aligned patches (`surface_aligned_patch.py`), patch classifier (`classify_surface_patches.py`), nested-CV ranker with a model card (docs/CHANGELOG_v5.2.md).
 
 Research software, not clinically validated. **How to run it, step by step: [RUNBOOK.md](RUNBOOK.md).**
+All commands in order with recommended settings: [docs/COMMANDS_v5.2.md](docs/COMMANDS_v5.2.md).
 Methods and rationale: [PIPELINE.md](PIPELINE.md). Audit and plan: docs/AUDIT_v4.13_and_FP_plan.md.
 Technical context for Claude Code: CLAUDE.md.
 
