@@ -1,0 +1,680 @@
+# cSS pipeline v4 — step-by-step guide
+
+Semi-automatic detection and grading of **cortical superficial siderosis (cSS)** on SWI, with
+T1 (and optionally FLAIR) anatomy. Research software, not for clinical use.
+
+---
+
+## Published definitions this pipeline follows
+
+- **cSS** (Charidimou et al., *Neurology* 2017;89:2128, after the consensus criteria): "well-defined,
+  homogeneous hypointense curvilinear signal loss (black) on T2*-GRE or SWI **outlining the outer
+  surface of cerebral cortex, within the adjacent subarachnoid space, or both**". It is limited to the
+  convexity sulci and spares the brainstem, cerebellum and spinal cord (Charidimou et al., *Brain* 2015).
+- **Multifocality scale** (same 2017 paper), per hemisphere: 0 none; 1 = one sulcus or up to 3
+  immediately adjacent sulci; 2 = 2 or more non-adjacent sulci or more than 3 adjacent sulci. Total
+  0–4. More than 3 adjacent sulci count as multifocal because that much involvement implies more
+  than one bleeding source. Interrater weighted κ 0.87; rated blinded.
+- **ICH rule** (same paper): cSS "contiguous or potentially anatomically connected with any lobar
+  ICH" is not scored. Every cSS area must be separated from any lobar ICH by **at least 3 unaffected
+  sulci**, or **at least 2 unaffected sulci (at multiple axial levels) if the haematoma has no
+  superficial communication path along the convexity in 3-D**. v4.3 counts these sulci automatically
+  (`score_css.py`, needs `--recon`):
+  - fewer than 2 sulci in between → excluded, if you drew the ICH mask; only a warning with the
+    automatic mask;
+  - exactly 2 sulci in between → kept, but flagged for you to check the two extra conditions.
+- **Minimum standards** (Charidimou, *AJNR* 2016;37:E43). Of the minimum criteria, these are used
+  here:
+  - **blooming** on T2*/SWI;
+  - **differentiation from microbleeds**: microbleeds are small (generally 2–5 mm), well-defined,
+    round/oval, and at least half surrounded by brain parenchyma. v4.4 flags candidates ≤10 mm with
+    ≥50 % parenchyma around them as `cmb_like`. Beware "microbleed pearls", rows of tiny
+    microbleeds along the surface;
+  - **T1 or FLAIR for anatomical confirmation** of the gyral location;
+  - **no infratentorial siderosis**;
+  - **exclude mimics**: vessel flow voids, thrombosed vessels, petechial haemorrhagic
+    transformation of infarcts, calcium deposits;
+  - FLAIR/PD-bright subarachnoid space → call it **acute cSAH**;
+  - **record location and number of sulci**, and **record other lesions within 1 cm**
+    (microbleeds, DWI lesions).
+- **SWI physics** (Vaccarino et al., *Bioengineering* 2025;12:473; Barbosa et al., *Radiol Bras*
+  2015;48:93):
+  - Magnitude alone cannot tell paramagnetic material (haemosiderin, deoxy-Hb in veins) from
+    diamagnetic material (**calcium**). The **phase** can.
+  - The phase sign convention depends on the vendor: Siemens/Canon are "left-handed", GE/Philips
+    "right-handed". So always compare with a vein on the same image: calcium has the **opposite
+    sign** to veins and blood products.
+  - Echo time and the SWI phase-mask choice change the image, and calcium can look dark like
+    haemosiderin.
+  - v4.5:
+    - `run_css.sh ... --phase <phase.nii>` adds a **filtered-phase column** to the reviewer;
+    - the score file records **TE, field strength, vendor and voxel size**, because blooming
+      (apparent cSS size) depends on them;
+    - minIP is a venography tool, which is why it is a reading aid here and never the input.
+- **Boston criteria v2.0** (Charidimou et al., *Lancet Neurol* 2022;21:714) count cSS **by gyri**
+  for the CAA diagnosis:
+  - a single focus, even if it extends to a second adjacent gyrus, = 1 haemorrhagic lesion;
+  - multifocal cSS (gyri separated by uninvolved areas, or ≥3 adjacent gyri) = ≥2 lesions.
+  - Probable CAA = ≥2 strictly lobar haemorrhagic lesions (ICH, microbleeds, cSAH/cSS), or 1 lobar
+    haemorrhagic lesion plus a white-matter feature (>20 CSO perivascular spaces in one hemisphere,
+    or multispot WMH), with a compatible presentation, age ≥50 and no other cause.
+  - v4.4 reports `boston2_css_lesions` (0 / 1 / 2 = ≥2). This is only the cSS part, not a diagnosis.
+  - Interrater κ for multifocal cSS was 0.94.
+- **SWI vs T2\*-GRE:** SWI gives higher multifocality scores than GRE, so the sequence is now saved
+  with every score (`sequence` column) and the two must not be pooled.
+- **Quantification** (van Harten et al., *NeuroImage: Clinical* 2023;38:103447, Leiden):
+  - Method: 2-D Frangi vesselness (σ = 1 voxel), rater-placed seeds, 3-D 6-neighbour region
+    growing, and false positives **removed by a human rater**.
+  - They report that the filter catches all cSS "but also several other hypointense tubular
+    structures such as some veins". The vein problem is the known open problem, and a human
+    review step is the published standard.
+  - Volume reproducibility: ICC 0.995. Voxel overlap between sessions: Dice 0.75.
+  - They propose **% of sulci affected** as less sequence-dependent than volume. v4.3 reports it
+    per hemisphere (`L_sulci_pct`, `R_sulci_pct`).
+
+## 0. What changed in v4, and why
+
+v3 asked: *"is this dark, line-shaped and near cortex?"* Veins answer "yes" too. That is why, on
+P006, the v3 ranking score had an AUC of only 0.53 against your reader calls.
+
+v4 tests each part of the **textbook definition** separately (STRIVE-2, Charidimou multifocality
+scale, Radiopaedia):
+
+| Definition of cSS | What v4 measures (CSV column) | cSS | Vein / mimic |
+|---|---|---|---|
+| Hypointensity **outlining the cortical surface** (subpial / subarachnoid) | `pial_dist_mm`: signed distance to the pial surface (− = inside cortex, + = in CSF); `bank_frac` | ≈ −1 to 0 mm, bank_frac high | middle of the sulcal CSF (> +0.5 mm) |
+| **Curvilinear**, following gyral contours | `tube_ratio`: 3-D Hessian shape, 0 = flat sheet, 1 = tube | < 0.4 (sheet) | > 0.5 (tube) |
+| Follows the gyrus | `surface_alignment`: the sheet lies parallel to the cortex | ≈ 1 | lower |
+| **Tram-track**: both banks of a sulcus | `tram_frac`: walks across the sulcus and tests the opposite bank, with brighter CSF between them | > 0 | ≈ 0 (one central line) |
+| Not part of the venous tree | `vein_tree_mm`: extent of the connected dark-tube network (**recorded only**: on real SWI the network merges brain-wide) | short | long, branching |
+| Asymmetric | `mirror_dark_frac`: darkness at the mirror point in the other hemisphere | low | high (normal veins are paired) |
+| Focal, not regional (v4.19.2, recorded only) | `region_z`, `region_dark_frac`: candidate vs its own cortical label; `mirror_region_z`, `cand_mirror_z`: vs the same label in the other hemisphere | far darker than its region, region not broadly dark | naturally dark cortex (motor strip, visual cortex): region broadly dark, symmetric |
+| **Remote from lobar ICH** | `ich_dist_mm`, `near_ich_suggest` (≤ 5 mm) | far | near → reader presses **i** |
+| **Supratentorial** | `infratentorial` | 0 | 1 → classical superficial siderosis, reported separately |
+| Chronic: **no FLAIR hyperintensity** | `flair_csf_z`, `flair_bright` (only with FLAIR) | not bright | bright → acute convexity SAH |
+| Mimic: **cortical vein thrombosis** | `flair_ctx_z`, `flair_ctx_bright`: FLAIR signal of the cortex next to it | not bright | bright cortex → check for thrombosis |
+| Counted **by sulci** (focal 1–3, disseminated > 3) | `score_css.py` with Destrieux labels | | |
+
+Also changed in v4:
+- **Search zone = the pial band** (cortex + subarachnoid CSF). White matter and deep nuclei are
+  excluded. v3 dilated the cortex into white matter, which is darker than grey matter on SWI.
+- **Local darkness reference excludes dark voxels** (two passes), so extensive cSS no longer
+  darkens its own reference.
+- **Elongation filter 2.0** (was 2.5). A tram-track lesion is two parallel plates, elongation
+  about 2.4, and v3 dropped those. Round microbleeds stay about 1–1.5.
+- **T1 anatomy** (`prep_anat.sh`): accurate pial surface, plus Destrieux sulci when recon-all is
+  available.
+- **Sulcal scoring** (`score_css.py`): "adjacent sulci" means sulci that touch each other or
+  border the same gyrus. It replaces the 10 mm Euclidean rule that turned P006 left from 1 into 2.
+- **Bug fixes**:
+  - the batch script now runs detection;
+  - reader calls are tied to the lesion itself, not its rank;
+  - every candidate is reviewed by default, and unreviewed candidates are reported;
+  - hemisphere assignment is fixed;
+  - a stale SynthSeg segmentation is no longer reused;
+  - the synthetic test requires ≥30 % lesion coverage.
+- **Reviewer** shows an 8 mm minIP slab and the definition features for every candidate.
+
+> **Status: honest.** On both phantoms all definition features separate cSS from veins.
+> **The v4 ranking weights are NOT validated on real patients yet.** They are transparent
+> rules, not a trained model. That is why every candidate is now reviewed, so the score does
+> not depend on the ranking. Validate on P006 and the next cases before trusting the ranking
+> (step 6).
+
+---
+
+## 0a. v5.0 architecture (Stage A: v5.0.0)
+
+v4.19 reached a documented ceiling: 6-16 candidates per healthy LEMON scan, almost all naturally dark cortex, and
+hand-made features (surface width, regional darkness) that separate on phantoms but not on real scans. v5.0 adds
+decision layers, each behind a switch so it can be compared with v4.19 on the same scans:
+
+1. **Mimic layer** (`mimic_rules.py`, `CSS_USE_MIMIC=1` to act). Calcification by **phase**: the dipole pattern of
+   the candidate's own shape is fitted to the 4 mm high-pass phase; the sign of the fitted susceptibility decides.
+   The sign of the median phase is NOT used: inside a paramagnetic sheet lying flat to B0 it is negative (pipeline's
+   own forward model), so it would call real cSS on horizontal cortex "calcium". The scanner's sign convention is
+   fitted the same way on the vessel map. Voxels whose phase may have wrapped are left out. **FLAIR** evidence
+   (bright sulcal CSF = acute cSAH, bright cortex = vein thrombosis) is a soft penalty only: cSAH and cSS co-exist
+   in CAA. **Microbleed clusters**: compact parenchymal blobs left after one erosion of the dark voxels around the
+   candidate. Not handled: laminar necrosis, haemorrhagic infarct (no DWI / T1 sign).
+2. **Pial-surface sampling** (planned, v5.0.2): sample the SWI along the pial normal per vertex and detect patches
+   on the mesh, next to the volumetric candidates.
+3. **Trained ranking** (`train_ranker.py`, `rank_candidates.py`): L2 logistic regression on the recorded features,
+   leave-one-patient-out, compared with score_v4 on the same objects; dev split only.
+
+All thresholds of the new layers are provisional (phantoms only). Limits found while building it: the phase
+statistic assumes noise correlated over ~2 voxels and is optimistic near veins; on the phantom, microbleeds at the
+cortex-white-matter junction are not generated as candidates at all, so E11 will rarely have anything to act on.
+
+## 1. One-time setup (Mac)
+
+```zsh
+cd ~/Downloads/cSS_pipeline          # this folder
+zsh install.sh                       # copies scripts to ~/css_project/scripts (backs up old ones)
+# open a NEW Terminal window, then:
+conda activate css
+conda install -n css -c conda-forge matplotlib scikit-image -y     # if not already there
+bash tests/run_tests.sh              # phantom tests, ~3 min, must end with ALL TESTS PASSED
+bash tests/test_shell.sh             # checks run_css.sh / prep_anat.sh flow (FreeSurfer stubbed)
+```
+
+FreeSurfer 8.2 must be set up in your shell (`$FREESURFER_HOME`, licence file). `recon-all`
+is only needed for sulcal scoring.
+
+---
+
+## 2. Which series to export
+
+| Series | Use? | Why |
+|---|---|---|
+| **SWI** (processed SWI image, or the SWI magnitude) | **YES, main input** | Detection runs on this |
+| **3-D T1** (MPRAGE / SPGR / BRAVO, ~1 mm) | **YES**, strongly recommended | Accurate pial surface, sulci, hemisphere |
+| **FLAIR** (3-D or 2-D) | Yes, if available | Separates chronic cSS from acute convexity SAH |
+| **SWI minIP** | **NO, not as input** | Slab projection: it merges veins and cSS from neighbouring slices and destroys the 3-D shape analysis. The reviewer computes its own minIP panel from the SWI. |
+| SWI phase / filtered phase | Optional, reading aid only (`--phase`) | Both haemosiderin and deoxy-Hb are paramagnetic, so phase does not separate cSS from veins, but it **does** flag calcium (opposite sign), an official cSS mimic |
+
+Convert DICOM, one folder per series:
+
+```zsh
+P=P007; R=~/css_project/raw/$P
+dcm2niix -z y -f "%s_%d" -o $R/SWI   "<SWI DICOM folder>"
+dcm2niix -z y -f "%s_%d" -o $R/T1    "<T1 DICOM folder>"
+dcm2niix -z y -f "%s_%d" -o $R/FLAIR "<FLAIR DICOM folder>"
+ls $R/*                              # file names = <series number>_<series description>
+grep -h '"ImageType"' $R/SWI/*.json  # skip any file whose ImageType contains MIN_IP / MNIP / PHASE / "P"
+```
+
+Use **study codes only** (P007), never names or MRNs. Never commit or share patient data.
+
+---
+
+## 3. Run one patient
+
+### Route A — fast (minutes): SWI + T1 + FLAIR, SynthSeg on the T1
+```zsh
+run_css.sh P007 ~/css_project/raw/P007/SWI/<swi>.nii.gz \
+           --t1 ~/css_project/raw/P007/T1/<t1>.nii.gz \
+           --flair ~/css_project/raw/P007/FLAIR/<flair>.nii.gz
+```
+Steps that run:
+1. SWI: import, then SynthStrip (CSF kept, so cSS at the surface is not stripped).
+2. `prep_anat.sh`:
+   - T1: import, SynthStrip, `mri_synthseg --parc --robust`.
+   - Register SWI → T1 with `mri_coreg` (rigid).
+   - Labels → SWI grid with `mri_vol2vol --inv --interp nearest`.
+   - FLAIR: import, SynthStrip, `mri_coreg` → SWI, resample.
+3. `align_seg.py`: uses the T1 labels and masks them to the SWI coverage.
+4. `detect_css.py`: candidates and features → `review/P007_candidates.csv/.nii.gz`.
+5. freeview opens with the candidates (unless `NOVIEW=1`).
+
+Scoring in Route A uses the **Euclidean approximation** (no sulcal labels).
+
+### Route B — best (1–3 h): adds recon-all → sulcal scoring
+```zsh
+run_css.sh P007 <swi> --t1 <t1> --flair <flair> --recon
+```
+Same as Route A, except:
+- `recon-all -all` runs on the T1 (log: `work/P007_recon.log`);
+- registration uses `bbregister --t2 --init-coreg` (boundary-based, more accurate);
+- Destrieux labels (`aparc.a2009s+aseg`) are brought onto the SWI grid, so `score_css.py`
+  scores **by sulci**.
+
+Tip: start recon-all for the next patients overnight, e.g.
+`recon-all -s P008 -i <t1> -all -threads 8 &`. `prep_anat.sh` re-uses a finished recon-all
+automatically.
+
+### Route C — SWI only (no T1 available)
+```zsh
+run_css.sh P007 <swi>
+```
+Uses SynthSeg on the SWI (coarser cortex, so the pial-distance features are less reliable).
+
+### Batch (no viewer)
+```zsh
+run_all.sh P007 P008 P009        # each needs data/<ID>_swi.nii; logs in ~/css_project/logs/
+```
+
+---
+
+## 4. Quality control (2 minutes, do not skip)
+
+`prep_anat.sh` prints a freeview command such as:
+```zsh
+freeview -v data/P007_swi.nii work/P007_t1seg_swispace.nii.gz:colormap=lut:opacity=0.3 \
+         work/P007_flair_swispace.nii.gz:visible=0 work/P007_a2009s_swispace.nii.gz:colormap=lut:opacity=0.3:visible=0
+```
+Check in three planes:
+- the coloured cortex ribbon follows the SWI cortex, especially at the vertex and in the
+  occipital lobes;
+- the FLAIR edges line up when you toggle it on and off.
+
+**If it is misaligned** by more than about 1–2 mm, delete `work/P007_t1seg_swispace.nii.gz` and
+re-run `run_css.sh P007`. It falls back to SWI SynthSeg. Note the case in the workbook.
+
+**Lobar ICH present?** The detector finds large, compact dark haematomas automatically
+(`work/P007_ich_used.nii.gz`; check it). To override, draw the haematoma (including its
+hemosiderin rim) in freeview as a new volume, save it as `work/P007_ich.nii.gz`, and re-run
+`python ~/css_project/scripts/detect_css.py P007`.
+
+---
+
+## 5. Review and score
+
+```zsh
+python ~/css_project/scripts/review_css.py P007          # ALL candidates (default)
+```
+Screen layout:
+- **Top left:** the whole slice.
+- **Bottom left:** an **8 mm minIP slab**. Veins become continuous, branching tubes; cSS stays a
+  band along the cortex.
+- **Right:** three adjacent slices, raw on top and outlined underneath.
+- **Title:** region, volume, darkness, and the **definition features** (pial distance,
+  plate/tube shape, follows-surface, tram-track %, vein tree, mirror darkness), plus flags:
+  vein-like, ICH distance, infratentorial, FLAIR-bright.
+
+Keys: **y** cSS · **v** vein · **o** normal · **a** artifact · **i** near ICH · **u** unsure ·
+**b** back · **[ ]** slice · **q** finish. Every key press is saved, so you can quit and resume.
+
+Reading checklist for each candidate (radiological criteria):
+1. Is it **on the cortical surface** (subpial or in the subarachnoid space), following the gyral
+   contour over consecutive slices? → cSS-compatible.
+2. **Tram-track**, i.e. both banks of the same sulcus dark? → strongly favours cSS.
+3. In the minIP panel, does it **continue as a tube** into a branching network or towards the
+   sinus? Is it a **dot** on perpendicular slices? → vein.
+4. Is the same structure present at the **mirror location**? → favours a normal vein, or normal
+   iron in the motor cortex.
+5. **Contiguous with a lobar ICH**? → press **i** (reported, not scored).
+6. **Infratentorial** (cerebellum, brainstem)? → not cSS. Think of classical superficial
+   siderosis.
+7. **FLAIR-bright sulcus** at the same place? → acute convexity SAH, not chronic cSS.
+
+When you press **q**, scoring runs automatically (`mark_css.py` → `score_css.py`):
+```
+P007  cSS multifocality score: 3/4   (disseminated)   [sulcal (Destrieux)]
+  left : score 1  foci 2  clusters 1  sulci 2
+  right: score 2  foci 3  clusters 3  sulci 4
+  sulci: ctx_lh_S_postcentral, ctx_lh_S_intrapariet_and_P_trans, ...
+  volume: candidates ... mm3, grown (full extent) ... mm3
+```
+- **Per hemisphere:** 0 = none; 1 = one sulcus, or ≤ 3 immediately adjacent sulci; 2 = ≥ 2
+  non-adjacent sulci, or > 3 sulci. **Total 0–4.**
+- **STRIVE-2:** focal = 1–3 sulci; disseminated = > 3 sulci.
+- `WARNING: N candidates were not reviewed`: the score is a **lower bound**. Finish the review.
+- Results are written to `review/P007_score.json` and `review/css_scores.csv` (one row per
+  patient), and the grown cSS mask to `review/P007_css_mask.nii.gz`.
+
+Enter the result in the workbook (Case Log). **Review before you look at the expert score**
+(blinding).
+
+---
+
+## 5a. Fewer false positives (v4.8)
+
+Reader feedback on P006 (duplicates, specks, obvious veins, skull-base artifact, faint normal cortex)
+led to these steps. **Excluded candidates are never deleted.** They are listed with the reason in
+`review/ID_excluded.csv` (and `ID_excluded.nii.gz` to view in freeview).
+
+| Problem | Fix |
+|---|---|
+| One dark line reported 2–3 times | Pieces closer than **3 mm** are merged into one candidate (this also joins the two banks of a tram-track), **but only while the merged object stays ≤ 40 mm long**; longer chains (on P006: veins chained into 10–17 cm objects) keep their pieces separate |
+| Tiny specks | Candidates smaller than **6 mm** overall are excluded (curvilinear cSS is longer) |
+| Microbleeds | Small and ≥ half surrounded by brain tissue (AJNR 2016 rule) → flagged `cmb_like` (an exclusion until v4.9.2, now a flag only) |
+| Obvious veins | **Tubular** (tube_ratio > 0.45), **out in the middle of the sulcal CSF** (> 0.5 mm outside the pial surface) and **no tram-track** → excluded |
+| Skull-base artifact | Artifact-zone labels (orbitofrontal, temporal pole, …) in the lowest 40 % of the cerebrum (v4.9; was 30 %) → excluded |
+| Faint normal dark cortex | Less than **0.75 SD** darker than its 1–2 mm surroundings ("well-defined" in the definition) → excluded |
+
+| Cerebellum / tentorium lines (v4.9) | ≥ 30 % of the candidate within 5 mm of cerebellum or brainstem → excluded (cSS is supratentorial by definition; infratentorial siderosis is a different disease) |
+| Basal cisterns (v4.9) | ≥ 30 % within 5 mm of brainstem, ventral diencephalon, hippocampus or amygdala → excluded (circle of Willis, posterior cerebral artery, basal vein of Rosenthal) |
+| Skull base (v4.9) | Lowest 20 % of the **cerebrum's** height (any label), or artifact-zone labels in the lowest 40 % → excluded |
+
+**v4.9.2: when the position rules apply.** They backfired on P010 (a partial slab, no T1): synthetic
+lesions were excluded as "skull base" or "basal cisterns".
+- **Skull-base and basal-cistern rules** run only with **T1 anatomy** and when the scan actually
+  **includes the skull base**. A slab cut off at the bottom has no skull base in it.
+- **Without a T1**, the cerebellum rule needs ≥ 50 % of the candidate near the cerebellum.
+- **Microbleed-like** is now a flag in the reviewer, not an exclusion.
+- The **merge gap** grows with slice thickness (2 × slice, 3–4 mm). The **elongation filter**
+  applies only to single-piece candidates.
+- The first output line states the anatomy source and the coverage.
+
+- Safety checks: on both phantoms every cSS lesion is still kept (6/6 and 8/8), while half the
+  phantom veins are removed.
+- On a real scan, check that your **known** lesions survive:
+  ```
+  python ~/css_project/scripts/check_known.py P006 --old ~/css_project/review/v3/P006_candidates.nii.gz --ids 3,4,5,13,18,19
+  ```
+- To switch every exclusion off (e.g. to compare): `CSS_KEEP_ALL=1 python ~/css_project/scripts/detect_css.py P006`
+
+## 5b. Expert reading (the reference standard)
+
+Your own calls are a "non-expert + tool" reading. The **reference** must come from an expert.
+Make it quick for them:
+
+1. **Make the blinded picture sheet:**
+   ```
+   python ~/css_project/scripts/expert_sheet.py P006
+   ```
+   This creates `~/css_project/review/P006_expert_sheet.pdf`:
+   - one row per candidate (SWI zoom | outlined | 8 mm minIP);
+   - **random order** with new numbers, and **no scores**, so the expert isn't biased;
+   - an instruction page and an answer grid.
+
+   The key (sheet number → candidate) is saved separately in `P006_expert_key.csv`. **Don't send
+   the key**, only the PDF. It contains no names, only the study code.
+2. The expert writes a letter for every number: **C** cSS · **V** vein · **N** normal/other ·
+   **H** contiguous with an ICH · **U** unsure.
+3. **Import the answers.** Numbers you don't list count as N:
+   ```
+   python ~/css_project/scripts/expert_import.py P006 expertA --letters "1V 2V 3C 4N 5U ..."
+   ```
+   or, shorter:
+   ```
+   python ~/css_project/scripts/expert_import.py P006 expertA --css 3,17,40 --unsure 5
+   ```
+   Add `--score` to compute the 0–4 score from the expert's calls. Your own calls are not changed.
+4. For a second reader, use the same sheet with another name (`expertB`). This gives inter-rater
+   agreement.
+5. `feature_report.py` now uses the expert calls automatically when they exist. Use
+   `--source reader` to use yours instead.
+
+### Labels for validation (v4.15)
+
+The answers are the reference standard for every later threshold and model, so collect them like this:
+
+1. **Assign the split first**, before anyone looks at the pipeline output:
+   `python ~/css_project/scripts/study_meta.py P012 --split test` (or `dev`). It cannot be changed later
+   without `--force`. Studies already used to design rules (P006, P010, P011) are `dev`.
+2. **Sheet with the excluded objects mixed in** (unmarked), so the expert's calls also check the exclusion
+   rules and give labelled hard negatives:
+   `python ~/css_project/scripts/expert_sheet.py P012 --include-excluded`
+3. **Fine-grained codes** (page 1 of the sheet), optional confidence 1-5:
+   C cSS · V vein · **VS vein along the cortical surface** · VC mid-sulcal vein · VT transcortical vein ·
+   VX vein at a sinus · TV thrombosed vein · A air-bone artifact · AM motion artifact · N normal/other ·
+   NI normal iron-rich cortex · MB microbleed · CA calcification · SAH acute cSAH · LN laminar necrosis ·
+   HI haemorrhagic infarct · IS infratentorial siderosis · H contiguous with ICH · U uncertain.
+   `python ~/css_project/scripts/expert_import.py P012 expertA --letters "1C:5 2VS:4 3VX 4A ..."`
+   Plain C / V / N / H / U still work. A blinded re-read weeks later: same command with `--session 2`.
+   Every answer goes into `labels/candidate_labels.csv`; if the expert calls an *excluded* object cSS,
+   the import warns: that exclusion rule removed real cSS.
+4. **Missed cSS**: the expert outlines every cSS that has no number (freeview on the SWI, saved as
+   `labels/P012_missed_expertA.nii.gz`), then
+   `python ~/css_project/scripts/label_missed.py P012 expertA` records, for each outline, whether it was
+   excluded (which rule), dropped before feature extraction (which gate) or never generated. Without
+   these outlines sensitivity cannot be measured.
+5. **Patient-level reference**: `study_meta.py P012 --status pos --ref-L 1 --ref-R 2 --motion 0`.
+   Protocol and QC fields are filled from `review/P012_qc.json`.
+
+The `VS` (surface vein) labels are the hard-negative set for the vein-tracking and surface features
+planned next; please label veins with the specific code whenever possible.
+
+## 5c. Synthetic lesions (v4.10)
+
+`make_synthetic.py` inserts artificial cSS into a cSS-negative scan, so we know exactly where the
+lesions are. The v3 generator makes them **realistic**: the P006 stress test showed that the old
+lesions were too big and blob-like, so size and branching separated them "for the wrong reason".
+
+- **Thin curvilinear lines** traced along the cortex–CSF boundary: 1 voxel wide, sometimes 2
+  (blooming), **5–30 mm** long, on 2–5 slices.
+- **Tram-track** in 40 % of lesions: the opposite bank of the same sulcus gets a matching line.
+- **Vein decoys** (default 4 per synthetic scan in the stress test): dark tubes 0.5–0.9 mm in
+  radius and 15–40 mm long, running through the sulcal CSF. The stress test reports each feature's
+  AUC **vs these decoy veins** as well.
+- `--legacy` reproduces the old generator for comparison.
+
+```
+python ~/css_project/scripts/stress_test.py --hosts P006 --depths 0.6,0.45,0.3 --seeds 1,2 --tag p006_v3
+```
+
+## 5d. Excluding vessels (v4.11)
+
+Veins are the commonest false positive. Without phase, a vein and cSS look the same on one SWI slice
+(both are dark: deoxyhaemoglobin and hemosiderin are both paramagnetic). They differ in **3-D shape and
+in where they go**. A radiologist tells them apart by scrolling: a vein carries on, cSS stays on the
+cortical surface. v4.11 measures this:
+
+| Measure (column) | What it asks | cSS | Vessel |
+|---|---|---|---|
+| `vessel_wm_mm` | Does a dark **tube** continue from the candidate's deep end **straight on into the white matter** (within a 30° cone)? | ~0 mm | medullary / transcortical vein: several mm |
+| `axis_normal` | Does the candidate run **perpendicular** to the cortex (0 = along the surface, 1 = straight in)? | low | high |
+| `vessel_run_mm` | Does a tube continue **straight on beyond either end** along the surface? (recorded only) | short | cortical vein running on |
+| `vessel_ext_mm` | Any dark tube connected within 20 mm (recorded only; saturates on real SWI) | — | — |
+
+**New exclusion: "vessel"** = `vessel_wm_mm ≥ 4` **and** `axis_normal ≥ 0.5` **and** no clear
+tram-track (`tram_frac < 0.4`). Both signs are needed:
+- `axis_normal` alone would remove real cSS that wraps from the gyral crown down into a sulcus;
+- the white-matter tube alone would remove cSS that happens to touch a medullary vein.
+
+The existing **"vein"** rule (tubular, out in the middle of the sulcal CSF, no tram-track) stays.
+
+How the vessel map is built:
+- dark tubular voxels (3-D Hessian: two strong curvatures, one weak) in the cortical band, and in the
+  white matter up to 15 mm deep, judged against the WM (≥ 3 SD darker than WM);
+- pieces shorter than 3 mm are dropped as noise; 1-voxel gaps are bridged;
+- round blobs and the rim of a lobar haematoma are not counted as vessels.
+
+**View it:** `freeview -v data/P011_swi.nii work/P011_vessels.nii.gz:colormap=heat:opacity=0.4`
+
+**Stress test** (`--radial 2`, the default) also inserts **transcortical vein decoys**: straight
+tubes from the CSF through the cortex 10–18 mm into the WM. Two new summary lines:
+- `missed synthetic lesions: ...` says *which rule* removed a synthetic cSS. If "vessel" appears
+  often on a real host, the rule is too aggressive.
+- `decoy veins: N still shown, N excluded (...), N not detected`.
+
+Phantom results: all synthetic lesions are kept (24/24); the phantom's transcortical vein and 2 of 2
+radial decoys are excluded.
+
+**Limits (honest):**
+- A cortical vein lying **along** the surface is the hardest mimic. `vessel_run_mm` is recorded
+  so its value can be measured on real data before any rule uses it.
+- Thresholds are set on phantoms, not on real patients. **Run `check_known.py` on P006** to confirm that the
+  known foci are not excluded as "vessel".
+
+## 5e. Choosing the next exclusion rule from your own data (rule_test.py)
+
+Use known cSS (P006's 6 foci) and cSS-negative patients (P011) to see which single-feature rule
+would remove false positives while keeping every known lesion:
+```
+python ~/css_project/scripts/rule_test.py --pos P006 --old ~/css_project/review/v3/P006_candidates.nii.gz \
+   --ids 3,4,5,13,18,19 --neg P011 --synthetic ~/css_project/results/stress_p011_v411_features.csv
+```
+- The first table compares each feature between the known lesions and the false positives.
+- The second table lists rules whose threshold sits just beyond the most extreme known lesion, with
+  how many false positives each removes, and how many synthetic lesions it would lose.
+- A rule is worth adopting only if it removes many false positives, loses few synthetic lesions and
+  makes radiological sense. With 6 known lesions, a "safe" rule can be safe by chance.
+
+## 5f. "Off the cortex" exclusion (v4.12, chosen with rule_test.py)
+
+cSS coats the pial surface, so it always touches the cortex. A dark line lying wholly out in the
+sulcal CSF is a vein. **Excluded** when all of these hold (T1 anatomy only):
+- `cortex_frac` < 0.30 (less than 30 % of the candidate is in cortex);
+- `pial_dist_mm` > +0.30 (centre lies outside the pial surface);
+- no tram-track (`tram_frac` < 0.2).
+
+Evidence (rule_test, 6 known P006 foci vs 26 P011 false positives): known cSS have cortex_frac ≥ 0.55
+and pial_dist ≤ −0.57 mm; false positives have medians 0.16 and +1.22 mm. The thresholds sit
+well away from every known lesion, deliberately looser than the tightest "safe" cut-offs.
+
+## 5g. Ideas from van Harten et al. 2023 (Leiden), implemented in v4.13
+
+Their method: 2-D vesselness filter (σ = 1 voxel) → rater-placed seeds → 3-D 6-neighbour region
+growing → false positives removed by the rater → cSS volume. Our pipeline already does the same steps
+automatically (ridge filter, automatic seeds, 6-neighbour growing in `score_css.py`, reader review).
+What their **Discussion** adds:
+
+1. **Volume depends on the scanner.** Blooming makes cSS look wider at 3 T, at longer TE and on
+   SWI. It widens the lesion *perpendicular* to the cortex much more than *along* it. They suggest
+   the **cortical surface area** covered, or a **percentage** of the cortex, instead. `score_css.py`
+   now reports:
+   - `surface_mm2`: cortical surface covered by cSS;
+   - `L_surface_pct` / `R_surface_pct`: % of each hemisphere's cortical surface;
+   - `volume_note`: a warning when slices are thicker than 1.5 mm.
+
+   On the phantom, adding 1 voxel of blooming doubled the volume (×2.13) but raised the surface
+   area only ×1.30 (2 voxels: ×3.22 vs ×1.55).
+2. **Reproducibility statistics** they report (intra- and inter-observer): Pearson, ICC (absolute
+   agreement), Bland–Altman and Dice. `agreement.py` computes all four between two scoring sessions
+   or two readers:
+   ```
+   cp -R ~/css_project/review ~/css_project/review_session1     # after scoring all patients once
+   # ... weeks later, review and score again blinded ...
+   cp -R ~/css_project/review ~/css_project/review_session2
+   python ~/css_project/scripts/agreement.py --a ~/css_project/review_session1 --b ~/css_project/review_session2 --col surface_mm2 --plot ~/css_project/results/agreement.png
+   ```
+   Their values: ICC 0.995, Pearson 0.991, mean Dice 0.75. Dice is naturally low for thin, sparse masks.
+3. **Ceiling effect** (their Fig. 4): patients scored 4/4 ranged from 2.7 to 14.3 mL. To check this
+   in your data:
+   `python ~/css_project/scripts/agreement.py --vs-score ~/css_project/review --col surface_mm2 --plot ~/css_project/results/vs_score.png`
+4. **Progression** is their main use case. Follow-up scans must use the same scanner and protocol.
+   Not implemented yet (see the next steps in CLAUDE.md).
+
+## 5h. Case QC and bookkeeping (v4.14)
+
+Every detection run now writes `review/ID_qc.json` and prints a third summary line, e.g.
+`P007: QC low_confidence_review (SWI-only anatomy (no T1)), pial edge agreement 0.9 mm, ...`.
+
+- **Status:** `ok`, `low_confidence_review` (SWI-only anatomy, label pial boundary > 1.5 mm from the SWI
+  cortex edge, bbregister cost > 0.8, slices > 2 mm) or `insufficient_quality` (the SWI is not stored with
+  the slice axis last, or labels cover < 90 % of the brain slices). The reviewer prints a warning.
+- **The thresholds are provisional and nothing uses the status yet.** No candidate is added, removed or
+  re-ranked because of it.
+- **Regional edge agreement** (left/right × inferior/middle/superior) shows where the T1 labels fit the
+  SWI worst; check those areas in freeview (QC step 4).
+- New columns (appended): `qc_status`, `rule_version` (which rule E1-E9 excluded a row, and the version
+  that introduced it), `n_pieces` (fragments merged into the candidate), and in `ID_excluded.csv`
+  `exclusion_confidence` (high / medium / low; low whenever the case QC is not ok).
+- Components removed before feature extraction (too small, < 2 slices, not elongated, no cortex nearby)
+  are listed in `work/ID_dropped.csv` (+ `.nii.gz`). They are not shown for review; the stress test uses
+  them to say why a synthetic lesion was missed.
+- Fixed: `extent_mm` was too small for candidates on the first slice of the volume, so a lesion at the
+  edge of a partial slab could be excluded as a "speck".
+
+## 5i. Surface-following veins (v4.16, recorded only)
+
+A cortical vein running **along** the cortex is the false positive the definition-based features cannot
+remove: it is near the pial surface, follows it, and is elongated, like cSS. What differs is where it
+**goes**: a vein runs on and branches, towards a larger vein or a sinus; cSS ends.
+
+**New columns in `ID_candidates.csv` and `ID_excluded.csv`** (detector, every route):
+
+| Column | Meaning | cSS | Surface vein |
+|---|---|---|---|
+| `local_cont_max_mm`, `local_cont_min_mm` | dark continuation beyond each end of the candidate (forward only, ≤ 20 mm, in cortex/CSF) | ~0 | runs on at one or both ends |
+| `terminal_ends` | ends where it stops (< 3 mm) | 2 | 0–1 |
+| `local_branch_points` | junctions with ≥ 3 arms of ≥ 3 mm in the connected vessel network | 0 | ≥ 1 if it branches |
+| `cand_geodesic_mm`, `local_net_mm` | candidate length along itself; network length | | |
+
+**Pial-surface features** (recon-all cases only):
+`python ~/css_project/scripts/surface_features.py P012` → `review/P012_surface_features.csv` (candidates
+and excluded objects). The surface-to-SWI transform comes from `subjects/P012/mri/orig.mgz` and
+`work/P012_swi2t1.lta`; the script checks it against the SWI labels and **stops if the surfaces are more than
+2 mm off** (look at the registration in freeview first). Main column so far: `surf_normal_dist_mm` (negative =
+under the pial surface, positive = out in the CSF).
+
+**None of these is used by any rule or score.** They become useful only when expert labels (`VS` = surface
+vein, section 5b) show that they separate real surface veins from real cSS, across patients.
+
+**Expert sheet:** each row now also shows coronal and sagittal views (a vein that is a line on one plane is a
+dot on another). `--vessel-overlay` adds the detector's vessel map to the minIP; it is off by default because it
+is a detector output and can bias a blinded reader.
+
+**On the brain surface** (recon-all cases): `python ~/css_project/scripts/surface_overlay.py P012` prints a
+freeview command that shows every candidate (red) and excluded object (blue) on the inflated surface;
+`--color-by expert` colours them by the expert's calls instead (red cSS, gold uncertain, blue surface vein,
+cyan other veins, orange artifact, grey other). Where objects overlap, a cSS call is always drawn on top.
+`review/P012_surf_list_objects.csv` gives the Destrieux sulcus under each object, a quick cross-check of the
+sulci used for the multifocality score. Model probabilities and review tiers are deliberately not shown: none
+are validated yet.
+
+**Stress test:** `--surface-veins K` (default 2) inserts veins that follow the cortex, some branching; the
+summary lists what happened to each decoy kind (sulcal / radial / surface).
+
+## 6. Validation plan (what makes this publishable)
+
+1. **Re-run P006 with v4.** First back up the v3 review: `mkdir -p ~/css_project/review/v3 && cp ~/css_project/review/P006_* ~/css_project/review/v3/`.
+   Then run `run_css.sh P006 <swi> --t1 <t1> --recon` and review again, ideally after a few days
+   or blinded.
+   - Target: left = 1 (the two adjacent foci are now scored by sulci), total 3.
+   - Old v3 calls are ignored automatically after re-detection (the cand_ids change), so they
+     can never be attached to the wrong lesion.
+2. After **every** case: `python ~/css_project/scripts/feature_report.py`. It shows, for each
+   feature, the AUC for cSS vs everything else across all reviewed cases.
+   - Expectation from the definition: `tube_ratio`, `pial_dist_mm`, `vein_tree_mm` and
+     `mirror_dark_frac` below 0.5; `tram_frac`, `bank_frac` and `surface_alignment` above 0.5.
+   - Compare `score_v4` with `score_v3`. Treat a feature as useful only if its AUC is ≥ 0.75 or
+     ≤ 0.25 consistently across patients.
+3. With about **15 reviewed cases**, replace the hand-set `score_v4` with logistic regression on
+   these features. Use **leave-one-patient-out** cross-validation, not pooled candidates.
+4. **Inter-rater reliability:** a second reader scores a subset blinded; report κ for presence
+   and weighted κ for the 0–4 score. Compare the pipeline + reader result with the expert
+   reference (the workbook Validation sheet does this).
+5. Include **cSS-negative CAA or age-matched scans** to measure the number of false-positive
+   candidates per scan.
+6. Synthetic stress test on real hosts (as before): `python ~/css_project/scripts/stress_test.py --tag v4`.
+
+---
+
+## 7. Method details (for the methods section)
+
+1. **Pre-processing.**
+   - SWI skull-stripped with SynthStrip, extra-axial CSF kept.
+   - T1 skull-stripped and segmented, either by SynthSeg 2.0 (`--parc --robust`) or by
+     recon-all (aparc+aseg, aparc.a2009s+aseg).
+   - Rigid registration SWI → T1: `mri_coreg`, or `bbregister --t2` with recon-all.
+   - Labels resampled to the SWI grid with nearest-neighbour interpolation.
+   - FLAIR registered rigidly to the SWI.
+2. **Pial surface.**
+   - Tissue = labelled non-CSF voxels, holes filled (ventricles).
+   - Signed Euclidean distance to the tissue boundary in mm.
+   - Surface normal = gradient of the distance map smoothed at σ = 1 mm.
+3. **Intensity normalisation.**
+   - Clip at the 99.5th percentile.
+   - z = (I − local cortical mean) / cortical MAD×1.4826.
+   - Local mean is a Gaussian-weighted (σ = 10 mm) mean over cortex. Second pass excludes
+     cortex with z < −2.
+4. **Candidate generation.**
+   - Search zone: −3.5 to +4 mm from the pial surface, minus white matter, deep grey nuclei and
+     a 3 mm skull-strip rim.
+   - Per-slice Sato ridge filter (dark ridges), σ 0.6 / 1.2 / 1.8 mm converted to in-plane pixels (v4.18;
+     until v4.17 σ was 1–3 pixels, i.e. a different filter on each protocol).
+   - Strong voxels: z < −2.5 and ridge > 85th percentile. Weak voxels: z < −2.0 and ridge > 80th
+     percentile.
+   - Hysteresis connected components per hemisphere.
+   - Filters: ≥ 25 mm³, ≥ 2 slices, elongation ≥ 2.0.
+5. **Features.**
+   - Multi-scale 3-D Hessian (σ = 0.8 and 1.6 mm, scale-normalised); eigenvalues sorted by
+     magnitude. `tube_ratio` = |λ2|/|λ3| at voxels with λ3 > 0. `surface_alignment` = |e3·n|.
+   - Tram-track: rays from bank voxels along n up to 10 mm. The opposite bank is where the ray
+     re-enters tissue. A tram is counted when the opposite bank has z < −2 and the sulcal midline
+     is > 1 SD brighter than both banks.
+   - Venous network: dark (z < −2) tubular (tube_ratio > 0.5) voxels at pial distance > −1.5 mm;
+     component bounding-box diagonal.
+   - Mirror: plane fitted (SVD) to the interhemispheric boundary, then reflection.
+   - ICH: lobar tissue with z(WM) < −3, ≥ 500 mm³, inscribed radius ≥ 2.5 mm, median > 3 mm
+     under the pial surface, not midline (< 5 mm), not at the skull-strip rim, not in artifact zones.
+   - FLAIR: median robust z of CSF within 3 mm.
+6. **Ranking score (v4, untrained).**
+   - √darkness × (0.25 + on-surface) × (0.25 + sheetness) × (0.5 + alignment) × (1 + tram).
+   - Multiplied by 0.5 for an artifact zone or a long structure, 0.7 for midline, and 0.3 for
+     infratentorial. (`mirror_dark_frac` is recorded only; it is not in the score.) (`vein_tree_mm` is recorded only: on P006 the
+     dark-tube network merged brain-wide, 255 mm for most candidates.)
+   - Darkness is square-rooted because veins were darker than cSS on P006.
+7. **Scoring.**
+   - Each accepted focus is assigned to Destrieux sulcal labels within 4 mm (≥ 15 % of voxels).
+   - Two sulci are adjacent if they touch or border a common gyral label.
+   - Charidimou 0–2 per hemisphere; STRIVE-2 focal/disseminated.
+   - Without Destrieux: 3 mm foci and 10 mm clusters (approximation).
+   - Volume: seeded region growing into dark voxels (z < −1.5) within 5 mm.
+
+---
+
+## 8. Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `run_all.sh` shows FAILED | Read `~/css_project/logs/<ID>_run.log` |
+| Candidates hug the wrong place / labels shifted | QC step 4, then delete `work/<ID>_t1seg_swispace.nii.gz` |
+| "old-format calls IGNORED" | Expected after a v4 re-run; v3 calls pointed at v3 ranks. Review again. |
+| Many candidates in orbitofrontal / temporal pole | Susceptibility artifact zones; they are flagged `artifact_zone` |
+| Need the old ranking for comparison | `CSS_RANK=v3 python ~/css_project/scripts/detect_css.py P007` (both scores are always in the CSV) |
+| recon-all failed | `work/<ID>_recon.log`; Route A still works |

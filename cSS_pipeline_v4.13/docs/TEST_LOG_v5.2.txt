@@ -1,0 +1,264 @@
+# v5.2 test log: bash tests/run_tests.sh and bash tests/test_shell.sh (phantoms / synthetic data only, no patient data)
+== phantoms
+== align
+PH1: labels from PH1_seg.nii.gz; labelled voxels before mask 827,093, after mask 827,093
+PH2: labels from PH2_seg.nii.gz; labelled voxels before mask 827,093, after mask 827,093
+== detect (clean)
+PH1: anatomy SWI-only (position rules relaxed), coverage includes skull base, merge gap 4.0 mm
+== export
+PH1	1	L	ctx-lh-postcentral	1022	212.0	13	19.6	1.0	10.7	0	0	4.19	95	22	20
+PH1	2	R	ctx-rh-superiorfrontal	2028	209.5	13	21.1	1.0	10.7	0	0	3.69	125	198	20
+PH1	3	R	ctx-rh-superiorfrontal	2028	149.0	16	7.9	0.78	10.3	0	0	1.85	180	160	20
+== synthetic lesions
+PH1S: inserted 8 synthetic cSS lesions (v3 thin, depth ~0.6, seed 1)
+PH1S: anatomy SWI-only (position rules relaxed), coverage includes skull base, merge gap 4.0 mm
+RESULT found=7 total=8 worst=9 above=2 auc=0.886 ncand=12
+== scoring with truth
+PH1S  cSS multifocality score: 4/4   (disseminated)   [euclidean (approximation); unknown]
+  left : score 2  foci 5  clusters 5
+  right: score 2  foci 2  clusters 2
+== interactive reviewer (headless test mode)
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/mark_css.py:26: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  df["near_ich"] = df.cand_id.isin(ich).astype(int)
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/mark_css.py:27: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  df["reviewed"] = df.cand_id.isin(set(rev) | set(ids) | set(ich)).astype(int)
+PH1S  cSS multifocality score: 2/4   (focal)   [euclidean (approximation); unknown]
+== calls survive a detector re-run (fingerprint matching)
+   6/8 calls re-attached by fingerprint; PH1S: 2 earlier call(s) match no current candidate (detector re-run) - dropped
+== feature report
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/feature_report.py:31: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  m["subject"] = s; rows.append(m)
+labels: PH1S=reader
+1 subject(s), 6 decided candidates: {'cSS': 2, 'Vein': 2, 'Normal': 2}
+
+== stress test (small)
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/stress_test.py:66: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  cdf["decoy_kind"] = [kinds.get(int(np.bincount(vm_[cm == c][vm_[cm == c] > 0]).argmax()), "")
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/stress_test.py:68: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  cdf["is_lesion"] = cdf.cand_id.isin(les).astype(int); cdf["host"] = h; cdf["depth"] = float(d)
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/stress_test.py:69: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  cdf["is_decoy_vein"] = (cdf.cand_id.isin(vv) & ~cdf.cand_id.isin(les)).astype(int)
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/stress_test.py:66: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  cdf["decoy_kind"] = [kinds.get(int(np.bincount(vm_[cm == c][vm_[cm == c] > 0]).argmax()), "")
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/stress_test.py:68: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  cdf["is_lesion"] = cdf.cand_id.isin(les).astype(int); cdf["host"] = h; cdf["depth"] = float(d)
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/stress_test.py:69: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  cdf["is_decoy_vein"] = (cdf.cand_id.isin(vv) & ~cdf.cand_id.isin(les)).astype(int)
+===== SUMMARY (test, detector detect_css.py) =====
+darkness 0.6: found 15/16 (94%)  median worst rank #10  median non-lesions above 2  mean AUC 0.93
+clean-scan candidates per host: {'PH1': 6, 'PH2': 7}
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/stress_test.py:66: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  cdf["decoy_kind"] = [kinds.get(int(np.bincount(vm_[cm == c][vm_[cm == c] > 0]).argmax()), "")
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/stress_test.py:68: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  cdf["is_lesion"] = cdf.cand_id.isin(les).astype(int); cdf["host"] = h; cdf["depth"] = float(d)
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/stress_test.py:69: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  cdf["is_decoy_vein"] = (cdf.cand_id.isin(vv) & ~cdf.cand_id.isin(les)).astype(int)
+===== SUMMARY (test_legacy, detector detect_css.py) =====
+darkness 0.6: found 8/8 (100%)  median worst rank #10  median non-lesions above 2  mean AUC 0.66
+== v4 phantom: tram-track / convexity cSS vs tubular & surface veins, ICH, sulcal scoring
+PH3: phantom v4  cSS lesions 6  veins 7  ICH 2135 mm3
+PH3: anatomy SWI-only (position rules relaxed), coverage includes skull base, merge gap 3.0 mm
+<scratch>/wt52/tests/check_v4.py:16: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  df["truth"] = cls
+automatic ICH mask Dice vs truth: 0.86
+transcortical vein (7) excluded/not shown
+RESULT v4 OK found=6 total=6 auc_v3=1.00 auc_v4=1.00 ich_dice=0.86
+== surface measure + agreement statistics (van Harten 2023)
+  cortical surface covered: 2054.7 mm2  (L 1.74 %, R 3.6 % of the hemisphere surface)  [compare sizes only within one protocol]
+   identical sessions -> ICC 1.000
+== rule_test (known lesions vs a negative scan)
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/rule_test.py:42: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  N = pd.concat([pd.read_csv(f"{base}/review/{s}_candidates.csv").assign(subject=s)
+PH3  cSS multifocality score: 3/4   (disseminated)   [sulcal (Destrieux); unknown]
+  left : score 1  foci 1  clusters 1  sulci 2 (20.0% of sulci)
+  right: score 2  foci 3  clusters 3  sulci 4 (36.4% of sulci)
+  sulci: ctx_lh_S_k12, ctx_lh_S_k13, ctx_rh_S_k04, ctx_rh_S_k05, ctx_rh_S_k07, ctx_rh_S_k09
+== reviewer with a phase image (calcium vs blood-product panel)
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/mark_css.py:26: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  df["near_ich"] = df.cand_id.isin(ich).astype(int)
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/mark_css.py:27: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  df["reviewed"] = df.cand_id.isin(set(rev) | set(ids) | set(ich)).astype(int)
+   phase panel rendered
+== ICH rule in sulci (Charidimou 2017): reader-drawn ICH -> left foci next to it excluded
+  ICH rule (<3 unaffected sulci to the lobar ICH, Charidimou 2017): candidates [2, 4] EXCLUDED from the score
+== Boston v2.0 cSS count by gyri: all foci -> >=2; left only (2 adjacent gyri) -> 1
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/score_v4.log:  Boston v2.0 cSS count: >=2 (multifocal cSS = >=2 strictly lobar haemorrhagic lesions)
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/score_b2.log:  Boston v2.0 cSS count: 1 focus (1 haemorrhagic lesion)
+== expert sheet (blinded PDF) + import of the expert's letters
+PH3: expert sheet with 7 objects (0 excluded mixed in) -> <scratch>/tmp_v52/tmp.osfhM5U3Vj/review/PH3_expert_sheet.pdf
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/mark_css.py:26: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  df["near_ich"] = df.cand_id.isin(ich).astype(int)
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/mark_css.py:27: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  df["reviewed"] = df.cand_id.isin(set(rev) | set(ids) | set(ich)).astype(int)
+PH3: expert expertA -> <scratch>/tmp_v52/tmp.osfhM5U3Vj/review/PH3_expert_expertA.csv   {'cSS': 5, 'Vein': 2}
+PH3  cSS multifocality score: 3/4   (disseminated)   [sulcal (Destrieux); unknown]
+   expert calls mapped back to the right candidates
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/feature_report.py:31: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  m["subject"] = s; rows.append(m)
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/feature_report.py:31: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  m["subject"] = s; rows.append(m)
+WARNING: PH1S: 6 earlier call(s) match no current candidate (detector re-run) - dropped
+labels: PH1S=reader, PH3=expert expertA
+== normal anatomy: a dark line on the cerebellum must be excluded, cSS lesions kept
+PH4: cerebellum below z=-30 mm, dark cerebellar surface line 347 voxels
+PH4: anatomy SWI-only (position rules relaxed), coverage includes skull base, merge gap 3.0 mm
+known lesion #1: EXCLUDED (infratentorial / tentorial interface (cerebellum, brainstem) - not cSS by definition)
+== partial-coverage slab (bottom cut off) with T1 anatomy: skull-base rules must switch off
+PH5: anatomy T1, coverage cut off at the bottom (skull-base rules off), merge gap 3.0 mm
+PH5: 2017 raw components -> 6 candidates [6 excluded: 4 vein, 1 vessel, 1 off the cortex; 147 pieces joined, 3 long chains kept apart] (0 artifact zone, 0 midline, 1 vein-like, 0 near ICH [auto], 0 infratentorial)  rank=v4
+== T1 anatomy on the cerebellum phantom: position rules active, cSS kept
+PH4: anatomy T1, coverage includes skull base, merge gap 3.0 mm
+PH4: 2883 raw components -> 6 candidates [20 excluded: 14 infratentorial / tentorial interface, 4 vein, 1 vessel, 1 off the cortex; 253 pieces joined, 4 long chains kept apart] (0 artifact zone, 0 midline, 1 vein-like, 0 near ICH [auto], 0 infratentorial)  rank=v4
+== v4.14 case QC, generation-gate log, extent at the volume edge, CSV column contract
+columns: v4.13 order kept, appended ['qc_status', 'rule_version', 'n_pieces', 'cand_geodesic_mm', 'local_cont_max_mm', 'local_cont_min_mm', 'local_cont_total_mm', 'terminal_ends', 'local_net_mm', 'local_branch_points', 'local_branch_per10mm', 'end_type_max', 'end_type_min', 'review_tier', 'tier_reason', 'cand_radius_med_mm', 'cand_radius_p95_mm', 'cand_radius_cv', 'net_radius_med_mm', 'net_radius_p95_mm', 'region_z', 'region_dark_frac', 'mirror_region_z', 'cand_mirror_z', 'mimic_score', 'mimic_class', 'mimic_reason', 'phase_z', 'mb_cluster_n', 'phase_r', 'piece_vol_vox', 'piece_pial_mm', 'piece_tube', 'piece_vein_frac', 'mixed_object', 'mixed_object_review', 'merge_gap_mm', 'ref_valid_frac', 'mirror_valid_frac', 'region_n_vox', 'missing_t1_anatomy', 'missing_flair_features', 'missing_phase_features', 'phase_valid_frac', 'phase_polarity_frac', 'pial_sd_p10_mm', 'pial_sd_p90_mm', 'surface_contact_frac_1mm', 'surface_contact_frac_2mm', 'csf_adjacent_frac', 'csf_depth_mm', 'sulcal_depth_mm', 'equivalent_sphere_diameter_mm', 'compactness_3d', 'sphericity', 'elongation_3d', 'flatness_3d', 'path_length_mm', 'tortuosity', 'darkness_z_p10', 'dark_frac_z2', 'dark_frac_z3', 'dark_frac_z4', 'flair_csf_bright_frac', 'feature_qc_flags', 'feature_schema_version', 'review_priority_rank', 'review_priority', 'review_priority_reason']; excluded rows carry rule ids ['E5@v4.8', 'E6@v4.11']
+dropped log: 553 components, reasons {'volume <25 mm3': 553}
+orientation: transposed phantom -> insufficient_quality (array axis 2 is not the slice / S-I axis (orientation SRA, voxel [1.2, 0.8, 0.8]))
+label shift true -> estimated mm (bias), status: 0.00 -> 0.02 (0.17) ok, 1.13 -> 1.11 (0.33) ok, 2.56 -> 2.56 (0.16) low_confidence_review, 5.12 -> 4.3 (0.15) low_confidence_review
+extent at the volume edge: 8 object(s) on slice 0, all extent_mm equal their bounding box
+isotropic 0.80 mm voxels: edge_n 4000, label shift 0.02 mm, status ok
+registration cost 0.96 + edge fit measured: status ok, note kept
+== v4.17 Stage 2: recon-all CSF labels, Hessian at the mask edge, E8 needs T1, stale inputs, manifest
+   label convention: 6 identical candidates, surface_contact and FLAIR CSF z the same with sulcal CSF = 0
+   Hessian: second derivative at the mask edge 11.6 (zeros outside) -> 0.017 (filled)
+   E8 artifact zone: 0 exclusions SWI-only, 2 with T1 anatomy
+   stale FLAIR and Destrieux labels ignored with a warning
+   manifest: v4.18, inputs ['flair', 'labels', 'swi', 't1_labels'], numpy 2.5.4
+<scratch>/wt52/tests/check_v418.py:47: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  c["truth"] = [t[C == i].mean() > 0.2 for i in c.cand_id]
+   skeleton length: straight 4.50, diagonal 6.36 (old rule 5.00), corner 9.0 mm
+   PH1: ridge sigma [0.6, 1.2, 1.8] mm = [1.2, 2.4, 3.6] px
+   PH3: ridge sigma [0.6, 1.2, 1.8] mm = [0.75, 1.5, 2.25] px
+   PH3 mirror_dark_frac: 0 NaN, median 0.58
+   end types: stops / runs_on / branches / midline recovered on synthetic geometry
+   PH3 tiers: lesions [1, 1, 1, 1, 1], others [2, 2]
+   radius: bands [0.25, 0.75, 1.25] mm; PH3 lesions median 0.73 mm, others 0.40 mm (phantom only)
+   robustness: copy 7 candidates, gamma 1 identical; 1-voxel shift -> 25 candidates, 5/7 found again (phantom)
+   sign +1: found; veins x0.04 of magnitude, calcium x1.00
+   sign -1: found; veins x0.03 of magnitude, calcium x1.00
+   robust MP2RAGE (zero-padded border): speckle 5-15 mm outside the head 83% -> 0.0%, brain correlation 1.000, white matter within 10 %; robust MP2RAGE combination, lambda 32 (background noise 25.0, band 5-20 mm outside the head)
+   dipole model: cylinders match the analytic field (within 10 %), sphere pattern +2:-1, B0 from the affine
+   physics lesions on PH1: darkened voxels outside objects TE 10 ms 4661 -> TE 40 ms 19390; calcium phase -0.35 rad (diamagnetic); found 8/8 at TE 20 ms
+   evaluation (test split, reference: consensus): 2 studies, 5 reference cSS lesions
+     NOTE: only 2 studies - intervals are wide and unstable
+     lesion sensitivity (all shown)  0.60 [0.60-0.60]
+     lesion sensitivity, top 1       0.20 [0.20-0.20]   FP per scan in top 1: 0.50 [0.00-1.00]
+     lesion sensitivity, top 2       0.40 [0.40-0.40]   FP per scan in top 2: 1.00 [0.00-2.00]
+     patient sensitivity             1.00 [1.00-1.00]
+== v4.15 expert labels: excluded objects on the sheet, fine codes, missed lesions, study metadata
+   PH3: expert sheet with 12 objects (5 excluded mixed in) -> <scratch>/tmp_v52/tmp.osfhM5U3Vj/review/PH3_expert_sheet.pdf
+   PH3: expert expertB -> <scratch>/tmp_v52/tmp.osfhM5U3Vj/review/PH3_expert_expertB.csv   {'cSS': 4, 'Vein': 2, 'Normal': 1}
+   PH3: 12 labels (5 on excluded objects, 1 defaulted to N) -> <scratch>/tmp_v52/tmp.osfhM5U3Vj/labels/candidate_labels.csv  {'vein_sulcal': 5, 'cSS': 4, 'vein_surface': 2, 'normal_other': 1}
+   expert codes, confidence, defaults, sessions, excluded objects and the old key format: OK
+   PH3: 5 missed-lesion outline(s) from expertB -> <scratch>/tmp_v52/tmp.osfhM5U3Vj/labels/missed_lesions.csv   {'not generated': 2, 'dropped': 1, 'excluded': 1, 'shown': 1}
+     #1: dropped (volume <25 mm3)  extent 1.6 mm  vox 13 72 51
+     #2: not generated (not dark enough (z >= -2 everywhere))  extent 2.2 mm  vox 56 109 64
+     #3: not generated (outside the search zone: white matter / deep-nucleus label)  extent 4.2 mm  vox 70 106 48
+     #4: excluded (E5@v4.8 vein: tubular, in the middle of the sulcal CSF)  extent 4.6 mm  vox 88 146 40
+     #5: shown  extent 4.9 mm  vox 106 32 46
+     note: 'shown' outlines are covered by a numbered candidate - check that number's call instead
+   PH3: status pos, split dev, ref 3/4, QC low_confidence_review -> <scratch>/tmp_v52/tmp.osfhM5U3Vj/labels/study_meta.csv
+   study_meta: QC fields copied, split fixed unless --force (logged)
+== v4.17 two-reader consensus, adjudication, kappa
+   kappa: textbook 0.50, quadratic-weighted near-miss 0.80, reversed -1.00
+   readerR1 vs readerR2: 12 objects in 1 patient(s): kappa cSS-vs-not 0.82 (CI needs >= 3 patients), kappa 6 classes 0.71 (CI needs >= 3 patients), raw agreement 0.83 (CI needs >= 3 patients)
+   consensus -> <scratch>/tmp_v52/tmp.osfhM5U3Vj/labels/consensus.csv (10 agreed, 2 pending, 0 single-reader); to adjudicate: <scratch>/tmp_v52/tmp.osfhM5U3Vj/labels/adjudication_todo.csv (fill adjudicated_label, then --apply)
+   consensus: {'agreement': 10, 'adjudicated': 2}; kappa(6 classes) 0.707
+== v4.19.2 regional + contralateral reference (dark gyrus vs focal cSS)
+PHR: cSS region_z -6.89..-9.24, dark frac <= 0.022, mirror 0.06 | dark gyrus region_z -0.45..-0.45, dark frac 0.78..0.79, mirror -0.02..0.02
+PHU: cSS region_z -6.72..-9.06, dark frac <= 0.022, mirror 0.03 | dark gyrus region_z -0.09..-0.09, dark frac 0.46..0.46, mirror -3.63..-3.63
+== v5.0 mimic layer (phase dipole fit, microbleed cluster, FLAIR; E10/E11 opt-in), QC strict, ranker
+<scratch>/wt52/tests/check_mimic.py:141: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  d["lesion"] = [int(np.bincount(tr[Mk == v][tr[Mk == v] > 0]).argmax()) if (tr[Mk == v] > 0).mean() > 0.2 else 0
+<scratch>/wt52/tests/check_mimic.py:143: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  d["mb"] = [bool(mb[Mk == v].mean() > 0.3) for v in d[idc]]
+why not the median sign: paramagnetic sheet flat to B0 (+0.15 ppm) has median phase -1.45 rad (negative); at +0.5 ppm the filtered median is +0.19 rad (wrapped)
+scanner convention +1: fitted +1, t 86.5, r 0.99
+scanner convention -1: fitted -1, t -83.7, r -0.99
+microbleed cluster [0.8, 0.8, 0.8] mm: 4 blobs -> 4 (score 0.6); cSS-like bands 1-4 voxels thick -> max 0
+microbleed cluster [0.8, 0.8, 1.2] mm: 4 blobs -> 4 (score 0.6); cSS-like bands 1-4 voxels thick -> max 0
+microbleed cluster [0.5, 0.5, 2.0] mm: 4 blobs -> 4 (score 0.6); cSS-like bands 1-4 voxels thick -> max 0
+FLAIR rule: none / acute (CSF z 4) / thrombosis (cortex z 4.5) / mixed - as expected; z <= 3 gives none
+phase_z, recorded only: calcified band -12.8; paramagnetic cSS +24.5, +20.2, +19.2, +12.1
+CSS_USE_MIMIC=1: E10 excludes the calcified band (E10@v5.0), paramagnetic cSS kept [1, 2, 3, 6]; microbleed row detected as 0 object(s), mb_cluster_n [] (not generated by the detector on this phantom - covered by the unit test)
+insufficient_quality (labels cover 38% of brain slices): unset -> 5 candidates, exit 0; strict -> 0 rows, exit 3, columns kept
+low_confidence_review: strict detection runs (exit 0); score_model x0.8 with the order unchanged
+stale T1 labels: unset -> SynthSeg fall-back as before; strict -> stops with an error
+perfect feature: LOPO AUC 1.0 [1.0, 1.0], darkness_z weight +6.76 (largest); score_v4 baseline 0.415; trained on 6 dev studies, test study left out
+rank_candidates: columns appended at the end, others unchanged; held-out test study ranked cSS first; missing feature filled and named; training study refused
+noise labels: LOPO AUC 0.506 [0.458, 0.562] (interval includes 0.5)
+2 labelled patients: refused (needs >= 3)
+== v4.16 surface-following branching vein draining to a sinus (PH6): vein tracking + pial-surface features
+PH6: PH3 + surface-following vein (91 vox) with branch (32 vox) draining to a sagittal sinus (1940 vox)
+vein tracking: cSS continuation <= 7.0 mm, surface vein >= 19.3 mm (sinus pieces 20.0, 3.2, 19.8, 19.8); main vein junctions 1
+surface features: direction from labels OK, RAS2RAS / VOX2VOX LTA / explicit transform identical, 8 mm shift refused; normal distance cSS -0.70 mm max, surface vein 0.53 mm min
+== v5.1 fate invariant, CSF label 0/24, axis swap, obliquity, stale inputs, mimic layer costs no true lesion
+fate invariant: 22 cases (objects: PH1S 143, PH1 239, PH2S 262, PH2 251, PH3 565, PH6 576, PH7A 565, PH7B 565, PH7C 558, PH7D 558, PHC 274, PHI 551, PHM0 554, PHM 554, PHQ2 565, PHR 288, PHS0 565, PHS1 428, PHS2 14, PHS4 14, PHT 514, PHU 416) - every object one fate, voxel for voxel; audit ok
+CSF as label 0 vs 24: identical 7 candidates and 5 exclusions (surface_contact, FLAIR CSF reference, geometry)
+in-plane axes swapped: same 7 candidates (world positions within 0.00 mm), same exclusion reasons
+oblique affine: obliquity recorded (15 / 25 deg); 15 deg changes no candidate; 25 deg -> low_confidence_review 'oblique slices'
+stale inputs: old FLAIR / phase ignored; old surface features ignored (strict: stop); changed labels -> model warning (strict: refused); manifest schema css-manifest/1.0 with build id
+mimic layer on vs off, true lesions kept: PH1S 8->8, PH2S 8->8, PH3 6->6, PH6 6->6 - none lost
+== v5.1.1 per-piece evidence / mixed objects, valid-sample fractions, missing inputs, label schema
+pieces: band + tube -> mixed (vein fraction 0.40); one kind / 12 % vein / no merging -> not mixed; rescue only for E5-E7 with CSS_MIXED_REVIEW=1
+ranker missing-input indicators: phase / FLAIR / surface families flagged per row before imputation
+PH3: v5.1.1 columns present in candidates and excluded; 0 mixed objects; CSS_MIXED_REVIEW=1 changes nothing here
+lopsided head mask: 5 objects with mirror points outside the brain (mirror_valid_frac 0.00-0.92); below 0.5 -> mirror_dark_frac NaN, not 'dark'
+expert labels: css-labels/1.0, fine label + class + confidence_missing written; --require-confidence refuses
+== v5.1.2 feature-spec families: units and phantom directions
+units: compactness sphere 1.0 / sheet 0.005 / tube 0.093; tortuosity straight 1.01, half circle 1.59 (pi/2 = 1.57)
+PH3 directions: VT.vessel_wm_mm > cSS; VC.csf_depth_mm > cSS; VS.csf_depth_mm > cSS; VS.sulcal_depth_mm < VC; VT.compactness_3d > cSS  - all met
+PHM phase: valid fraction 1.00-1.00, polarity consistency 0.57-0.96
+== v5.1.3 review-priority tiers (reading order only)
+units: 16 hand-made rows - each branch as specified; a single vein-ish feature alone stays tier 1
+phantoms PH3, PH6: every cSS lesion tier 1, every vein tier 3 (constructed veins; not performance)
+review_css.py --by-priority: order by tier applied (order: review priority 1: 5, 3: 2)
+== v5.2 surface-aligned patches, patch classifier, shared model code (nested LOPO, fold skipping, provenance)
+1. frame: n outward for sheet and tube, right-handed; dark extent across the surface sheet 12.0 mm vs tube 2.0 mm; pial distance at centre sheet -1.5 / tube +2.5 mm; tissue fraction along n 1 -> 0
+2. reversed map flipped by the labels (n . n_ref 1.000); oblique 1x1x2 mm affine: n . rotated slice axis 1.000; tiny object refused ('object has 2 voxels (< 3)')
+3. CLI: 4 objects -> 3 patches + 1 skipped ('object has 2 voxels (< 3)'); phase absent, FLAIR off-grid then stale -> missing with reason, NaN features, <ch>_missing 1; outside-brain voxels never valid; edge patch valid fraction 0.68 with the fixed shape (49, 25, 17)
+4. css_model: one-class training fold skipped and logged; a patient's out-of-fold scores ignore its own labels (plain and nested)
+5. classifier: fitted on 6 dev studies (test study left out), 190 features; LOPO AUC A_swi 0.997, G_all 0.828; held-out study AUC 0.967; --split test, too few studies, a training study, a tampered model and a schema mismatch all refused
+6. PH3: 12 objects -> 12 patches, 0 skipped with a reason; PH3: 12 patch feature rows (190 features) -> review/PH3_patch_features.csv
+== v5.2 architecture contracts (user-supplied verify_updated_architecture.py)
+PASS  source modules compile — compiled 2 modules
+PASS  static pipeline contracts — QC, fate accounting, and grouped-ranker hooks present
+PASS  surface frame and multimodal patch — shape=(33, 17, 17), valid=1.000, oblique affine
+PASS  classifier grouping and missing channels — 12 patches, 6 studies, LOPO AUC=1.000
+PASS  manifest contract — duplicate path and invalid label rejected
+SKIP  object-fate ledger — FileNotFoundError: scripts/object_ledger.py not implemented yet
+== v4.16 surface overlay for freeview (detector list / expert calls, Destrieux sulcus per object)
+   PH6: 17 objects on the surface (11 shown_candidate, 6 excluded); 0 too far from the pial surface (> 3 mm)
+   list mode: annotation and id overlay consistent; cSS sulci S_k05, S_k07, S_k13, S_k09 as constructed
+   PH6: 17 objects on the surface (7 other_vein, 5 cSS, 5 surface_vein); 0 too far from the pial surface (> 3 mm)
+   expert mode: {'other_vein': 7, 'cSS': 5, 'surface_vein': 5}; no cSS vertex hidden; colours consistent
+== stress test on a host with T1 anatomy (PH4)
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/stress_test.py:66: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  cdf["decoy_kind"] = [kinds.get(int(np.bincount(vm_[cm == c][vm_[cm == c] > 0]).argmax()), "")
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/stress_test.py:68: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  cdf["is_lesion"] = cdf.cand_id.isin(les).astype(int); cdf["host"] = h; cdf["depth"] = float(d)
+<scratch>/tmp_v52/tmp.osfhM5U3Vj/scripts/stress_test.py:69: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  cdf["is_decoy_vein"] = (cdf.cand_id.isin(vv) & ~cdf.cand_id.isin(les)).astype(int)
+PH4: anatomy T1
+darkness 0.6: found 5/8 (62%)  median worst rank #10  median non-lesions above 5  mean AUC 0.36
+  darkness_z         cSS median    8.10 | others median    7.70 | AUC 0.78
+
+ALL TESTS PASSED  (temp dir <scratch>/tmp_v52/tmp.osfhM5U3Vj)
+exit 0
+
+# tests/test_shell.sh
+(zsh not installed: using bash as a stand-in)
+== 1. SWI only
+== 2. re-run: SynthSeg re-used
+== 3. SWI re-imported -> stale SynthSeg is redone
+== 4. SWI + T1 + FLAIR (SynthSeg on T1, mri_coreg)
+== 5. --recon (recon-all, bbregister, Destrieux)
+== 6. recon-all already done -> re-used without --recon; bbregister mincost recorded
+== 6a. v4.17.2: a missing --t1 file stops prep_anat and run_css before anything runs
+== 6a2. the imported copy data/ID_t1.nii.gz can be given as --t1
+== 6c. v4.18 run_lemon.sh: GRE -> SWI -> recon route for each subject, fixed P2xx ids, re-run keeps ids
+== 6c2. recon-all fails (P203): unfinished subject folder moved aside, SynthSeg fallback on the T1, still OK
+== 6b. --phase is imported for the reviewer
+== 8. v5.0: CSS_QC_STRICT exit 3 from detection stops run_css with a message
+== 8b. v5.0: ranking model applied only to dev-split studies
+== 7. batch run_all.sh reaches detection for every subject
+SHELL TESTS PASSED
