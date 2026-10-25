@@ -403,6 +403,21 @@ v5.1") but are not ranker features; Stage A only, then stop for the user's real-
   keys. Not done (later stages): feature_*.py refactor (B), surface_sampler.py (C), training on real labels (D),
   surface as primary (F). No real-data result yet for any v5.0 rule: RUNBOOK 13a must pass first.
 
+## v5.1.0 (first stage of the user's v5.1 review prompt; docs/CHANGELOG_v5.1.md, docs/VALIDATION_PLAN_v5.1.md)
+- Output-preserving: fate invariant (exit 4), manifest fates + schema css-manifest/1.0 + build id (scripts/BUILD via
+  git archive export-subst), dropped.csv gate_id / measured / threshold, QC obliquity_deg (> 20 deg low confidence),
+  stale surface features / model (label hash, detector build) ignored or strict-stopped, audit_case.py, evaluate
+  obj_* columns, TR. check_v51.py (fates, CSF 0/24, axis swap, oblique, stale, mimic-on loses no true lesion).
+- BUG FOUND IN v5.0.0 (opt-in): E11 with CSS_USE_MIMIC=1 excluded true cSS lesion 3 of PH3 (tram-track): erosion of
+  the dark support split it into compact "microbleeds" (pieces 2x1x1 voxels and one 4x4x5). check_mimic's PHM
+  phantom did not show it. Fix: count SEPARATE compact parenchymal blobs (no erosion), >= 2 voxels across in two
+  directions, 2-6 mm. PH3 / PH6 with the layer on: 6 -> 6 lesions kept. Microbleed unit tests 4/4 at 0.8 iso,
+  0.8x0.8x1.2, 0.5x0.5x2; bands 1-4 voxels -> 0. Touching microbleeds (a chain) are not counted.
+- Already in place and now tested: CSF semantics (v4.17), orientation stop (v4.18), mm scales, mask-filled Hessian,
+  extent at the volume edge, mirror brain_in, stale FLAIR / T1 / phase.
+- Deferred: per-piece / mixed_object_review, valid-sample fractions, versioned label schema, feature-spec families,
+  review tiers, nested-CV ranker + model card, surface-aligned patches + patch classifier, richer phantoms.
+
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
 - v4 ranking weights are hand-set from the definition, not trained; review all candidates.

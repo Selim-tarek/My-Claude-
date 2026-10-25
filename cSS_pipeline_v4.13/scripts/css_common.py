@@ -1,5 +1,5 @@
 """Shared helpers for the cSS pipeline scripts (imported from the same folder)."""
-import os, numpy as np, pandas as pd
+import os, sys, numpy as np, pandas as pd
 
 FP = ["vox_i", "vox_j", "vox_k", "volume_mm3"]      # candidate fingerprint stored with each call
 
@@ -133,6 +133,24 @@ def append_rows(path, rows, key):
 
 
 # ---- v4.17 provenance helpers
+def stale_against(path, sources):
+    """v5.1: the existing sources that are NEWER than path (empty list = path is fresh; path missing = all of them)"""
+    if not os.path.exists(path): return [s for s in sources if os.path.exists(s)]
+    t = os.path.getmtime(path)
+    return [s for s in sources if os.path.exists(s) and os.path.getmtime(s) > t]
+
+
+def use_derived(path, sources, what):
+    """v5.1 freshness gate for a derived file: True = use it. Stale -> ignored with a message, or (CSS_QC_STRICT=1)
+    stop. Missing -> False, silently (callers decide whether it is required)."""
+    if not os.path.exists(path): return False
+    newer = stale_against(path, sources)
+    if not newer: return True
+    msg = f"{what} ({os.path.basename(path)}) is older than {', '.join(os.path.basename(s) for s in newer)}"
+    if os.environ.get("CSS_QC_STRICT") == "1": sys.exit(f"ERROR: {msg} - CSS_QC_STRICT=1 stops (re-run the step that makes it)")
+    print(f"warning: {msg} - ignored"); return False
+
+
 def fresh(path, ref):
     """True if path exists and is not older than ref (a derived file made after its source was imported)"""
     return os.path.exists(path) and (not os.path.exists(ref) or os.path.getmtime(path) >= os.path.getmtime(ref))
@@ -147,11 +165,31 @@ def sha256(path, block=1 << 20):
     return h.hexdigest()
 
 
+MANIFEST_SCHEMA = "css-manifest/1.0"
+
+
+def build_id():
+    """v5.1: the package build. git archive fills scripts/BUILD (export-subst); a source checkout asks git"""
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "BUILD")
+    if os.path.exists(p):
+        t = open(p).read().strip()
+        if t and "$Format" not in t: return t
+    try:
+        import subprocess
+        r = subprocess.run(["git", "-C", os.path.dirname(os.path.abspath(__file__)), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0: return r.stdout.strip() + " (source checkout)"
+    except Exception:
+        pass
+    return "unknown"
+
+
 def update_manifest(b, subj, section, data):
     """merge {section: data} into review/ID_manifest.json (one machine-readable provenance record per case)"""
     import json
     p = f"{b}/review/{subj}_manifest.json"
     m = json.load(open(p)) if os.path.exists(p) else {"subject": subj}
+    m["schema_version"] = MANIFEST_SCHEMA            # v5.1: machine-readable schema id (docs/CHANGELOG_v5.1.md)
     m[section] = data
     os.makedirs(os.path.dirname(p), exist_ok=True)
     json.dump(m, open(p, "w"), indent=2, default=str)
@@ -160,7 +198,7 @@ def update_manifest(b, subj, section, data):
 def environment_record():
     """python / package / FreeSurfer versions for the manifest"""
     import platform, importlib
-    rec = {"python": platform.python_version(), "platform": platform.platform()}
+    rec = {"python": platform.python_version(), "platform": platform.platform(), "build": build_id()}
     for mod in ("numpy", "scipy", "nibabel", "pandas", "skimage", "matplotlib"):
         try:
             rec[mod] = importlib.import_module(mod).__version__

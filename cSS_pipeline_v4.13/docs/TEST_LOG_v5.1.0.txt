@@ -1,0 +1,72 @@
+v5.1.0 test log (2026-10-25), Linux test environment, python 3.13.16 numpy 2.5.4 scipy 1.18.1 nibabel 5.4.2 pandas 3.0.6 skimage 0.26.0
+FreeSurfer: not installed here - FreeSurfer tools are stubbed in test_shell.sh; recon-all / bbregister / SynthStrip / SynthSeg real runs are SKIPPED (only on the user's Mac)
+
+== bash tests/test_shell.sh: PASSED
+== 1. SWI only
+== 2. re-run: SynthSeg re-used
+== 3. SWI re-imported -> stale SynthSeg is redone
+== 4. SWI + T1 + FLAIR (SynthSeg on T1, mri_coreg)
+== 5. --recon (recon-all, bbregister, Destrieux)
+== 6. recon-all already done -> re-used without --recon; bbregister mincost recorded
+== 6a. v4.17.2: a missing --t1 file stops prep_anat and run_css before anything runs
+== 6a2. the imported copy data/ID_t1.nii.gz can be given as --t1
+== 6c. v4.18 run_lemon.sh: GRE -> SWI -> recon route for each subject, fixed P2xx ids, re-run keeps ids
+== 6c2. recon-all fails (P203): unfinished subject folder moved aside, SynthSeg fallback on the T1, still OK
+== 6b. --phase is imported for the reviewer
+== 8. v5.0: CSS_QC_STRICT exit 3 from detection stops run_css with a message
+== 8b. v5.0: ranking model applied only to dev-split studies
+== 7. batch run_all.sh reaches detection for every subject
+
+== bash tests/run_tests.sh: PASSED
+== phantoms
+== align
+== detect (clean)
+== export
+== synthetic lesions
+RESULT found=7 total=8 worst=9 above=2 auc=0.886 ncand=12
+== scoring with truth
+== interactive reviewer (headless test mode)
+== calls survive a detector re-run (fingerprint matching)
+== feature report
+== stress test (small)
+===== SUMMARY (test, detector detect_css.py) =====
+===== SUMMARY (test_legacy, detector detect_css.py) =====
+== v4 phantom: tram-track / convexity cSS vs tubular & surface veins, ICH, sulcal scoring
+RESULT v4 OK found=6 total=6 auc_v3=1.00 auc_v4=1.00 ich_dice=0.86
+== surface measure + agreement statistics (van Harten 2023)
+== rule_test (known lesions vs a negative scan)
+== reviewer with a phase image (calcium vs blood-product panel)
+== ICH rule in sulci (Charidimou 2017): reader-drawn ICH -> left foci next to it excluded
+== Boston v2.0 cSS count by gyri: all foci -> >=2; left only (2 adjacent gyri) -> 1
+== expert sheet (blinded PDF) + import of the expert's letters
+== normal anatomy: a dark line on the cerebellum must be excluded, cSS lesions kept
+== partial-coverage slab (bottom cut off) with T1 anatomy: skull-base rules must switch off
+== T1 anatomy on the cerebellum phantom: position rules active, cSS kept
+== v4.14 case QC, generation-gate log, extent at the volume edge, CSV column contract
+== v4.17 Stage 2: recon-all CSF labels, Hessian at the mask edge, E8 needs T1, stale inputs, manifest
+== v4.15 expert labels: excluded objects on the sheet, fine codes, missed lesions, study metadata
+== v4.17 two-reader consensus, adjudication, kappa
+== v4.19.2 regional + contralateral reference (dark gyrus vs focal cSS)
+== v5.0 mimic layer (phase dipole fit, microbleed cluster, FLAIR; E10/E11 opt-in), QC strict, ranker
+== v4.16 surface-following branching vein draining to a sinus (PH6): vein tracking + pial-surface features
+== v5.1 fate invariant, CSF label 0/24, axis swap, obliquity, stale inputs, mimic layer costs no true lesion
+== v4.16 surface overlay for freeview (detector list / expert calls, Destrieux sulcus per object)
+== stress test on a host with T1 anatomy (PH4)
+ALL TESTS PASSED  (temp dir /tmp/claude-0/-home-user-My-Claude-/23d8c5c1-e437-5fef-a3ec-36693d010e56/scratchpad/tmp_v51/tmp.O0hbel26wE)
+
+== check_v51.py output
+== v5.1 fate invariant, CSF label 0/24, axis swap, obliquity, stale inputs, mimic layer costs no true lesion
+fate invariant: 22 cases (objects: PH1S 143, PH1 239, PH2S 262, PH2 251, PH3 565, PH6 576, PH7A 565, PH7B 565, PH7C 558, PH7D 558, PHC 274, PHI 551, PHM0 554, PHM 554, PHQ2 565, PHR 288, PHS0 565, PHS1 428, PHS2 14, PHS4 14, PHT 514, PHU 416) - every object one fate, voxel for voxel; audit ok
+CSF as label 0 vs 24: identical 7 candidates and 5 exclusions (surface_contact, FLAIR CSF reference, geometry)
+in-plane axes swapped: same 7 candidates (world positions within 0.00 mm), same exclusion reasons
+oblique affine: obliquity recorded (15 / 25 deg); 15 deg changes no candidate; 25 deg -> low_confidence_review 'oblique slices'
+stale inputs: old FLAIR / phase ignored; old surface features ignored (strict: stop); changed labels -> model warning (strict: refused); manifest schema css-manifest/1.0 with build id
+mimic layer on vs off, true lesions kept: PH1S 8->8, PH2S 8->8, PH3 6->6, PH6 6->6 - none lost
+== v4.16 surface overlay for freeview (detector list / expert calls, Destrieux sulcus per object)
+   PH6: 17 objects on the surface (11 shown_candidate, 6 excluded); 0 too far from the pial surface (> 3 mm)
+   list mode: annotation and id overlay consistent; cSS sulci S_k05, S_k07, S_k13, S_k09 as constructed
+   PH6: 17 objects on the surface (7 other_vein, 5 cSS, 5 surface_vein); 0 too far from the pial surface (> 3 mm)
+   expert mode: {'other_vein': 7, 'cSS': 5, 'surface_vein': 5}; no cSS vertex hidden; colours consistent
+
+== regression: 130 phantom output files vs v4.19.3: every v4.19 column identical (timestamps / split date aside); new columns appended only
+== real-data checks (RUNBOOK 13a): NOT RUN - need the user's Mac

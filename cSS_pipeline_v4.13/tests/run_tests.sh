@@ -158,6 +158,9 @@ echo "== v4.16 surface-following branching vein draining to a sinus (PH6): vein 
 python $ROOT/tests/phantom_surfvein.py; python $S/align_seg.py PH6 > /dev/null
 python $ROOT/tests/check_surfvein.py | tee $T/surfvein.log | grep -E "^(vein tracking|surface features)"
 grep -q "RESULT surfvein OK" $T/surfvein.log || { cat $T/surfvein.log; echo "FAIL: v4.16 surface-vein checks"; exit 1; }
+echo "== v5.1 fate invariant, CSF label 0/24, axis swap, obliquity, stale inputs, mimic layer costs no true lesion"
+python $ROOT/tests/check_v51.py | tee $T/v51.log | grep -vE "^RESULT"
+grep -q "RESULT v51 OK" $T/v51.log || { cat $T/v51.log; echo "FAIL: v5.1 checks"; exit 1; }
 echo "== v4.16 surface overlay for freeview (detector list / expert calls, Destrieux sulcus per object)"
 python $ROOT/tests/check_overlay.py | tee $T/overlay.log | grep -v "^RESULT"
 grep -q "RESULT overlay OK" $T/overlay.log || { echo "FAIL: v4.16 overlay checks"; exit 1; }

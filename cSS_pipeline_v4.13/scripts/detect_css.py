@@ -258,12 +258,13 @@ Rm = np.isin(seg, RH) | (seg >= 2000)
 hemiL = ndi.distance_transform_edt(~Lm, sampling=vox) <= ndi.distance_transform_edt(~Rm, sampling=vox)
 dmid = np.where(hemiL, ndi.distance_transform_edt(hemiL, sampling=vox),
                 ndi.distance_transform_edt(~hemiL, sampling=vox))
-lab = np.zeros(I.shape, np.int32); n_raw = 0; nxt = 0
+lab = np.zeros(I.shape, np.int32); n_raw = 0; nxt = 0; n_seeded = 0
 n_pieces = None; n_before_merge = None     # set by the merge step
 for side in (hemiL, ~hemiL):
     wl, nw = ndi.label(weak & side, structure=s3)
     n_raw += nw
     keep = np.unique(wl[strong & side]); keep = keep[keep > 0]
+    n_seeded += len(keep)                  # v5.1: weak components without a strong seed are "not generated"
     remap = np.zeros(nw + 1, np.int32)
     remap[keep] = np.arange(1, len(keep) + 1) + nxt
     nz = wl > 0
@@ -501,35 +502,36 @@ objs = ndi.find_objects(lab)
 rows = []
 # v4.14: components removed by the generation gates are logged (work/ID_dropped.csv/.nii.gz), not shown
 dropped = []
-def drop(p, why, vol, n_sl=None, elong=None):
+def drop(p, why, vol, n_sl=None, elong=None, gate="", measured=None, thr=None):
     c_ = np.asarray(p.centroid) / np.array(vox)              # regionprops centroid is in mm (spacing)
     dropped.append(dict(drop_id=len(dropped) + 1, reason=why, volume_mm3=round(vol, 1),
                         n_slices=n_sl, elongation=None if elong is None else round(elong, 1),
                         vox_i=int(round(c_[0])), vox_j=int(round(c_[1])), vox_k=int(round(c_[2])),
                         hemi="L" if hemiL[tuple(np.clip(np.round(c_).astype(int), 0, np.array(I.shape) - 1))] else "R",
-                        _lab=p.label))
+                        _lab=p.label, gate_id=gate, measured=None if measured is None else round(float(measured), 3),
+                        threshold=thr))                        # v5.1: gate id + measured value + threshold
 for p in regionprops(lab, spacing=vox):
     vol = float(p.area)                         # already mm3 because spacing is given
     if vol < MIN_MM3:
-        drop(p, f"volume <{MIN_MM3:g} mm3", vol); continue
+        drop(p, f"volume <{MIN_MM3:g} mm3", vol, gate="G1_volume", measured=vol, thr=MIN_MM3); continue
     sl = objs[p.label - 1]
     pad = tuple(slice(max(s.start - 3, 0), s.stop + 3) for s in sl)
     mm = lab[pad] == p.label
     n_sl = int(mm.any(axis=(0, 1)).sum())
     if n_sl < MIN_SLICES:
-        drop(p, f"<{MIN_SLICES} slices", vol, n_sl); continue
+        drop(p, f"<{MIN_SLICES} slices", vol, n_sl, gate="G2_slices", measured=n_sl, thr=MIN_SLICES); continue
     elong = p.axis_major_length / max(p.axis_minor_length, 1e-3)
     # elongation rejects round microbleeds, which are single pieces; a merged candidate (two banks,
     # a bent line) can be compact overall and is not rejected for it (v4.9.2)
     if elong < MIN_ELONG and (n_pieces is None or n_pieces[p.label] <= 1):
-        drop(p, f"elongation <{MIN_ELONG:g}", vol, n_sl, elong); continue
+        drop(p, f"elongation <{MIN_ELONG:g}", vol, n_sl, elong, gate="G3_elongation", measured=elong, thr=MIN_ELONG); continue
     seg_nb = seg[pad][ndi.binary_dilation(mm, iterations=2)]
     nb = seg_nb[seg_nb >= 1000]
     # infratentorial only when clearly cerebellar/brainstem with little cerebral cortex nearby, so
     # occipital / inferior temporal cSS next to the tentorium is not dropped from the 0-4 score
     infra = bool(np.isin(seg_nb, INFRA).mean() > 0.5 and nb.size < 0.2 * seg_nb.size)
     if nb.size == 0 and not infra:
-        drop(p, "no cortex label within 2 voxels", vol, n_sl, elong); continue
+        drop(p, "no cortex label within 2 voxels", vol, n_sl, elong, gate="G4_no_cortex", measured=int(nb.size), thr=1); continue
     # hemisphere = majority of the candidate's own voxels in the hemisphere map (v4 fix: v3 counted
     # own L/R labels, but cSS lies in sulcal CSF where both counts are 0, so medial candidates
     # could take the region - and the score - of the opposite hemisphere)
@@ -782,7 +784,10 @@ if QC_STRICT and QC["status"] == "insufficient_quality":
     for f_ in ("candidates", "excluded"):
         nib.save(nib.Nifti1Image(np.zeros(I.shape, np.int16), swi.affine), f"{base}/review/{subj}_{f_}.nii.gz")
     update_manifest(base, subj, "detect", dict(pipeline_version=RULESET, args=sys.argv[1:], qc_status=QC["status"],
-                    qc_strict=True, n_candidates=0, note="CSS_QC_STRICT=1: case cannot be scored"))
+                    qc_strict=True, n_candidates=0, note="CSS_QC_STRICT=1: case cannot be scored",
+                    fates=dict(raw_components=int(n_raw), not_generated_unseeded=int(n_raw - n_seeded),
+                               objects=int(lab.max()), qc_blocked=int(lab.max()), shown=0),
+                    environment=environment_record()))
     print(f"{subj}: QC insufficient_quality ({'; '.join(QC['reasons'])}) - CSS_QC_STRICT=1: case cannot be scored, "
           f"no candidates written [review/{subj}_qc.json]")
     sys.exit(3)
@@ -838,6 +843,23 @@ os.makedirs(f"{base}/review", exist_ok=True)
 df.to_csv(f"{base}/review/{subj}_candidates.csv", index=False)
 nib.save(nib.Nifti1Image(keep, swi.affine), f"{base}/review/{subj}_candidates.nii.gz")
 nib.save(nib.Nifti1Image(ich.astype(np.uint8), swi.affine), f"{base}/work/{subj}_ich_used.nii.gz")
+# v5.1 fate invariant: every merged object ends in exactly ONE of dropped / excluded / shown, voxel for voxel
+_n_obj = int(lab.max())
+_fate_vox = (keep > 0).astype(np.int8) + (xl > 0) + (dl > 0)
+_bad = []
+if len(dropped) + len(excluded) + len(df) != _n_obj:
+    _bad.append(f"{_n_obj} objects but {len(dropped)} dropped + {len(excluded)} excluded + {len(df)} shown")
+if (_fate_vox > 1).any(): _bad.append(f"{int((_fate_vox > 1).sum())} voxels in more than one fate map")
+if ((_fate_vox > 0) != (lab > 0)).any(): _bad.append(f"{int(((_fate_vox > 0) != (lab > 0)).sum())} object voxels without a fate")
+del _fate_vox
+if _bad:
+    print(f"{subj}: FATE INVARIANT VIOLATED - " + "; ".join(_bad) + " (outputs written, but do not use them)")
+    sys.exit(4)
+FATES = dict(raw_components=int(n_raw), not_generated_unseeded=int(n_raw - n_seeded),
+             pieces_before_merge=int(n_before_merge if n_before_merge is not None else _n_obj), objects=_n_obj,
+             dropped_by_gate=pd.Series([d_["gate_id"] for d_ in dropped]).value_counts().to_dict() if dropped else {},
+             excluded_by_rule=pd.Series([r_["rule_version"] for r_ in excluded]).value_counts().to_dict() if excluded else {},
+             shown=int(len(df)), qc_blocked=0)
 cnt = lambda c: int(df[c].astype(int).sum()) if len(df) else 0
 print(f"{subj}: anatomy {'T1' if T1_ANAT else 'SWI-only (position rules relaxed)'}, "
       f"coverage {'includes skull base' if FULL_BOTTOM else 'cut off at the bottom (skull-base rules off)'}, "
@@ -875,6 +897,6 @@ update_manifest(base, subj, "detect", dict(
                     use_mimic=USE_MIMIC, qc_strict=QC_STRICT, phase=MIM.phase_note,
                     sato_sigmas_mm=list(SATO_SIGMAS_MM), sato_sigmas_px=[round(v, 2) for v in SATO_PX]),
     anatomy="T1" if T1_ANAT else "SWI-only", flair_used=FL is not None, qc_status=QC["status"],
-    n_candidates=int(len(df)), n_excluded=len(excluded), n_dropped=len(dropped),
+    n_candidates=int(len(df)), n_excluded=len(excluded), n_dropped=len(dropped), fates=FATES,
     inputs={k: dict(path=p_, sha256=sha256(p_), mtime=os.path.getmtime(p_)) for k, p_ in _inputs.items()},
     environment=environment_record()))

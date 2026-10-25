@@ -1,4 +1,4 @@
-# All code — cSS pipeline v5.0
+# All code — cSS pipeline v5.1
 
 Generated from the files below; the files are authoritative.
 
@@ -250,7 +250,7 @@ if ls $B/scripts/*.py >/dev/null 2>&1; then
 fi
 # v4.18.3: copy to a temporary name, then rename - a batch that is running keeps reading its old file
 # (cp over a running zsh script changes it under the shell's feet)
-for f in $SRC/*.py $SRC/*.sh; do
+for f in $SRC/*.py $SRC/*.sh $SRC/BUILD; do   # BUILD: commit id, filled in by git archive (v5.1)
   t=$B/scripts/.$(basename $f).new; cp $f $t && chmod +x $t && mv -f $t $B/scripts/$(basename $f) || { echo "install FAILED at $f"; exit 1; }
 done
 grep -q 'css_project/scripts' ~/.zshrc || echo 'export PATH="$HOME/css_project/scripts:$PATH"' >> ~/.zshrc
@@ -522,7 +522,7 @@ print(f"consensus -> {cons_p} ({sum(r['method'] == 'agreement' for r in rows)} a
 
 ```python
 """Shared helpers for the cSS pipeline scripts (imported from the same folder)."""
-import os, numpy as np, pandas as pd
+import os, sys, numpy as np, pandas as pd
 
 FP = ["vox_i", "vox_j", "vox_k", "volume_mm3"]      # candidate fingerprint stored with each call
 
@@ -656,6 +656,24 @@ def append_rows(path, rows, key):
 
 
 # ---- v4.17 provenance helpers
+def stale_against(path, sources):
+    """v5.1: the existing sources that are NEWER than path (empty list = path is fresh; path missing = all of them)"""
+    if not os.path.exists(path): return [s for s in sources if os.path.exists(s)]
+    t = os.path.getmtime(path)
+    return [s for s in sources if os.path.exists(s) and os.path.getmtime(s) > t]
+
+
+def use_derived(path, sources, what):
+    """v5.1 freshness gate for a derived file: True = use it. Stale -> ignored with a message, or (CSS_QC_STRICT=1)
+    stop. Missing -> False, silently (callers decide whether it is required)."""
+    if not os.path.exists(path): return False
+    newer = stale_against(path, sources)
+    if not newer: return True
+    msg = f"{what} ({os.path.basename(path)}) is older than {', '.join(os.path.basename(s) for s in newer)}"
+    if os.environ.get("CSS_QC_STRICT") == "1": sys.exit(f"ERROR: {msg} - CSS_QC_STRICT=1 stops (re-run the step that makes it)")
+    print(f"warning: {msg} - ignored"); return False
+
+
 def fresh(path, ref):
     """True if path exists and is not older than ref (a derived file made after its source was imported)"""
     return os.path.exists(path) and (not os.path.exists(ref) or os.path.getmtime(path) >= os.path.getmtime(ref))
@@ -670,11 +688,31 @@ def sha256(path, block=1 << 20):
     return h.hexdigest()
 
 
+MANIFEST_SCHEMA = "css-manifest/1.0"
+
+
+def build_id():
+    """v5.1: the package build. git archive fills scripts/BUILD (export-subst); a source checkout asks git"""
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "BUILD")
+    if os.path.exists(p):
+        t = open(p).read().strip()
+        if t and "$Format" not in t: return t
+    try:
+        import subprocess
+        r = subprocess.run(["git", "-C", os.path.dirname(os.path.abspath(__file__)), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0: return r.stdout.strip() + " (source checkout)"
+    except Exception:
+        pass
+    return "unknown"
+
+
 def update_manifest(b, subj, section, data):
     """merge {section: data} into review/ID_manifest.json (one machine-readable provenance record per case)"""
     import json
     p = f"{b}/review/{subj}_manifest.json"
     m = json.load(open(p)) if os.path.exists(p) else {"subject": subj}
+    m["schema_version"] = MANIFEST_SCHEMA            # v5.1: machine-readable schema id (docs/CHANGELOG_v5.1.md)
     m[section] = data
     os.makedirs(os.path.dirname(p), exist_ok=True)
     json.dump(m, open(p, "w"), indent=2, default=str)
@@ -683,7 +721,7 @@ def update_manifest(b, subj, section, data):
 def environment_record():
     """python / package / FreeSurfer versions for the manifest"""
     import platform, importlib
-    rec = {"python": platform.python_version(), "platform": platform.platform()}
+    rec = {"python": platform.python_version(), "platform": platform.platform(), "build": build_id()}
     for mod in ("numpy", "scipy", "nibabel", "pandas", "skimage", "matplotlib"):
         try:
             rec[mod] = importlib.import_module(mod).__version__
@@ -832,6 +870,7 @@ EDGE_LOW_CONF_MM = 1.5     # median |label pial boundary - SWI cortex/CSF edge| 
 REG_COST_LOW_CONF = 0.8    # bbregister mincost above this -> low confidence (FreeSurfer typical < ~0.6)
 LABEL_SLICE_MIN = 0.9      # fraction of brain-containing slices that also contain labels
 THICK_SLICE_MM = 2.0       # slices thicker than this -> low confidence (sub-voxel pial thresholds)
+OBLIQUE_LOW_CONF_DEG = 20.0  # v5.1: slices tilted more than this from axial -> low confidence (provisional)
 EDGE_WIN_MM = 3.0          # search for the SWI edge within +-3 mm of the label boundary, along the normal
 
 
@@ -850,6 +889,7 @@ def read_acq(base, subj):
                     image_type=it, manufacturer=js.get("Manufacturer", ""),
                     field_T=js.get("MagneticFieldStrength"),
                     TE_ms=round(te * 1000, 1) if isinstance(te, (int, float)) else None,
+                    TR_ms=round(js["RepetitionTime"] * 1000, 1) if isinstance(js.get("RepetitionTime"), (int, float)) else None,
                     slice_thickness_mm=js.get("SliceThickness"), acq_dim=js.get("MRAcquisitionType"))
     return {}
 
@@ -927,12 +967,17 @@ def shift_fit(If, brain, normal, vox, sel, rng, iters=6):
 def case_qc(base, subj, swi, I, If, seg, brain, tissue, cortex, pial_sd, normal, rim, hemiL, vox,
             t1_anat, full_bottom):
     rng = np.random.default_rng(0)
-    qc = dict(subject=subj, qc_version="v4.19.3")
+    qc = dict(subject=subj, qc_version="v5.1")
     qc["acquisition"] = read_acq(base, subj)
     qc["voxel_mm"] = [round(v, 3) for v in vox]
     qc["orientation"] = "".join(nib.aff2axcodes(swi.affine))
     si_axis = int(np.argmax(np.abs(swi.affine[2, :3])))
     qc["si_axis"] = si_axis
+    # v5.1: obliquity = angle between the slice normal (array axis si_axis) and the scanner S-I axis. The 2-D ridge
+    # filter, slice counts and merge gap work in array slices; they stay meaningful for modest tilts only.
+    _n = swi.affine[:3, si_axis] / np.linalg.norm(swi.affine[:3, si_axis])
+    qc["obliquity_deg"] = round(float(np.degrees(np.arccos(min(1.0, abs(_n[2]))))), 1)
+    qc["array_to_world_axes"] = qc["orientation"]
     qc["thickest_axis"] = int(np.argmax(vox))
     # detect_css.py runs its 2-D ridge filter, slice counts and merge gap in array axis 2 and treats
     # axis 2 as superior-inferior ("long structure"); a sagittally/coronally stored SWI breaks that
@@ -1011,11 +1056,13 @@ def case_qc(base, subj, swi, I, If, seg, brain, tissue, cortex, pial_sd, normal,
         else:
             qc["notes"].append(f"registration cost {cost} above {REG_COST_LOW_CONF} - not used, the edge fit was measured "
                                f"(label shift {qc['label_shift_mm']} mm)")
+    if qc["obliquity_deg"] > OBLIQUE_LOW_CONF_DEG:
+        why_low.append(f"oblique slices ({qc['obliquity_deg']} deg from axial)")
     if max(vox) > THICK_SLICE_MM:
         why_low.append(f"thick slices ({max(vox):.1f} mm)")
     qc["status"] = "insufficient_quality" if why_bad else ("low_confidence_review" if why_low else "ok")
     qc["reasons"] = why_bad + why_low
-    qc["thresholds"] = dict(edge_low_conf_mm=EDGE_LOW_CONF_MM, reg_cost_low_conf=REG_COST_LOW_CONF,
+    qc["thresholds"] = dict(oblique_low_conf_deg=OBLIQUE_LOW_CONF_DEG, edge_low_conf_mm=EDGE_LOW_CONF_MM, reg_cost_low_conf=REG_COST_LOW_CONF,
                             label_slice_min=LABEL_SLICE_MIN, thick_slice_mm=THICK_SLICE_MM,
                             note="provisional, not validated; v4.14 reports only")
     os.makedirs(f"{base}/review", exist_ok=True)
@@ -1537,12 +1584,13 @@ Rm = np.isin(seg, RH) | (seg >= 2000)
 hemiL = ndi.distance_transform_edt(~Lm, sampling=vox) <= ndi.distance_transform_edt(~Rm, sampling=vox)
 dmid = np.where(hemiL, ndi.distance_transform_edt(hemiL, sampling=vox),
                 ndi.distance_transform_edt(~hemiL, sampling=vox))
-lab = np.zeros(I.shape, np.int32); n_raw = 0; nxt = 0
+lab = np.zeros(I.shape, np.int32); n_raw = 0; nxt = 0; n_seeded = 0
 n_pieces = None; n_before_merge = None     # set by the merge step
 for side in (hemiL, ~hemiL):
     wl, nw = ndi.label(weak & side, structure=s3)
     n_raw += nw
     keep = np.unique(wl[strong & side]); keep = keep[keep > 0]
+    n_seeded += len(keep)                  # v5.1: weak components without a strong seed are "not generated"
     remap = np.zeros(nw + 1, np.int32)
     remap[keep] = np.arange(1, len(keep) + 1) + nxt
     nz = wl > 0
@@ -1780,35 +1828,36 @@ objs = ndi.find_objects(lab)
 rows = []
 # v4.14: components removed by the generation gates are logged (work/ID_dropped.csv/.nii.gz), not shown
 dropped = []
-def drop(p, why, vol, n_sl=None, elong=None):
+def drop(p, why, vol, n_sl=None, elong=None, gate="", measured=None, thr=None):
     c_ = np.asarray(p.centroid) / np.array(vox)              # regionprops centroid is in mm (spacing)
     dropped.append(dict(drop_id=len(dropped) + 1, reason=why, volume_mm3=round(vol, 1),
                         n_slices=n_sl, elongation=None if elong is None else round(elong, 1),
                         vox_i=int(round(c_[0])), vox_j=int(round(c_[1])), vox_k=int(round(c_[2])),
                         hemi="L" if hemiL[tuple(np.clip(np.round(c_).astype(int), 0, np.array(I.shape) - 1))] else "R",
-                        _lab=p.label))
+                        _lab=p.label, gate_id=gate, measured=None if measured is None else round(float(measured), 3),
+                        threshold=thr))                        # v5.1: gate id + measured value + threshold
 for p in regionprops(lab, spacing=vox):
     vol = float(p.area)                         # already mm3 because spacing is given
     if vol < MIN_MM3:
-        drop(p, f"volume <{MIN_MM3:g} mm3", vol); continue
+        drop(p, f"volume <{MIN_MM3:g} mm3", vol, gate="G1_volume", measured=vol, thr=MIN_MM3); continue
     sl = objs[p.label - 1]
     pad = tuple(slice(max(s.start - 3, 0), s.stop + 3) for s in sl)
     mm = lab[pad] == p.label
     n_sl = int(mm.any(axis=(0, 1)).sum())
     if n_sl < MIN_SLICES:
-        drop(p, f"<{MIN_SLICES} slices", vol, n_sl); continue
+        drop(p, f"<{MIN_SLICES} slices", vol, n_sl, gate="G2_slices", measured=n_sl, thr=MIN_SLICES); continue
     elong = p.axis_major_length / max(p.axis_minor_length, 1e-3)
     # elongation rejects round microbleeds, which are single pieces; a merged candidate (two banks,
     # a bent line) can be compact overall and is not rejected for it (v4.9.2)
     if elong < MIN_ELONG and (n_pieces is None or n_pieces[p.label] <= 1):
-        drop(p, f"elongation <{MIN_ELONG:g}", vol, n_sl, elong); continue
+        drop(p, f"elongation <{MIN_ELONG:g}", vol, n_sl, elong, gate="G3_elongation", measured=elong, thr=MIN_ELONG); continue
     seg_nb = seg[pad][ndi.binary_dilation(mm, iterations=2)]
     nb = seg_nb[seg_nb >= 1000]
     # infratentorial only when clearly cerebellar/brainstem with little cerebral cortex nearby, so
     # occipital / inferior temporal cSS next to the tentorium is not dropped from the 0-4 score
     infra = bool(np.isin(seg_nb, INFRA).mean() > 0.5 and nb.size < 0.2 * seg_nb.size)
     if nb.size == 0 and not infra:
-        drop(p, "no cortex label within 2 voxels", vol, n_sl, elong); continue
+        drop(p, "no cortex label within 2 voxels", vol, n_sl, elong, gate="G4_no_cortex", measured=int(nb.size), thr=1); continue
     # hemisphere = majority of the candidate's own voxels in the hemisphere map (v4 fix: v3 counted
     # own L/R labels, but cSS lies in sulcal CSF where both counts are 0, so medial candidates
     # could take the region - and the score - of the opposite hemisphere)
@@ -2061,7 +2110,10 @@ if QC_STRICT and QC["status"] == "insufficient_quality":
     for f_ in ("candidates", "excluded"):
         nib.save(nib.Nifti1Image(np.zeros(I.shape, np.int16), swi.affine), f"{base}/review/{subj}_{f_}.nii.gz")
     update_manifest(base, subj, "detect", dict(pipeline_version=RULESET, args=sys.argv[1:], qc_status=QC["status"],
-                    qc_strict=True, n_candidates=0, note="CSS_QC_STRICT=1: case cannot be scored"))
+                    qc_strict=True, n_candidates=0, note="CSS_QC_STRICT=1: case cannot be scored",
+                    fates=dict(raw_components=int(n_raw), not_generated_unseeded=int(n_raw - n_seeded),
+                               objects=int(lab.max()), qc_blocked=int(lab.max()), shown=0),
+                    environment=environment_record()))
     print(f"{subj}: QC insufficient_quality ({'; '.join(QC['reasons'])}) - CSS_QC_STRICT=1: case cannot be scored, "
           f"no candidates written [review/{subj}_qc.json]")
     sys.exit(3)
@@ -2117,6 +2169,23 @@ os.makedirs(f"{base}/review", exist_ok=True)
 df.to_csv(f"{base}/review/{subj}_candidates.csv", index=False)
 nib.save(nib.Nifti1Image(keep, swi.affine), f"{base}/review/{subj}_candidates.nii.gz")
 nib.save(nib.Nifti1Image(ich.astype(np.uint8), swi.affine), f"{base}/work/{subj}_ich_used.nii.gz")
+# v5.1 fate invariant: every merged object ends in exactly ONE of dropped / excluded / shown, voxel for voxel
+_n_obj = int(lab.max())
+_fate_vox = (keep > 0).astype(np.int8) + (xl > 0) + (dl > 0)
+_bad = []
+if len(dropped) + len(excluded) + len(df) != _n_obj:
+    _bad.append(f"{_n_obj} objects but {len(dropped)} dropped + {len(excluded)} excluded + {len(df)} shown")
+if (_fate_vox > 1).any(): _bad.append(f"{int((_fate_vox > 1).sum())} voxels in more than one fate map")
+if ((_fate_vox > 0) != (lab > 0)).any(): _bad.append(f"{int(((_fate_vox > 0) != (lab > 0)).sum())} object voxels without a fate")
+del _fate_vox
+if _bad:
+    print(f"{subj}: FATE INVARIANT VIOLATED - " + "; ".join(_bad) + " (outputs written, but do not use them)")
+    sys.exit(4)
+FATES = dict(raw_components=int(n_raw), not_generated_unseeded=int(n_raw - n_seeded),
+             pieces_before_merge=int(n_before_merge if n_before_merge is not None else _n_obj), objects=_n_obj,
+             dropped_by_gate=pd.Series([d_["gate_id"] for d_ in dropped]).value_counts().to_dict() if dropped else {},
+             excluded_by_rule=pd.Series([r_["rule_version"] for r_ in excluded]).value_counts().to_dict() if excluded else {},
+             shown=int(len(df)), qc_blocked=0)
 cnt = lambda c: int(df[c].astype(int).sum()) if len(df) else 0
 print(f"{subj}: anatomy {'T1' if T1_ANAT else 'SWI-only (position rules relaxed)'}, "
       f"coverage {'includes skull base' if FULL_BOTTOM else 'cut off at the bottom (skull-base rules off)'}, "
@@ -2154,7 +2223,7 @@ update_manifest(base, subj, "detect", dict(
                     use_mimic=USE_MIMIC, qc_strict=QC_STRICT, phase=MIM.phase_note,
                     sato_sigmas_mm=list(SATO_SIGMAS_MM), sato_sigmas_px=[round(v, 2) for v in SATO_PX]),
     anatomy="T1" if T1_ANAT else "SWI-only", flair_used=FL is not None, qc_status=QC["status"],
-    n_candidates=int(len(df)), n_excluded=len(excluded), n_dropped=len(dropped),
+    n_candidates=int(len(df)), n_excluded=len(excluded), n_dropped=len(dropped), fates=FATES,
     inputs={k: dict(path=p_, sha256=sha256(p_), mtime=os.path.getmtime(p_)) for k, p_ in _inputs.items()},
     environment=environment_record()))
 ```
@@ -4807,6 +4876,12 @@ for _, st in meta.iterrows():
     row["slice_group"] = "unknown" if np.isnan(sm) else ("<=1.2 mm" if sm <= 1.2 else ("<=2 mm" if sm <= 2.0 else ">2 mm"))
     if stale: warn.append(f"{s}: {stale} label(s) match no current candidate/excluded object (detector re-run after labelling?)")
     if unlabelled: warn.append(f"{s}: {len(unlabelled)} shown candidate(s) without a label - neither TP nor FP")
+    # v5.1: what the detector did with every generated object in this study (review/ID_manifest.json fates)
+    _mf = f"{B}/review/{s}_manifest.json"
+    _f = (json.load(open(_mf)).get("detect", {}).get("fates") or {}) if os.path.exists(_mf) else {}
+    row.update(obj_generated=_f.get("objects"), obj_dropped=sum((_f.get("dropped_by_gate") or {}).values()) if _f else None,
+               obj_excluded=sum((_f.get("excluded_by_rule") or {}).values()) if _f else None,
+               obj_shown=_f.get("shown"), obj_qc_blocked=_f.get("qc_blocked"))
     rows.append(row)
 P = pd.DataFrame(rows)
 if not len(P): sys.exit("no evaluable studies\n" + "\n".join(warn))
@@ -5126,7 +5201,7 @@ Three published cSS mimics, each measured per candidate (Charidimou AJNR 2016; m
 
   calcification (Sturge-Weber, calcifying angiopathy)   phase: DIAMAGNETIC; cSS / veins are paramagnetic
   acute convexity SAH / cortical vein thrombosis        FLAIR: bright sulcal CSF / bright adjacent cortex
-  cluster of lobar microbleeds                          shape: several compact parenchymal blobs merged into one object
+  cluster of lobar microbleeds                          shape: several separate compact parenchymal blobs in one object
 
 Columns (detect_css.py appends them to candidates AND excluded):
   mimic_score   0-1, the strongest of the three pieces of evidence below (0 = none); NOT a probability
@@ -5136,7 +5211,7 @@ Columns (detect_css.py appends them to candidates AND excluded):
                 < 0 diamagnetic); NaN without a usable phase image
   phase_r       correlation of the observed filtered phase with the dipole pattern a PARAMAGNETIC object of this
                 candidate's own shape would make (-1..1)
-  mb_cluster_n  compact parenchymal sub-objects left after one erosion (>= 3 -> microbleed cluster)
+  mb_cluster_n  separate compact parenchymal blobs in the dark support (>= 3 -> microbleed cluster)
 
 WHY THE PHASE RULE FITS A DIPOLE PATTERN instead of reading the sign of the median phase: the phase inside a thin
 sheet or tube depends on its orientation to B0. In css_common.susceptibility_signal (the pipeline's own forward
@@ -5166,7 +5241,7 @@ CORR_VOX = 2.0             # assumed noise correlation length (voxels per axis) 
 CONV_MIN_T = 3.0           # scanner sign convention must be fitted at least this clearly, else the phase rule is off
 CALC_Z, CALC_R = -3.0, -0.2
 FLAIR_Z = 3.0              # = flair_bright / flair_ctx_bright in detect_css.py
-MB_DIAM_MM, MB_MIN_VOX, MB_MAX_ASPECT, MB_PARENCHYMA = 6.0, 2, 2.5, 0.5
+MB_MIN_DIAM_MM, MB_DIAM_MM, MB_MIN_VOX, MB_MAX_ASPECT, MB_PARENCHYMA = 2.0, 6.0, 2, 2.5, 0.5
 MB_MIN_N = 3
 
 
@@ -5221,30 +5296,28 @@ def flair_rule(fz, fcz):
 
 
 def mb_cluster_rule(mask, tissue, vox):
-    """candidate support (crop) -> (score, n, reason). Erode once with the 6-neighbour cross (a full 3x3x3 cube
-    shrinks a 3.2 mm microbleed at 0.8 mm voxels to one voxel), in-plane only when slices are > 1.5x the in-plane
-    voxel (at 0.5 x 0.5 x 2 mm a 3D erosion erases every microbleed under 5 mm). A cSS band up to 2 voxels thick
-    erodes away; a 3-voxel band leaves a long flat sliver that fails the aspect test. Count sub-objects that are
-    microbleed-like: >= MB_MIN_VOX voxels across, compact (longest / shortest extent in mm <= MB_MAX_ASPECT), small
-    (equivalent diameter of the re-dilated piece < MB_DIAM_MM) and mostly surrounded by parenchyma (>= MB_PARENCHYMA
-    of a 1-voxel shell in labelled tissue). Microbleeds under ~3 mm erode to one voxel and are not counted."""
-    vox = np.asarray(vox, float)
-    s3 = np.ones((3, 3, 3), bool); s1 = ndi.generate_binary_structure(3, 1)
-    if vox[2] > 1.5 * min(vox[0], vox[1]): s1[:, :, 0] = s1[:, :, 2] = False      # in-plane cross only
-    er = ndi.binary_erosion(mask, structure=s1)
-    lab, n = ndi.label(er, structure=s3)
+    """candidate support (crop) -> (score, n, reason). Counts SEPARATE dark blobs: connected components (26-neighbour)
+    of the support that are microbleed-like - small (equivalent diameter MB_MIN_DIAM_MM..MB_DIAM_MM), compact
+    (longest / shortest extent in mm <= MB_MAX_ASPECT, at least MB_MIN_VOX voxels across in two directions) and mostly
+    surrounded by parenchyma (>= MB_PARENCHYMA of a 1-voxel shell in labelled tissue, AJNR 2016). >= MB_MIN_N blobs
+    -> cluster. A cSS band (tram-track or single bank) is one elongated component and is never counted.
+    v5.1: no erosion. v5.0 eroded the support once; that split the irregular dark support of a tram-track into compact
+    fragments and flagged true cSS lesion 3 of PH3 as a microbleed cluster (E11 then excluded it with
+    CSS_USE_MIMIC=1). Limit: microbleeds that touch each other form one elongated component and are not counted."""
+    vox = np.asarray(vox, float); s3 = np.ones((3, 3, 3), bool)
+    lab, n = ndi.label(mask, structure=s3)
     good = 0
     for i, sl in enumerate(ndi.find_objects(lab), 1):
         if sl is None: continue
         nv = np.array([s_.stop - s_.start for s_ in sl]); ext = nv * vox
-        if nv.max() < MB_MIN_VOX or ext.max() / ext.min() > MB_MAX_ASPECT: continue
-        piece = ndi.binary_dilation(lab == i, structure=s1) & mask
+        if np.sort(nv)[-2] < MB_MIN_VOX or ext.max() / ext.min() > MB_MAX_ASPECT: continue
+        piece = lab == i
         diam = float((6 * piece.sum() * np.prod(vox) / np.pi) ** (1 / 3))
-        if diam >= MB_DIAM_MM: continue
+        if not (MB_MIN_DIAM_MM <= diam < MB_DIAM_MM): continue
         shell = ndi.binary_dilation(piece, structure=s3) & ~mask
         if shell.any() and tissue[shell].mean() >= MB_PARENCHYMA: good += 1
     if good >= MB_MIN_N:
-        return float(min(1.0, 0.5 + 0.1 * (good - MB_MIN_N))), good, f"{good} compact parenchymal blobs: microbleed cluster?"
+        return float(min(1.0, 0.5 + 0.1 * (good - MB_MIN_N))), good, f"{good} separate compact parenchymal blobs: microbleed cluster?"
     return 0.0, good, ""
 
 
@@ -5346,7 +5419,7 @@ rank_candidates.py applies the model. Research software, not for clinical use.""
 import sys, os, json, argparse, numpy as np, pandas as pd
 from scipy.optimize import minimize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, cand_uid, label_class, FP
+from css_common import base as _base, cand_uid, label_class, FP, use_derived, sha256
 
 FEATURES = [
     # darkness and pial position
@@ -5391,7 +5464,8 @@ def study_table(B, s):
     if not parts: return None
     d = pd.concat(parts, ignore_index=True)
     sp = f"{B}/review/{s}_surface_features.csv"
-    if os.path.exists(sp):
+    # v5.1: surface features must postdate this detection (candidates.nii.gz is written only by detect_css.py)
+    if use_derived(sp, [f"{B}/review/{s}_candidates.nii.gz"], f"{s} surface features"):
         sf = pd.read_csv(sp).drop(columns=["list", "obj_id"], errors="ignore").drop_duplicates(FP)
         d = d.merge(sf, on=FP, how="left", suffixes=("", "_surf"))
     d["cand_uid"] = [cand_uid(s, r) for _, r in d.iterrows()]
@@ -5449,6 +5523,7 @@ if __name__ == "__main__":
     if (meta.split == "test").any() and a.split == "all":
         print(f"note: {int((meta.split == 'test').sum())} test-split studies are left out (never trained on)")
     lab = load_labels(L, a.source)
+    lab_path = f"{L}/consensus.csv" if a.source == "consensus" else f"{L}/candidate_labels.csv"
     rows = []
     for s in studies.study_id:
         d = study_table(B, s)
@@ -5493,6 +5568,12 @@ if __name__ == "__main__":
                  per_patient=[{k: (round(v, 3) if isinstance(v, float) and np.isfinite(v) else (None if isinstance(v, float) else v))
                                for k, v in r.items()} for r in per],
                  dropped_features=gone,
+                 # v5.1 provenance: detector builds of the training outputs, label file hash (rank_candidates checks)
+                 detector_builds=sorted({str((json.load(open(f"{B}/review/{s}_manifest.json")).get("detect", {})
+                                              .get("environment", {}) or {}).get("build", "unknown"))
+                                         if os.path.exists(f"{B}/review/{s}_manifest.json") else "unknown"
+                                         for s in T.study_id.unique()}),
+                 label_file=lab_path, label_sha256=sha256(lab_path),
                  note="research software; pooled LOPO AUC over few patients is noisy - read the intervals")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     json.dump(model, open(out, "w"), indent=2)
@@ -5520,7 +5601,7 @@ run_css.sh calls this only when the model exists and the study is not in the tes
 scored by running this script by hand with the frozen model. Research software, not for clinical use."""
 import sys, os, json, argparse, numpy as np, pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, FP
+from css_common import base as _base, FP, use_derived, sha256
 
 ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 ap.add_argument("subject"); ap.add_argument("--model", default="")
@@ -5532,6 +5613,18 @@ M = json.load(open(mp))
 if s in M.get("training_studies", []) and not a.allow_training_study:
     sys.exit(f"{s} was used to train {os.path.basename(mp)} - its model ranking would be optimistic "
              f"(--allow-training-study to rank anyway)")
+# v5.1 stale-model checks: labels changed since the fit, or this study detected by a different detector build
+strict = os.environ.get("CSS_QC_STRICT") == "1"
+warn = []
+lp = M.get("label_file")
+if lp and os.path.exists(lp) and M.get("label_sha256") and sha256(lp) != M["label_sha256"]:
+    warn.append(f"labels ({os.path.basename(lp)}) changed since the model was fitted - re-run train_ranker.py")
+_mp = f"{B}/review/{s}_manifest.json"
+_b = str((json.load(open(_mp)).get("detect", {}).get("environment", {}) or {}).get("build", "unknown")) if os.path.exists(_mp) else "unknown"
+if M.get("detector_builds") and _b not in M["detector_builds"]:
+    warn.append(f"{s} was detected with build {_b}, the model was trained on outputs of {', '.join(M['detector_builds'])}")
+for w_ in warn: print(("ERROR: " if strict else "warning: ") + w_)
+if warn and strict: sys.exit("CSS_QC_STRICT=1: stale model - not ranked")
 cp = f"{B}/review/{s}_candidates.csv"
 if not os.path.exists(cp): sys.exit(f"no {cp} - run detect_css.py {s} first")
 d = pd.read_csv(cp).drop(columns=["score_model", "rank_model"], errors="ignore")
@@ -5539,7 +5632,8 @@ if not len(d):
     print(f"{s}: no candidates - nothing to rank"); d.assign(score_model=[], rank_model=[]).to_csv(cp, index=False); sys.exit(0)
 X = pd.DataFrame(index=d.index)
 sp = f"{B}/review/{s}_surface_features.csv"
-sf = pd.read_csv(sp).drop(columns=["list", "obj_id"], errors="ignore").drop_duplicates(FP) if os.path.exists(sp) else None
+sf = pd.read_csv(sp).drop(columns=["list", "obj_id"], errors="ignore").drop_duplicates(FP) \
+    if use_derived(sp, [f"{B}/review/{s}_candidates.nii.gz"], "surface features") else None
 full = d.merge(sf, on=FP, how="left", suffixes=("", "_surf")) if sf is not None else d
 missing = [f for f in M["features"] if f not in full.columns]
 for f in M["features"]: X[f] = pd.to_numeric(full[f], errors="coerce").values if f in full.columns else np.nan
@@ -5883,4 +5977,248 @@ if r0.returncode or "synthseg" not in r0.stdout.lower() and "PHQ2_seg" not in r0
 if r1.returncode == 0 or "older than the SWI" not in r1.stderr: fail(f"strict stale T1 labels accepted: {r1.stdout}")
 print("stale T1 labels: unset -> SynthSeg fall-back as before; strict -> stops with an error")
 print("RESULT qc_strict OK")
+```
+
+## scripts/audit_case.py
+
+```python
+#!/usr/bin/env python3
+"""Per-case audit report (v5.1): what went in, what the detector did with every object, and what to distrust.
+usage: audit_case.py SUBJECT            -> prints the report, writes review/ID_audit.json
+Reads only existing outputs (review/ID_manifest.json, ID_qc.json, candidates / excluded CSVs, work/ID_dropped.csv)
+and image headers; changes nothing. Sections:
+  inputs       file, sha256 (from the manifest), shape, voxel size, orientation, obliquity, S-I array axis
+  acquisition  sequence type (SWI / T2*-GRE / SWI built from GRE by make_swi.py / unknown), field, TE, TR, slice
+               thickness, vendor (dcm2niix JSON, if present)
+  anatomy      T1 route, FLAIR / phase availability and FRESHNESS against the SWI, registration method, cost,
+               label shift, edge agreement, QC status and reasons
+  fates        raw components -> not generated (no strong seed) -> pieces -> merged objects -> dropped per gate /
+               excluded per rule / shown; the counts must add up (the detector stops otherwise, exit 4)
+Research software: expert review of every candidate remains required; not validated for clinical use."""
+import sys, os, json, glob, nibabel as nib, numpy as np, pandas as pd
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from css_common import base as _base, stale_against
+
+if len(sys.argv) < 2: sys.exit(__doc__)
+s = sys.argv[1]; B = _base()
+J = lambda p: json.load(open(p)) if os.path.exists(p) else {}
+man, qc = J(f"{B}/review/{s}_manifest.json"), J(f"{B}/review/{s}_qc.json")
+det = man.get("detect", {})
+if not det: sys.exit(f"{s}: no detector run recorded (review/{s}_manifest.json) - run detect_css.py first")
+swi_p = f"{B}/data/{s}_swi.nii"
+rep = dict(subject=s, schema_version=man.get("schema_version"), build=(det.get("environment") or {}).get("build"),
+           detector=det.get("pipeline_version"), run_at=det.get("run_at"), parameters=det.get("parameters"),
+           note="research software; expert review of every candidate remains required; not validated for clinical use")
+# inputs
+def geom(p):
+    try: im = nib.load(p)
+    except Exception: return None
+    a = im.affine; vox = [round(float(v), 3) for v in im.header.get_zooms()[:3]]
+    si = int(np.argmax(np.abs(a[2, :3]))); n = a[:3, si] / np.linalg.norm(a[:3, si])
+    return dict(shape=list(im.shape[:3]), voxel_mm=vox, orientation="".join(nib.aff2axcodes(a)), si_axis=si,
+                obliquity_deg=round(float(np.degrees(np.arccos(min(1.0, abs(n[2]))))), 1))
+inp = det.get("inputs", {})
+rep["inputs"] = {k: dict(path=v.get("path"), sha256=(v.get("sha256") or "")[:16], **(geom(v["path"]) or {}))
+                 for k, v in inp.items() if k in ("swi", "labels", "t1_labels", "flair", "phase", "destrieux")}
+# acquisition
+acq = qc.get("acquisition") or {}
+if acq.get("sequence"): seq = acq["sequence"]
+elif os.path.exists(f"{B}/work/{s}_gre_swi.nii.gz"): seq = "SWI built from GRE magnitude + phase (make_swi.py)"
+else: seq = "unknown (no dcm2niix JSON in raw/ID/SWI)"
+rep["acquisition"] = dict(sequence=seq, field_T=acq.get("field_T"), TE_ms=acq.get("TE_ms"), TR_ms=acq.get("TR_ms"),
+                          slice_thickness_mm=acq.get("slice_thickness_mm"), vendor=acq.get("manufacturer"))
+# anatomy, freshness
+fresh = {}
+for name, p in (("T1 labels", f"{B}/work/{s}_t1seg_swispace.nii.gz"), ("FLAIR", f"{B}/work/{s}_flair_swispace.nii.gz"),
+                ("phase", f"{B}/data/{s}_phase.nii.gz"), ("Destrieux labels", f"{B}/work/{s}_a2009s_swispace.nii.gz")):
+    fresh[name] = "absent" if not os.path.exists(p) else ("STALE (older than the SWI) - ignored" if stale_against(p, [swi_p]) else "fresh")
+sp = f"{B}/review/{s}_surface_features.csv"
+fresh["surface features"] = "absent" if not os.path.exists(sp) else \
+    ("STALE (older than this detection) - ignored" if stale_against(sp, [f"{B}/review/{s}_candidates.nii.gz"]) else "fresh")
+reg = qc.get("registration") or {}
+rep["anatomy"] = dict(route=qc.get("anatomy"), inputs=fresh, registration=reg.get("method"), registration_cost=reg.get("cost"),
+                      label_shift_mm=qc.get("label_shift_mm"), edge_bias_mm=qc.get("edge_bias_mm"),
+                      edge_scatter_mm=qc.get("edge_scatter_mm"), edge_n=qc.get("edge_n"),
+                      qc_status=qc.get("status"), qc_reasons=qc.get("reasons"), qc_notes=qc.get("notes"),
+                      phase_rule=(det.get("parameters") or {}).get("phase"))
+# fates
+F = det.get("fates") or {}
+dp, xp, cp = f"{B}/work/{s}_dropped.csv", f"{B}/review/{s}_excluded.csv", f"{B}/review/{s}_candidates.csv"
+nd = len(pd.read_csv(dp)) if os.path.exists(dp) else None
+nx = len(pd.read_csv(xp)) if os.path.exists(xp) else None
+nc = len(pd.read_csv(cp)) if os.path.exists(cp) else None
+check = None
+if F.get("objects") is not None and None not in (nd, nx, nc):
+    check = "ok" if (F.get("qc_blocked") or nd + nx + nc) == F["objects"] else \
+        f"MISMATCH: {F['objects']} objects vs {nd} dropped + {nx} excluded + {nc} shown (files changed after the run?)"
+rep["fates"] = dict(F, files=dict(dropped=nd, excluded=nx, shown=nc), consistency=check)
+json.dump(rep, open(f"{B}/review/{s}_audit.json", "w"), indent=2, default=str)
+
+# printed report
+print(f"{s}: audit (schema {rep['schema_version']}, build {rep['build']}, detector {rep['detector']}, run {rep['run_at']})")
+print("  research software - expert review of every candidate remains required; not validated for clinical use")
+for k, v in rep["inputs"].items():
+    print(f"  input {k:10s} {v.get('orientation', '?')} {v.get('voxel_mm')} mm, obliquity {v.get('obliquity_deg')} deg, "
+          f"S-I axis {v.get('si_axis')}, sha256 {v.get('sha256')}")
+a = rep["acquisition"]
+print(f"  acquisition: {a['sequence']}; field {a['field_T']} T, TE {a['TE_ms']} ms, slice {a['slice_thickness_mm']} mm, vendor {a['vendor']}")
+an = rep["anatomy"]
+print(f"  anatomy: {an['route']}; " + ", ".join(f"{k} {v}" for k, v in an["inputs"].items()))
+print(f"  registration: {an['registration']} (cost {an['registration_cost']}); label shift {an['label_shift_mm']} mm, "
+      f"edge bias {an['edge_bias_mm']} mm, scatter {an['edge_scatter_mm']} mm (n {an['edge_n']})")
+print(f"  QC: {an['qc_status']}" + (f" - {'; '.join(an['qc_reasons'])}" if an["qc_reasons"] else "")
+      + (f" [notes: {'; '.join(an['qc_notes'])}]" if an.get("qc_notes") else ""))
+print(f"  phase rule: {an['phase_rule']}")
+if F:
+    print(f"  fates: {F.get('raw_components')} raw components -> {F.get('not_generated_unseeded')} not generated (no strong seed) "
+          f"-> {F.get('pieces_before_merge')} pieces -> {F.get('objects')} objects")
+    print(f"         dropped by gate {F.get('dropped_by_gate')}; excluded by rule {F.get('excluded_by_rule')}; "
+          f"shown {F.get('shown')}; QC-blocked {F.get('qc_blocked')}  [{check}]")
+else:
+    print("  fates: not recorded (detector run before v5.1)")
+```
+
+## tests/check_v51.py
+
+```python
+"""v5.1 checks: auditable fates, label-convention and storage invariance, obliquity, stale derived inputs.
+usage: check_v51.py    (needs PH3 from phantom_v4.py, aligned, in $CSS_BASE; uses every other phantom found there)
+1. fate invariant: for every phantom case, dropped / excluded / shown maps are disjoint, together cover exactly the
+   generated voxels (work/ID_gen.nii.gz bit 128), and the manifest fate counts add up; audit_case.py agrees.
+2. sulcal CSF encoded as label 0 (recon-all aparc+aseg) instead of 24 (SynthSeg): identical candidates / exclusions.
+3. the in-plane array axes swapped (same anatomy, different storage): same objects at the same world positions.
+4. an oblique affine (data unchanged): obliquity recorded; 15 deg changes no candidate; 25 deg -> low confidence.
+5. stale inputs: FLAIR / phase older than the SWI are ignored; surface features older than the detection are ignored
+   (CSS_QC_STRICT=1: stop); a ranking model whose label file changed after the fit: warning (strict: refused).
+PHANTOM CHECKS ONLY."""
+import os, sys, json, time, glob, subprocess, numpy as np, nibabel as nib, pandas as pd
+B = os.environ["CSS_BASE"]; S = f"{B}/scripts"; py = sys.executable
+def fail(m): print("FAIL:", m); sys.exit(1)
+def run(*a, env=None, ok=True):
+    e = dict(os.environ); e.pop("CSS_QC_STRICT", None); e.pop("CSS_USE_MIMIC", None); e.update(env or {})
+    r = subprocess.run([py, *a], capture_output=True, text=True, env=e)
+    if ok and r.returncode: print(r.stdout[-800:], r.stderr[-1200:]); fail("step failed: " + " ".join(a))
+    return r
+def case(name, I, seg, aff):
+    nib.save(nib.Nifti1Image(I.astype(np.float32), aff), f"{B}/data/{name}_swi.nii")
+    nib.save(nib.Nifti1Image(seg.astype(np.int32), aff), f"{B}/synthseg/{name}_seg.nii.gz")
+    p = f"{B}/work/{name}_t1seg_swispace.nii.gz"
+    if os.path.exists(p): os.remove(p)
+    run(f"{S}/align_seg.py", name); return run(f"{S}/detect_css.py", name)
+def tables(name):
+    return pd.read_csv(f"{B}/review/{name}_candidates.csv"), pd.read_csv(f"{B}/review/{name}_excluded.csv")
+img = nib.load(f"{B}/data/PH3_swi.nii"); I0 = img.get_fdata().astype(np.float32); aff = img.affine
+seg0 = nib.load(f"{B}/synthseg/PH3_seg.nii.gz").get_fdata().astype(np.int32)
+run(f"{S}/detect_css.py", "PH3")
+
+# 1. fate invariant on every case that has outputs
+checked = []
+for cp in sorted(glob.glob(f"{B}/review/*_candidates.nii.gz")):
+    s = os.path.basename(cp)[:-len("_candidates.nii.gz")]
+    gp, mp = f"{B}/work/{s}_gen.nii.gz", f"{B}/review/{s}_manifest.json"
+    if not (os.path.exists(gp) and os.path.exists(mp)): continue
+    F = json.load(open(mp)).get("detect", {}).get("fates")
+    if not F or F.get("qc_blocked"): continue
+    if os.path.getmtime(gp) > os.path.getmtime(cp) + 1 or os.path.getmtime(mp) < os.path.getmtime(cp) - 1: continue
+    C, X, D = (nib.load(p).get_fdata() > 0 for p in (cp, f"{B}/review/{s}_excluded.nii.gz", f"{B}/work/{s}_dropped.nii.gz"))
+    G = (nib.load(gp).get_fdata().astype(np.int32) & 128) > 0
+    if (C.astype(int) + X + D > 1).any(): fail(f"{s}: an object voxel has two fates")
+    if ((C | X | D) != G).any(): fail(f"{s}: {int(((C | X | D) != G).sum())} generated voxels without a fate (or the reverse)")
+    n = sum(F["dropped_by_gate"].values()) + sum(F["excluded_by_rule"].values()) + F["shown"]
+    if n != F["objects"]: fail(f"{s}: fates add up to {n}, objects {F['objects']}")
+    a = run(f"{S}/audit_case.py", s).stdout
+    if "[ok]" not in a: fail(f"{s}: audit_case consistency not ok:\n{a}")
+    checked.append(f"{s} {F['objects']}")
+if len(checked) < 1: fail("no case to check the fate invariant on")
+print(f"fate invariant: {len(checked)} cases (objects: {', '.join(checked)}) - every object one fate, voxel for voxel; audit ok")
+
+# 2. sulcal / extra-axial CSF as label 0 instead of 24
+c24, x24 = tables("PH3")
+sg = seg0.copy(); sg[sg == 24] = 0
+case("PHL0", I0, sg, aff); c0, x0 = tables("PHL0")
+skip = {"qc_status", "rule_version"}
+cols = [c for c in c24.columns if c not in skip]
+if not (c24[cols].fillna(-9).astype(str).equals(c0[cols].fillna(-9).astype(str))
+        and x24[[c for c in x24.columns if c not in skip]].fillna(-9).astype(str).equals(x0[[c for c in x24.columns if c not in skip]].fillna(-9).astype(str))):
+    diff = [c for c in cols if len(c24) == len(c0) and not c24[c].fillna(-9).astype(str).equals(c0[c].fillna(-9).astype(str))]
+    fail(f"CSF label 0 vs 24 changed the output ({len(c24)} vs {len(c0)} candidates; columns {diff[:6]})")
+print(f"CSF as label 0 vs 24: identical {len(c0)} candidates and {len(x0)} exclusions (surface_contact, FLAIR CSF reference, geometry)")
+
+# 3. in-plane axes swapped in storage
+I1 = np.transpose(I0, (1, 0, 2)); s1 = np.transpose(seg0, (1, 0, 2)); aff1 = aff.copy(); aff1[:, [0, 1]] = aff[:, [1, 0]]
+case("PHX", I1, s1, aff1); cx, xx = tables("PHX")
+wpos = lambda d, A: (A @ np.c_[d[["vox_i", "vox_j", "vox_k"]].values, np.ones(len(d))].T)[:3].T
+if len(cx) != len(c24) or len(xx) != len(x24): fail(f"axis swap: {len(cx)}/{len(xx)} vs {len(c24)}/{len(x24)}")
+pa = wpos(c24, aff); pb = wpos(cx, aff1)
+dmax = max(np.min(np.linalg.norm(pb - p, axis=1)) for p in pa) if len(pa) else 0
+if dmax > 1.0 or sorted(x24.reason) != sorted(xx.reason): fail(f"axis swap moved objects by up to {dmax:.2f} mm or changed exclusions")
+print(f"in-plane axes swapped: same {len(cx)} candidates (world positions within {dmax:.2f} mm), same exclusion reasons")
+
+# 4. oblique affine
+def rot_x(a_deg):
+    t = np.radians(a_deg); R = np.eye(4); R[1:3, 1:3] = [[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]]
+    return R @ aff
+for deg in (15, 25):
+    case(f"PHO{deg}", I0, seg0, rot_x(deg)); co, xo = tables(f"PHO{deg}")
+    q = json.load(open(f"{B}/review/PHO{deg}_qc.json"))
+    if abs(q["obliquity_deg"] - deg) > 0.2: fail(f"obliquity {q['obliquity_deg']} for a {deg} deg tilt")
+    flagged = any("oblique" in r for r in q["reasons"])
+    if flagged != (deg > 20): fail(f"{deg} deg: oblique flag {flagged}")
+    if deg == 15 and (len(co) != len(c24) or not (co.volume_mm3.values == c24.volume_mm3.values).all()):
+        fail("a 15 deg tilt changed the candidates")
+print("oblique affine: obliquity recorded (15 / 25 deg); 15 deg changes no candidate; 25 deg -> low_confidence_review 'oblique slices'")
+
+# 5. stale inputs
+nib.save(nib.Nifti1Image(I0 * 0.5 + 100, aff), f"{B}/work/PH3_flair_swispace.nii.gz")
+nib.save(nib.Nifti1Image(np.zeros_like(I0), aff), f"{B}/data/PH3_phase.nii.gz")
+old = os.path.getmtime(f"{B}/data/PH3_swi.nii") - 600          # older than the SWI
+for p in (f"{B}/work/PH3_flair_swispace.nii.gz", f"{B}/data/PH3_phase.nii.gz"): os.utime(p, (old, old))
+o = run(f"{S}/detect_css.py", "PH3").stdout
+if "FLAIR used" in o or "older than the SWI" not in o: fail(f"stale FLAIR / phase not ignored:\n{o[-600:]}")
+os.remove(f"{B}/work/PH3_flair_swispace.nii.gz"); os.remove(f"{B}/data/PH3_phase.nii.gz")
+c = pd.read_csv(f"{B}/review/PH3_candidates.csv")
+pd.DataFrame(dict(list="candidate", obj_id=c.cand_id, vox_i=c.vox_i, vox_j=c.vox_j, vox_k=c.vox_k, volume_mm3=c.volume_mm3,
+                  surf_width_mm=3.0)).to_csv(f"{B}/review/PH3_surface_features.csv", index=False)
+os.utime(f"{B}/review/PH3_surface_features.csv", (old, old))
+model = dict(features=["darkness_z", "surf_width_mm"], weights=[1.0, 1.0], bias=0.0, impute_median=[3.0, 1.0],
+             mean=[3.0, 1.0], sd=[1.0, 1.0], training_studies=["XX"], n_patients=3, lopo_auc=None, baseline="score_v4")
+os.makedirs(f"{B}/labels", exist_ok=True); lab = f"{B}/work/v51_labels.csv"; open(lab, "w").write("a\n1\n")
+from importlib import util as _u
+sys.path.insert(0, S); import css_common
+model.update(label_file=lab, label_sha256=css_common.sha256(lab)); json.dump(model, open(f"{B}/work/v51_model.json", "w"))
+r = run(f"{S}/rank_candidates.py", "PH3", "--model", f"{B}/work/v51_model.json")
+if "surface features" not in r.stdout or "ignored" not in r.stdout: fail(f"stale surface features used:\n{r.stdout}")
+r = run(f"{S}/rank_candidates.py", "PH3", "--model", f"{B}/work/v51_model.json", env={"CSS_QC_STRICT": "1"}, ok=False)
+if r.returncode == 0: fail("CSS_QC_STRICT=1 used stale surface features")
+os.remove(f"{B}/review/PH3_surface_features.csv")
+open(lab, "a").write("2\n")
+r = run(f"{S}/rank_candidates.py", "PH3", "--model", f"{B}/work/v51_model.json")
+if "changed since the model was fitted" not in r.stdout: fail("changed label file not reported")
+if run(f"{S}/rank_candidates.py", "PH3", "--model", f"{B}/work/v51_model.json", env={"CSS_QC_STRICT": "1"}, ok=False).returncode == 0:
+    fail("CSS_QC_STRICT=1 ranked with a stale model")
+run(f"{S}/detect_css.py", "PH3")                                   # restore PH3 outputs for later checks
+m = json.load(open(f"{B}/review/PH3_manifest.json"))
+if m.get("schema_version") != "css-manifest/1.0" or "build" not in m["detect"]["environment"]: fail("manifest schema / build missing")
+print("stale inputs: old FLAIR / phase ignored; old surface features ignored (strict: stop); changed labels -> model warning "
+      "(strict: refused); manifest schema css-manifest/1.0 with build id")
+# 6. the mimic layer must not cost a true lesion: every phantom with a truth map, default vs CSS_USE_MIMIC=1
+lost_any, seen = [], []
+for tp in sorted(glob.glob(f"{B}/work/*_truth.nii.gz")):
+    s = os.path.basename(tp)[:-len("_truth.nii.gz")]
+    if not os.path.exists(f"{B}/data/{s}_swi.nii") or not os.path.exists(f"{B}/work/{s}_seg_swispace.nii.gz"): continue
+    tr = nib.load(tp).get_fdata().astype(int)
+    def kept(env):
+        r = run(f"{S}/detect_css.py", s, env=env, ok=False)
+        if r.returncode: return None
+        Cm = nib.load(f"{B}/review/{s}_candidates.nii.gz").get_fdata().astype(int)
+        return {int(t) for t in np.unique(tr[tr > 0]) if (Cm[tr == t] > 0).mean() >= 0.3}
+    k0, k1 = kept({}), kept({"CSS_USE_MIMIC": "1"})
+    if k0 is None or k1 is None: continue
+    seen.append(f"{s} {len(k0)}->{len(k1)}")
+    if k0 - k1: lost_any.append(f"{s}: lesions {sorted(k0 - k1)}")
+    run(f"{S}/detect_css.py", s)                                    # default outputs back
+if not seen: fail("no phantom with a truth map to test the mimic layer on")
+if lost_any: fail("CSS_USE_MIMIC=1 lost true lesions: " + "; ".join(lost_any))
+print(f"mimic layer on vs off, true lesions kept: {', '.join(seen)} - none lost")
+print("RESULT v51 OK")
 ```

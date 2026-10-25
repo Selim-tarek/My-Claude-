@@ -105,6 +105,12 @@ for _, st in meta.iterrows():
     row["slice_group"] = "unknown" if np.isnan(sm) else ("<=1.2 mm" if sm <= 1.2 else ("<=2 mm" if sm <= 2.0 else ">2 mm"))
     if stale: warn.append(f"{s}: {stale} label(s) match no current candidate/excluded object (detector re-run after labelling?)")
     if unlabelled: warn.append(f"{s}: {len(unlabelled)} shown candidate(s) without a label - neither TP nor FP")
+    # v5.1: what the detector did with every generated object in this study (review/ID_manifest.json fates)
+    _mf = f"{B}/review/{s}_manifest.json"
+    _f = (json.load(open(_mf)).get("detect", {}).get("fates") or {}) if os.path.exists(_mf) else {}
+    row.update(obj_generated=_f.get("objects"), obj_dropped=sum((_f.get("dropped_by_gate") or {}).values()) if _f else None,
+               obj_excluded=sum((_f.get("excluded_by_rule") or {}).values()) if _f else None,
+               obj_shown=_f.get("shown"), obj_qc_blocked=_f.get("qc_blocked"))
     rows.append(row)
 P = pd.DataFrame(rows)
 if not len(P): sys.exit("no evaluable studies\n" + "\n".join(warn))

@@ -368,6 +368,13 @@ python $S/detect_css.py P006 -2.5 85 3 > /dev/null; python $S/detect_css.py P201
 ```
 If any step fails, keep the switch off and send the printed lines: they name the candidate and the rule.
 
+### 13a2. Per-case audit (v5.1)
+
+`python $S/audit_case.py P012` prints, from the existing outputs: input hashes and geometry (orientation, obliquity,
+S-I axis), acquisition, whether T1 labels / FLAIR / phase / Destrieux / surface features are present and fresh,
+registration and QC, and what happened to every generated object (not generated, dropped per gate, excluded per rule,
+shown) - the counts must add up (`review/P012_audit.json`).
+
 ### 13b. Expert labels -> trained ranking -> apply
 
 1. Expert reading as in section 7 (sheets, `expert_import.py`, `consensus.py`), on **dev-split** studies.

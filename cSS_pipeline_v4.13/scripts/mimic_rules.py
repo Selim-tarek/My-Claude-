@@ -4,7 +4,7 @@ Three published cSS mimics, each measured per candidate (Charidimou AJNR 2016; m
 
   calcification (Sturge-Weber, calcifying angiopathy)   phase: DIAMAGNETIC; cSS / veins are paramagnetic
   acute convexity SAH / cortical vein thrombosis        FLAIR: bright sulcal CSF / bright adjacent cortex
-  cluster of lobar microbleeds                          shape: several compact parenchymal blobs merged into one object
+  cluster of lobar microbleeds                          shape: several separate compact parenchymal blobs in one object
 
 Columns (detect_css.py appends them to candidates AND excluded):
   mimic_score   0-1, the strongest of the three pieces of evidence below (0 = none); NOT a probability
@@ -14,7 +14,7 @@ Columns (detect_css.py appends them to candidates AND excluded):
                 < 0 diamagnetic); NaN without a usable phase image
   phase_r       correlation of the observed filtered phase with the dipole pattern a PARAMAGNETIC object of this
                 candidate's own shape would make (-1..1)
-  mb_cluster_n  compact parenchymal sub-objects left after one erosion (>= 3 -> microbleed cluster)
+  mb_cluster_n  separate compact parenchymal blobs in the dark support (>= 3 -> microbleed cluster)
 
 WHY THE PHASE RULE FITS A DIPOLE PATTERN instead of reading the sign of the median phase: the phase inside a thin
 sheet or tube depends on its orientation to B0. In css_common.susceptibility_signal (the pipeline's own forward
@@ -44,7 +44,7 @@ CORR_VOX = 2.0             # assumed noise correlation length (voxels per axis) 
 CONV_MIN_T = 3.0           # scanner sign convention must be fitted at least this clearly, else the phase rule is off
 CALC_Z, CALC_R = -3.0, -0.2
 FLAIR_Z = 3.0              # = flair_bright / flair_ctx_bright in detect_css.py
-MB_DIAM_MM, MB_MIN_VOX, MB_MAX_ASPECT, MB_PARENCHYMA = 6.0, 2, 2.5, 0.5
+MB_MIN_DIAM_MM, MB_DIAM_MM, MB_MIN_VOX, MB_MAX_ASPECT, MB_PARENCHYMA = 2.0, 6.0, 2, 2.5, 0.5
 MB_MIN_N = 3
 
 
@@ -99,30 +99,28 @@ def flair_rule(fz, fcz):
 
 
 def mb_cluster_rule(mask, tissue, vox):
-    """candidate support (crop) -> (score, n, reason). Erode once with the 6-neighbour cross (a full 3x3x3 cube
-    shrinks a 3.2 mm microbleed at 0.8 mm voxels to one voxel), in-plane only when slices are > 1.5x the in-plane
-    voxel (at 0.5 x 0.5 x 2 mm a 3D erosion erases every microbleed under 5 mm). A cSS band up to 2 voxels thick
-    erodes away; a 3-voxel band leaves a long flat sliver that fails the aspect test. Count sub-objects that are
-    microbleed-like: >= MB_MIN_VOX voxels across, compact (longest / shortest extent in mm <= MB_MAX_ASPECT), small
-    (equivalent diameter of the re-dilated piece < MB_DIAM_MM) and mostly surrounded by parenchyma (>= MB_PARENCHYMA
-    of a 1-voxel shell in labelled tissue). Microbleeds under ~3 mm erode to one voxel and are not counted."""
-    vox = np.asarray(vox, float)
-    s3 = np.ones((3, 3, 3), bool); s1 = ndi.generate_binary_structure(3, 1)
-    if vox[2] > 1.5 * min(vox[0], vox[1]): s1[:, :, 0] = s1[:, :, 2] = False      # in-plane cross only
-    er = ndi.binary_erosion(mask, structure=s1)
-    lab, n = ndi.label(er, structure=s3)
+    """candidate support (crop) -> (score, n, reason). Counts SEPARATE dark blobs: connected components (26-neighbour)
+    of the support that are microbleed-like - small (equivalent diameter MB_MIN_DIAM_MM..MB_DIAM_MM), compact
+    (longest / shortest extent in mm <= MB_MAX_ASPECT, at least MB_MIN_VOX voxels across in two directions) and mostly
+    surrounded by parenchyma (>= MB_PARENCHYMA of a 1-voxel shell in labelled tissue, AJNR 2016). >= MB_MIN_N blobs
+    -> cluster. A cSS band (tram-track or single bank) is one elongated component and is never counted.
+    v5.1: no erosion. v5.0 eroded the support once; that split the irregular dark support of a tram-track into compact
+    fragments and flagged true cSS lesion 3 of PH3 as a microbleed cluster (E11 then excluded it with
+    CSS_USE_MIMIC=1). Limit: microbleeds that touch each other form one elongated component and are not counted."""
+    vox = np.asarray(vox, float); s3 = np.ones((3, 3, 3), bool)
+    lab, n = ndi.label(mask, structure=s3)
     good = 0
     for i, sl in enumerate(ndi.find_objects(lab), 1):
         if sl is None: continue
         nv = np.array([s_.stop - s_.start for s_ in sl]); ext = nv * vox
-        if nv.max() < MB_MIN_VOX or ext.max() / ext.min() > MB_MAX_ASPECT: continue
-        piece = ndi.binary_dilation(lab == i, structure=s1) & mask
+        if np.sort(nv)[-2] < MB_MIN_VOX or ext.max() / ext.min() > MB_MAX_ASPECT: continue
+        piece = lab == i
         diam = float((6 * piece.sum() * np.prod(vox) / np.pi) ** (1 / 3))
-        if diam >= MB_DIAM_MM: continue
+        if not (MB_MIN_DIAM_MM <= diam < MB_DIAM_MM): continue
         shell = ndi.binary_dilation(piece, structure=s3) & ~mask
         if shell.any() and tissue[shell].mean() >= MB_PARENCHYMA: good += 1
     if good >= MB_MIN_N:
-        return float(min(1.0, 0.5 + 0.1 * (good - MB_MIN_N))), good, f"{good} compact parenchymal blobs: microbleed cluster?"
+        return float(min(1.0, 0.5 + 0.1 * (good - MB_MIN_N))), good, f"{good} separate compact parenchymal blobs: microbleed cluster?"
     return 0.0, good, ""
 
 

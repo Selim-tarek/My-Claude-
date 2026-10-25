@@ -17,6 +17,7 @@ EDGE_LOW_CONF_MM = 1.5     # median |label pial boundary - SWI cortex/CSF edge| 
 REG_COST_LOW_CONF = 0.8    # bbregister mincost above this -> low confidence (FreeSurfer typical < ~0.6)
 LABEL_SLICE_MIN = 0.9      # fraction of brain-containing slices that also contain labels
 THICK_SLICE_MM = 2.0       # slices thicker than this -> low confidence (sub-voxel pial thresholds)
+OBLIQUE_LOW_CONF_DEG = 20.0  # v5.1: slices tilted more than this from axial -> low confidence (provisional)
 EDGE_WIN_MM = 3.0          # search for the SWI edge within +-3 mm of the label boundary, along the normal
 
 
@@ -35,6 +36,7 @@ def read_acq(base, subj):
                     image_type=it, manufacturer=js.get("Manufacturer", ""),
                     field_T=js.get("MagneticFieldStrength"),
                     TE_ms=round(te * 1000, 1) if isinstance(te, (int, float)) else None,
+                    TR_ms=round(js["RepetitionTime"] * 1000, 1) if isinstance(js.get("RepetitionTime"), (int, float)) else None,
                     slice_thickness_mm=js.get("SliceThickness"), acq_dim=js.get("MRAcquisitionType"))
     return {}
 
@@ -112,12 +114,17 @@ def shift_fit(If, brain, normal, vox, sel, rng, iters=6):
 def case_qc(base, subj, swi, I, If, seg, brain, tissue, cortex, pial_sd, normal, rim, hemiL, vox,
             t1_anat, full_bottom):
     rng = np.random.default_rng(0)
-    qc = dict(subject=subj, qc_version="v4.19.3")
+    qc = dict(subject=subj, qc_version="v5.1")
     qc["acquisition"] = read_acq(base, subj)
     qc["voxel_mm"] = [round(v, 3) for v in vox]
     qc["orientation"] = "".join(nib.aff2axcodes(swi.affine))
     si_axis = int(np.argmax(np.abs(swi.affine[2, :3])))
     qc["si_axis"] = si_axis
+    # v5.1: obliquity = angle between the slice normal (array axis si_axis) and the scanner S-I axis. The 2-D ridge
+    # filter, slice counts and merge gap work in array slices; they stay meaningful for modest tilts only.
+    _n = swi.affine[:3, si_axis] / np.linalg.norm(swi.affine[:3, si_axis])
+    qc["obliquity_deg"] = round(float(np.degrees(np.arccos(min(1.0, abs(_n[2]))))), 1)
+    qc["array_to_world_axes"] = qc["orientation"]
     qc["thickest_axis"] = int(np.argmax(vox))
     # detect_css.py runs its 2-D ridge filter, slice counts and merge gap in array axis 2 and treats
     # axis 2 as superior-inferior ("long structure"); a sagittally/coronally stored SWI breaks that
@@ -196,11 +203,13 @@ def case_qc(base, subj, swi, I, If, seg, brain, tissue, cortex, pial_sd, normal,
         else:
             qc["notes"].append(f"registration cost {cost} above {REG_COST_LOW_CONF} - not used, the edge fit was measured "
                                f"(label shift {qc['label_shift_mm']} mm)")
+    if qc["obliquity_deg"] > OBLIQUE_LOW_CONF_DEG:
+        why_low.append(f"oblique slices ({qc['obliquity_deg']} deg from axial)")
     if max(vox) > THICK_SLICE_MM:
         why_low.append(f"thick slices ({max(vox):.1f} mm)")
     qc["status"] = "insufficient_quality" if why_bad else ("low_confidence_review" if why_low else "ok")
     qc["reasons"] = why_bad + why_low
-    qc["thresholds"] = dict(edge_low_conf_mm=EDGE_LOW_CONF_MM, reg_cost_low_conf=REG_COST_LOW_CONF,
+    qc["thresholds"] = dict(oblique_low_conf_deg=OBLIQUE_LOW_CONF_DEG, edge_low_conf_mm=EDGE_LOW_CONF_MM, reg_cost_low_conf=REG_COST_LOW_CONF,
                             label_slice_min=LABEL_SLICE_MIN, thick_slice_mm=THICK_SLICE_MM,
                             note="provisional, not validated; v4.14 reports only")
     os.makedirs(f"{base}/review", exist_ok=True)

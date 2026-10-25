@@ -23,7 +23,7 @@ rank_candidates.py applies the model. Research software, not for clinical use.""
 import sys, os, json, argparse, numpy as np, pandas as pd
 from scipy.optimize import minimize
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from css_common import base as _base, cand_uid, label_class, FP
+from css_common import base as _base, cand_uid, label_class, FP, use_derived, sha256
 
 FEATURES = [
     # darkness and pial position
@@ -68,7 +68,8 @@ def study_table(B, s):
     if not parts: return None
     d = pd.concat(parts, ignore_index=True)
     sp = f"{B}/review/{s}_surface_features.csv"
-    if os.path.exists(sp):
+    # v5.1: surface features must postdate this detection (candidates.nii.gz is written only by detect_css.py)
+    if use_derived(sp, [f"{B}/review/{s}_candidates.nii.gz"], f"{s} surface features"):
         sf = pd.read_csv(sp).drop(columns=["list", "obj_id"], errors="ignore").drop_duplicates(FP)
         d = d.merge(sf, on=FP, how="left", suffixes=("", "_surf"))
     d["cand_uid"] = [cand_uid(s, r) for _, r in d.iterrows()]
@@ -126,6 +127,7 @@ if __name__ == "__main__":
     if (meta.split == "test").any() and a.split == "all":
         print(f"note: {int((meta.split == 'test').sum())} test-split studies are left out (never trained on)")
     lab = load_labels(L, a.source)
+    lab_path = f"{L}/consensus.csv" if a.source == "consensus" else f"{L}/candidate_labels.csv"
     rows = []
     for s in studies.study_id:
         d = study_table(B, s)
@@ -170,6 +172,12 @@ if __name__ == "__main__":
                  per_patient=[{k: (round(v, 3) if isinstance(v, float) and np.isfinite(v) else (None if isinstance(v, float) else v))
                                for k, v in r.items()} for r in per],
                  dropped_features=gone,
+                 # v5.1 provenance: detector builds of the training outputs, label file hash (rank_candidates checks)
+                 detector_builds=sorted({str((json.load(open(f"{B}/review/{s}_manifest.json")).get("detect", {})
+                                              .get("environment", {}) or {}).get("build", "unknown"))
+                                         if os.path.exists(f"{B}/review/{s}_manifest.json") else "unknown"
+                                         for s in T.study_id.unique()}),
+                 label_file=lab_path, label_sha256=sha256(lab_path),
                  note="research software; pooled LOPO AUC over few patients is noisy - read the intervals")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     json.dump(model, open(out, "w"), indent=2)
