@@ -437,6 +437,12 @@ v5.1") but are not ranker features; Stage A only, then stop for the user's real-
   metrics + hash; train_ranker nested LOPO, PR-AUC / Brier / sens@FP, darkness-only + vessel-only baselines,
   review/ranker_model_card.md. Synthetic only: G_all (190 features) 0.83 vs A_swi 0.997 -> more channels cost accuracy
   with few studies. detect_css writes work/ID_pial_sd.nii.gz; outputs otherwise unchanged.
+- v5.2 on real data (user's Mac, RUNBOOK 13a): run_tests + test_shell pass. P006 6/6 known lesions kept with the
+  defaults, CSS_USE_MIMIC=1 and CSS_MIXED_REVIEW=1 (same 59 candidates, ranks 6/10/19/18/44/33, all tier 1); mixed
+  objects 0 (switch untested on a real merge); no phase for P006 -> phase rule untested. P201 mimic on: no evidence,
+  phase sign convention unclear on the vessel map (t 0.2) -> rule switched itself off. P006 patches: 102 objects ->
+  102 patches, 0 skipped, channels swi + labels (no phase / FLAIR on the SWI grid). pandas PerformanceWarnings in
+  the suite are cosmetic.
 
 ## Known issues / decisions
 - SWI-only route (SynthSeg on SWI) gives a coarse pial surface → pial features less reliable.
