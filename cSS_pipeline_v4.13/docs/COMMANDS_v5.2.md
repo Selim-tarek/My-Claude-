@@ -6,8 +6,12 @@ ranker, v5.1.x fates / pieces / features / tiers, v5.2 patches and classifier). 
 names or MRNs; never commit patient data.
 
 ```zsh
-S=~/css_project/scripts; P=P012          # set once per Terminal
+setopt interactivecomments               # FIRST: otherwise zsh treats every '# ...' below as arguments
+echo 'setopt interactivecomments' >> ~/.zshrc   # once, makes it permanent
+S=~/css_project/scripts                  # set once per Terminal
 ```
+Sections 0 and 1 can be pasted as they are. **Section 2 is a template**: set `P` to a real study code and replace
+every `<...>` with a real path before running it, one step at a time - never paste it as a block.
 
 ## 0. Install / update (once per new version)
 
@@ -17,7 +21,7 @@ conda env update -f environment.yml      # first time: conda env create -f envir
 zsh install.sh                           # backs up the old scripts, copies to ~/css_project/scripts
 # open a NEW Terminal
 conda activate css
-bash tests/run_tests.sh | tail -3        # MUST end: ALL TESTS PASSED
+bash tests/run_tests.sh | tail -3        # MUST end with: ALL TESTS PASSED
 bash tests/test_shell.sh | tail -1       # MUST end: SHELL TESTS PASSED
 ```
 
@@ -34,9 +38,10 @@ python $S/detect_css.py P006 -2.5 85 3 > /dev/null; python $S/detect_css.py P201
 ```
 A switch becomes routine only if its line keeps 6/6. Otherwise leave it off and send the printed lines.
 
-## 2. Per patient
+## 2. Per patient (template - edit, then run step by step)
 
 ```zsh
+P=P0XX                                        # the real study code
 # 2.1 split FIRST, before anyone looks at the output (dev = may tune on it; test = frozen pipeline only)
 python $S/study_meta.py $P --split test
 
@@ -81,7 +86,8 @@ python $S/study_meta.py $P --status pos --ref-L 1 --ref-R 2 --motion 0 --reader 
 
 # 2.9 score (from the expert calls; or your own reading with review_css.py)
 python $S/expert_import.py $P expertA --letters "..." --score
-python $S/review_css.py $P                   # default order (score_v4); --by-priority = tier order (v5.1.3)
+python $S/review_css.py $P                   # default order (score_v4)
+python $S/review_css.py $P --by-priority     # or: tier order (v5.1.3)
 python $S/score_css.py $P --explain          # shows which sulci were linked and why
 
 # 2.10 v5.2 patches (research; needs recon-all or T1 labels)
